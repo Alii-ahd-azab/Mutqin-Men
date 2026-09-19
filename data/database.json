@@ -1,0 +1,647 @@
+{
+  "settings": {
+    "daily_thought_updated_by": "علي عزب",
+    "daily_thought": "<b>قال الضحاك ابن مزاحم:</b><div>ما من أحد تعلم القرآن ثم نسيه إلا <b>بذنب </b>يحدثه؛ لأن الله تعالى يقول \" وما أصابكم من مصيبة فبما كسبت أيديكم \" <b>وإن نسيان القرآن من أعظم المصائب.&nbsp;</b></div>",
+    "start_date": "2026-09-18",
+    "paused_at": null,
+    "total_paused_days": 0,
+    "id": "group_main",
+    "current_cycle_number": 1,
+    "daily_thought_updated_at": "2026-09-18T08:12:14.892Z",
+    "review_window": 8,
+    "is_paused": false,
+    "total_quarters": 240
+  },
+  "users": [
+    {
+      "id": "user_1789671961832_9tr6z",
+      "name": "علي عزب",
+      "phone": "01098091029",
+      "role": "admin",
+      "password_hash": "$2b$10$Nrp8p.yhLr6hQCkEDUYIvuY0Cq6B1JWrlCIQQYGXPa7bvXGj.Iudi",
+      "is_active": true,
+      "created_at": "2026-09-17T19:06:01.832Z"
+    },
+    {
+      "id": "user_1789672213963_hfnkv",
+      "name": "عبد الرحمن",
+      "phone": "01100565899",
+      "role": "member",
+      "password_hash": "$2b$10$AmyeaUZgv5atbgxq3ZXWgOGVL5ABqiwFDx4oVJTY/rmiMq/EKS1e6",
+      "is_active": true,
+      "created_at": "2026-09-17T19:10:13.963Z"
+    },
+    {
+      "id": "user_1789672330330_h7n5e",
+      "name": "باسل الفقي",
+      "phone": "01024488448",
+      "role": "member",
+      "password_hash": "$2b$10$zeUMn2tVbqVMs7d.d/9V8O8v3J3LyBF/VirUA0AVLsjru17G5EGou",
+      "is_active": true,
+      "created_at": "2026-09-17T19:12:10.330Z"
+    },
+    {
+      "id": "user_1789673203050_uvtze",
+      "name": "إبراهيم بهي الدين",
+      "phone": "01030004355",
+      "role": "member",
+      "password_hash": "$2b$10$WTQslSALK8fYNMkVUwUy6eiwRf.eS2kV9yVCn0cJvMIQVYsGTCxAC",
+      "is_active": true,
+      "created_at": "2026-09-17T19:26:43.050Z"
+    },
+    {
+      "id": "user_1789674170856_w1qm6",
+      "name": "أحمد علاء",
+      "phone": "01090643854",
+      "role": "member",
+      "password_hash": "$2b$10$wIa0RMgCxNWB4Jj3/2BuluB1D8DyPr5C4v06.TSNxJa3AAHHU.fSm",
+      "is_active": true,
+      "created_at": "2026-09-17T19:42:50.856Z"
+    },
+    {
+      "id": "user_1789674295333_6p8oi",
+      "name": "إبراهيم محمد",
+      "phone": "01095939221",
+      "role": "member",
+      "password_hash": "$2b$10$WmhwIMbehhX6SAb.CZNzYO28uxqd7oo2teeLIZtjk27iYF58LMlVS",
+      "is_active": true,
+      "created_at": "2026-09-17T19:44:55.333Z"
+    },
+    {
+      "id": "user_1789674419059_q0eog",
+      "name": "محمود فهمي",
+      "phone": "01098394494",
+      "role": "member",
+      "password_hash": "$2b$10$KRX3Tlyq7OAbIM8DZ2Dxk.n1c1VpvXNVdixMcWEvBdZ7DrD8sMROG",
+      "is_active": true,
+      "created_at": "2026-09-17T19:46:59.059Z"
+    },
+    {
+      "id": "user_1789674485858_vcqek",
+      "name": "عبد الرحمن طارق",
+      "phone": "01142511410",
+      "role": "member",
+      "password_hash": "$2b$10$OWBhsRctCoi/1Wv4bR6KL.OyiLV6bXSQ5tJvBt0NFT12sP4Pud7Wq",
+      "is_active": true,
+      "created_at": "2026-09-17T19:48:05.858Z"
+    },
+    {
+      "id": "user_1789674551146_guegt",
+      "name": "عبد الله عجور",
+      "phone": "01143871155",
+      "role": "member",
+      "password_hash": "$2b$10$d1CorRVcZ.Pna.mY1V8LDeG8b1EXLGnRkbN95wVsf0DrA1Nz2HReS",
+      "is_active": true,
+      "created_at": "2026-09-17T19:49:11.146Z"
+    },
+    {
+      "id": "user_1789674599140_g47f9",
+      "name": "محمد عيسى",
+      "phone": "01013541906",
+      "role": "member",
+      "password_hash": "$2b$10$b8optnqpSVlZRgqG2XZFXO6U9msj71kTUEQSymKY4czKrv1os.fsu",
+      "is_active": true,
+      "created_at": "2026-09-17T19:49:59.140Z"
+    },
+    {
+      "id": "user_1789679125606_qw9bw",
+      "name": "محمد عبدالوهاب حمادة",
+      "phone": "01559111451",
+      "role": "member",
+      "password_hash": "$2b$10$6TzP97wkPTbk2mOq1EUnyudief85l910aca2KOhohwh9dyttCZsyy",
+      "is_active": true,
+      "created_at": "2026-09-17T21:05:25.606Z"
+    },
+    {
+      "id": "user_1789679941074_djhn3",
+      "name": "احمد عاشور",
+      "phone": "01555330389",
+      "role": "member",
+      "password_hash": "$2b$10$ssdt5ukfDQPWSWRHvsMkR.EyU1HEIMrmHbUC2.0ChGCQ2wKBsmdMK",
+      "is_active": true,
+      "created_at": "2026-09-17T21:19:01.074Z"
+    },
+    {
+      "id": "user_1789680138633_zbp72",
+      "name": "حسين",
+      "phone": "01507692764",
+      "role": "member",
+      "password_hash": "$2b$10$C/59rg..KczcbIFX1YADIOb5kRs2XIeWGgoucs08.I0u/BhEAk4oS",
+      "is_active": true,
+      "created_at": "2026-09-17T21:22:18.633Z"
+    },
+    {
+      "id": "user_1789680212235_zqoxh",
+      "name": "خالد محمد",
+      "phone": "01020138178",
+      "role": "member",
+      "password_hash": "$2b$10$cnHA3nOKy.yMzL81TsQcXOH1CzncF02yBTF8BRYkmGo7cOKAZvN/W",
+      "is_active": true,
+      "created_at": "2026-09-17T21:23:32.235Z"
+    },
+    {
+      "id": "user_1789680304583_yj0b4",
+      "name": "زياد ياسر",
+      "phone": "01225267868",
+      "role": "member",
+      "password_hash": "$2b$10$rZdoOr5E6zhV4gMBT47IbOmCJyA2FqvQYaVMkO1L0vbIB/9FxEqp2",
+      "is_active": true,
+      "created_at": "2026-09-17T21:25:04.583Z"
+    },
+    {
+      "id": "user_1789680396989_0eydo",
+      "name": "عبدالله مصطفى",
+      "phone": "01020692878",
+      "role": "member",
+      "password_hash": "$2b$10$Qovr5Tu0xOGqxF4.zU4qI.iL3ULmPOm4Ar74JA2YHuOhmXM7hRVI.",
+      "is_active": true,
+      "created_at": "2026-09-17T21:26:36.989Z"
+    },
+    {
+      "id": "user_1789680991267_2vmr9",
+      "name": "معاذ",
+      "phone": "01125686198",
+      "role": "member",
+      "password_hash": "$2b$10$IqGITWV7JtWH1g3yWTcteOVW9ZhUPjLX85wHOz8hG4ZFwjHfwwBAy",
+      "is_active": true,
+      "created_at": "2026-09-17T21:36:31.267Z"
+    },
+    {
+      "id": "user_1789681037800_o1tfb",
+      "name": "يوسف أسامة",
+      "phone": "01123555189",
+      "role": "member",
+      "password_hash": "$2b$10$iSoLxoYOQnFLjEs9x3ZHt.bXrpQX3C86R.Yii990M.QUF6/htgGue",
+      "is_active": true,
+      "created_at": "2026-09-17T21:37:17.800Z"
+    },
+    {
+      "id": "user_1789681474665_6ytyi",
+      "name": "علي عزب",
+      "phone": "01067220473",
+      "role": "member",
+      "password_hash": "$2b$10$7aGiSxuI9YEsRSxArIdScuAIEZRpQX5usHXJ9WztSOcaXRtzJJPV.",
+      "is_active": true,
+      "created_at": "2026-09-17T21:44:34.665Z"
+    },
+    {
+      "id": "user_1789681559173_e66ig",
+      "name": "احمد عادل",
+      "phone": "01505772576",
+      "role": "member",
+      "password_hash": "$2b$10$BAoTwYwtEENaaI6DpnOcUu76yhs7iVt4BuK1xLbuC11f.o.xIDQeu",
+      "is_active": true,
+      "created_at": "2026-09-17T21:45:59.173Z"
+    },
+    {
+      "id": "user_1789681716062_e6lwt",
+      "name": "محمد المصري",
+      "phone": "01009282800",
+      "role": "member",
+      "password_hash": "$2b$10$NYtuFmvAARAxeXPnrVtouuPtyAQusxGjWUN0/BTbr/5fQg2so8eoW",
+      "is_active": true,
+      "created_at": "2026-09-17T21:48:36.063Z"
+    },
+    {
+      "id": "user_1789681935216_wdjla",
+      "name": "عمرو ناجح",
+      "phone": "01001966837",
+      "role": "member",
+      "password_hash": "$2b$10$nIa7rUaS5UNV1iiZYfpvVubnEignLzb2uUnDOHcSQEthyTH.Aiba2",
+      "is_active": true,
+      "created_at": "2026-09-17T21:52:15.216Z"
+    },
+    {
+      "id": "user_1789703819122_iwq98",
+      "name": "احمد عمرو",
+      "phone": "01286088224",
+      "role": "member",
+      "password_hash": "$2b$10$JY1otcHivGi7O/.GcYBKn.ceHqERSb.8LpuybjY3VkpA/JbmiSRqC",
+      "is_active": true,
+      "created_at": "2026-09-18T03:56:59.122Z"
+    },
+    {
+      "id": "user_1789703863375_n3bqn",
+      "name": "عاصم",
+      "phone": "01062833499",
+      "role": "member",
+      "password_hash": "$2b$10$OmP03M2FVefNvZr/2NlAz.w.yY55Kn8mDSN72.doZ3aDY5TqchvE.",
+      "is_active": true,
+      "created_at": "2026-09-18T03:57:43.375Z"
+    },
+    {
+      "id": "user_1789716831736_w9gl4",
+      "name": "خالد محمد",
+      "phone": "0501899482",
+      "role": "admin",
+      "password_hash": "$2b$10$6UI.TT013TXzq7KqAqdzc.VGzsPMF/0oudyykNuaoE1vr/r8pei7m",
+      "is_active": true,
+      "created_at": "2026-09-18T07:33:51.736Z"
+    },
+    {
+      "id": "user_1789744974317_0xljb",
+      "name": "أدمن",
+      "phone": "00000000000",
+      "role": "admin",
+      "password_hash": "$2b$10$y6mYiSO.4XDJ/02hLvLph.1k.14BV6he6j45PPbKGrs9flBLhxDUW",
+      "is_active": true,
+      "created_at": "2026-09-18T15:22:54.317Z"
+    },
+    {
+      "id": "user_1789773795158_uc9p0",
+      "name": "محمد قاسم",
+      "phone": "01111126403",
+      "role": "member",
+      "password_hash": "$2b$10$iP29Qevut3uv/m/9FyGUxOwO67PeIi1Pg1SRtQLUtwTkFO3ZeLXvq",
+      "is_active": true,
+      "created_at": "2026-09-18T23:23:15.158Z"
+    },
+    {
+      "id": "user_admin_2",
+      "name": "إبراهيم بهي الدين",
+      "phone": "01119162336",
+      "role": "admin",
+      "password_hash": "$2b$10$4VPk9dLJdd72s5BdWChx0e7d4fmV0MwGDeUJln6TN9Ev2XuFD8CD2",
+      "is_active": true,
+      "created_at": "2026-09-17T12:00:00.000Z"
+    }
+  ],
+  "restDays": [],
+  "recitationLogs": [
+    {
+      "quarter_number": 1,
+      "reciter_name": "عبدالله مصطفى",
+      "cycle_number": 1,
+      "listener_name": "إبراهيم بهي الدين",
+      "date": "2026-09-18",
+      "reciter_id": "user_1789680396989_0eydo",
+      "member_id": "user_1789680396989_0eydo",
+      "created_at": "2026-09-18T03:38:34.669Z",
+      "id": "rec_1789702714669_8ewiw",
+      "member_name": "عبدالله مصطفى",
+      "listener_id": "user_1789673203050_uvtze"
+    },
+    {
+      "listener_name": "عبدالله مصطفى",
+      "cycle_number": 1,
+      "quarter_number": 1,
+      "reciter_name": "علي عزب",
+      "reciter_id": "user_1789681474665_6ytyi",
+      "created_at": "2026-09-18T05:00:42.015Z",
+      "listener_id": "user_1789680396989_0eydo",
+      "date": "2026-09-18",
+      "id": "rec_1789707642015_cnc01",
+      "member_id": "user_1789681474665_6ytyi",
+      "member_name": "علي عزب"
+    },
+    {
+      "reciter_name": "محمد عبدالوهاب حمادة",
+      "listener_id": "user_1789681474665_6ytyi",
+      "id": "rec_1789717990690_kh37a",
+      "listener_name": "علي عزب",
+      "cycle_number": 1,
+      "member_name": "محمد عبدالوهاب حمادة",
+      "quarter_number": 1,
+      "reciter_id": "user_1789679125606_qw9bw",
+      "date": "2026-09-18",
+      "created_at": "2026-09-18T07:53:10.690Z",
+      "member_id": "user_1789679125606_qw9bw"
+    },
+    {
+      "reciter_id": "user_1789673203050_uvtze",
+      "listener_id": "user_1789703819122_iwq98",
+      "created_at": "2026-09-18T13:33:12.367Z",
+      "cycle_number": 1,
+      "member_name": "إبراهيم بهي الدين",
+      "reciter_name": "إبراهيم بهي الدين",
+      "notes": "إتمام المد المنفصل",
+      "id": "rec_1789738392367_pak4s",
+      "date": "2026-09-18",
+      "listener_name": "احمد عمرو",
+      "quarter_number": 1,
+      "member_id": "user_1789673203050_uvtze"
+    },
+    {
+      "id": "rec_1789743949289_0lglz",
+      "created_at": "2026-09-18T15:05:49.289Z",
+      "member_name": "احمد عمرو",
+      "reciter_name": "احمد عمرو",
+      "date": "2026-09-18",
+      "reciter_id": "user_1789703819122_iwq98",
+      "listener_id": "user_1789681935216_wdjla",
+      "cycle_number": 1,
+      "listener_name": "عمرو ناجح",
+      "member_id": "user_1789703819122_iwq98",
+      "quarter_number": 1
+    },
+    {
+      "listener_id": "user_1789703819122_iwq98",
+      "quarter_number": 1,
+      "id": "rec_1789749453172_13g1g",
+      "reciter_id": "user_1789680212235_zqoxh",
+      "member_name": "خالد محمد",
+      "member_id": "user_1789680212235_zqoxh",
+      "created_at": "2026-09-18T16:37:33.173Z",
+      "cycle_number": 1,
+      "reciter_name": "خالد محمد",
+      "date": "2026-09-18",
+      "listener_name": "احمد عمرو"
+    },
+    {
+      "listener_id": "user_1789680212235_zqoxh",
+      "listener_name": "خالد محمد",
+      "reciter_id": "user_1789674419059_q0eog",
+      "quarter_number": 1,
+      "created_at": "2026-09-18T18:14:22.586Z",
+      "member_name": "محمود فهمي",
+      "reciter_name": "محمود فهمي",
+      "member_id": "user_1789674419059_q0eog",
+      "date": "2026-09-18",
+      "cycle_number": 1,
+      "id": "rec_1789755262586_xc69m"
+    },
+    {
+      "listener_name": "محمد المصري",
+      "reciter_name": "احمد عادل",
+      "cycle_number": 1,
+      "id": "rec_1789755638078_nudnl",
+      "reciter_id": "user_1789681559173_e66ig",
+      "created_at": "2026-09-18T18:20:38.078Z",
+      "member_id": "user_1789681559173_e66ig",
+      "member_name": "احمد عادل",
+      "date": "2026-09-18",
+      "listener_id": "user_1789681716062_e6lwt",
+      "quarter_number": 1
+    },
+    {
+      "member_id": "user_1789681716062_e6lwt",
+      "quarter_number": 1,
+      "listener_id": "user_1789681559173_e66ig",
+      "date": "2026-09-18",
+      "created_at": "2026-09-18T18:47:13.570Z",
+      "reciter_id": "user_1789681716062_e6lwt",
+      "member_name": "محمد المصري",
+      "reciter_name": "محمد المصري",
+      "listener_name": "احمد عادل",
+      "id": "rec_1789757233570_tawya",
+      "cycle_number": 1
+    },
+    {
+      "listener_name": "عمرو ناجح",
+      "member_id": "user_1789674295333_6p8oi",
+      "created_at": "2026-09-18T19:01:15.589Z",
+      "quarter_number": 1,
+      "reciter_id": "user_1789674295333_6p8oi",
+      "id": "rec_1789758075589_z5l3q",
+      "listener_id": "user_1789681935216_wdjla",
+      "reciter_name": "إبراهيم محمد",
+      "cycle_number": 1,
+      "date": "2026-09-18",
+      "member_name": "إبراهيم محمد"
+    },
+    {
+      "reciter_name": "عمرو ناجح",
+      "quarter_number": 1,
+      "id": "rec_1789759481427_hxt8l",
+      "cycle_number": 1,
+      "listener_id": "user_1789674295333_6p8oi",
+      "created_at": "2026-09-18T19:24:41.427Z",
+      "listener_name": "إبراهيم محمد",
+      "member_id": "user_1789681935216_wdjla",
+      "date": "2026-09-18",
+      "member_name": "عمرو ناجح",
+      "reciter_id": "user_1789681935216_wdjla"
+    },
+    {
+      "id": "rec_1789764935631_nimek",
+      "cycle_number": 1,
+      "member_id": "user_1789674599140_g47f9",
+      "reciter_name": "محمد عيسى",
+      "date": "2026-09-18",
+      "quarter_number": 1,
+      "listener_name": "عبد الله عجور",
+      "listener_id": "user_1789674551146_guegt",
+      "member_name": "محمد عيسى",
+      "created_at": "2026-09-18T20:55:35.631Z",
+      "reciter_id": "user_1789674599140_g47f9"
+    },
+    {
+      "date": "2026-09-19",
+      "member_id": "user_1789672330330_h7n5e",
+      "id": "rec_1789774592979_hdpvp",
+      "listener_id": "user_1789681474665_6ytyi",
+      "reciter_name": "باسل الفقي",
+      "listener_name": "علي عزب",
+      "quarter_number": 1,
+      "reciter_id": "user_1789672330330_h7n5e",
+      "cycle_number": 1,
+      "member_name": "باسل الفقي",
+      "created_at": "2026-09-18T23:36:32.979Z"
+    },
+    {
+      "cycle_number": 1,
+      "date": "2026-09-19",
+      "member_name": "عبدالله مصطفى",
+      "quarter_number": 2,
+      "listener_id": "user_1789703819122_iwq98",
+      "reciter_id": "user_1789680396989_0eydo",
+      "member_id": "user_1789680396989_0eydo",
+      "reciter_name": "عبدالله مصطفى",
+      "created_at": "2026-09-19T04:00:53.497Z",
+      "listener_name": "احمد عمرو",
+      "id": "rec_1789790453497_1izuv"
+    },
+    {
+      "reciter_name": "احمد عمرو",
+      "notes": "نسيت اية : و امنوا بما انزلت مصدقا لما معكم",
+      "created_at": "2026-09-19T04:03:12.639Z",
+      "reciter_id": "user_1789703819122_iwq98",
+      "cycle_number": 1,
+      "listener_name": "عبدالله مصطفى",
+      "listener_id": "user_1789680396989_0eydo",
+      "quarter_number": 2,
+      "member_id": "user_1789703819122_iwq98",
+      "date": "2026-09-19",
+      "id": "rec_1789790592639_1dz4z",
+      "member_name": "احمد عمرو"
+    },
+    {
+      "reciter_name": "علي عزب",
+      "listener_name": "عبدالله مصطفى",
+      "date": "2026-09-19",
+      "reciter_id": "user_1789681474665_6ytyi",
+      "cycle_number": 1,
+      "id": "rec_1789799102840_qgyvu",
+      "created_at": "2026-09-19T06:25:02.840Z",
+      "member_id": "user_1789681474665_6ytyi",
+      "listener_id": "user_1789680396989_0eydo",
+      "member_name": "علي عزب",
+      "quarter_number": 2
+    },
+    {
+      "reciter_name": "إبراهيم بهي الدين",
+      "quarter_number": 2,
+      "listener_name": "عبدالله مصطفى",
+      "date": "2026-09-19",
+      "created_at": "2026-09-19T08:36:43.595Z",
+      "cycle_number": 1,
+      "reciter_id": "user_1789673203050_uvtze",
+      "listener_id": "user_1789680396989_0eydo",
+      "member_id": "user_1789673203050_uvtze",
+      "id": "rec_1789807003595_i9ln6",
+      "member_name": "إبراهيم بهي الدين"
+    }
+  ],
+  "revisionLogs": [
+    {
+      "review_end_quarter": 1,
+      "created_at": "2026-09-18T03:38:51.426Z",
+      "date": "2026-09-18",
+      "cycle_number": 1,
+      "review_start_quarter": 1,
+      "member_name": "عبدالله مصطفى",
+      "member_id": "user_1789680396989_0eydo",
+      "id": "rev_1789702731426_qigz9"
+    },
+    {
+      "review_end_quarter": 1,
+      "created_at": "2026-09-18T04:02:09.575Z",
+      "cycle_number": 1,
+      "id": "rev_1789704129575_44zcc",
+      "member_name": "إبراهيم بهي الدين",
+      "date": "2026-09-18",
+      "review_start_quarter": 1,
+      "member_id": "user_1789673203050_uvtze"
+    },
+    {
+      "review_start_quarter": 1,
+      "date": "2026-09-18",
+      "created_at": "2026-09-18T05:00:56.378Z",
+      "cycle_number": 1,
+      "id": "rev_1789707656378_zf1w5",
+      "member_id": "user_1789681474665_6ytyi",
+      "member_name": "علي عزب",
+      "review_end_quarter": 1
+    },
+    {
+      "date": "2026-09-18",
+      "review_end_quarter": 1,
+      "cycle_number": 1,
+      "id": "rev_1789718005709_ffcf6",
+      "member_name": "محمد عبدالوهاب حمادة",
+      "review_start_quarter": 1,
+      "created_at": "2026-09-18T07:53:25.709Z",
+      "member_id": "user_1789679125606_qw9bw"
+    },
+    {
+      "date": "2026-09-18",
+      "cycle_number": 1,
+      "created_at": "2026-09-18T13:20:44.890Z",
+      "member_id": "user_1789703819122_iwq98",
+      "id": "rev_1789737644890_4r2h4",
+      "member_name": "احمد عمرو",
+      "review_start_quarter": 1,
+      "review_end_quarter": 1
+    },
+    {
+      "id": "rev_1789749466956_07ds8",
+      "review_start_quarter": 1,
+      "created_at": "2026-09-18T16:37:46.956Z",
+      "member_name": "خالد محمد",
+      "member_id": "user_1789680212235_zqoxh",
+      "date": "2026-09-18",
+      "review_end_quarter": 1,
+      "cycle_number": 1
+    },
+    {
+      "id": "rev_1789750026127_5e0iv",
+      "cycle_number": 1,
+      "review_start_quarter": 1,
+      "member_id": "user_1789681559173_e66ig",
+      "created_at": "2026-09-18T16:47:06.127Z",
+      "review_end_quarter": 1,
+      "date": "2026-09-18",
+      "member_name": "احمد عادل"
+    },
+    {
+      "review_end_quarter": 1,
+      "review_start_quarter": 1,
+      "id": "rev_1789754924515_ry79o",
+      "created_at": "2026-09-18T18:08:44.515Z",
+      "cycle_number": 1,
+      "member_id": "user_1789674170856_w1qm6",
+      "member_name": "أحمد علاء",
+      "date": "2026-09-18"
+    },
+    {
+      "id": "rev_1789759496991_q164t",
+      "created_at": "2026-09-18T19:24:56.991Z",
+      "cycle_number": 1,
+      "review_start_quarter": 1,
+      "member_id": "user_1789681935216_wdjla",
+      "member_name": "عمرو ناجح",
+      "review_end_quarter": 1,
+      "date": "2026-09-18"
+    },
+    {
+      "member_name": "محمد عيسى",
+      "created_at": "2026-09-18T20:55:48.086Z",
+      "cycle_number": 1,
+      "id": "rev_1789764948086_kwqt1",
+      "date": "2026-09-18",
+      "review_end_quarter": 1,
+      "review_start_quarter": 1,
+      "member_id": "user_1789674599140_g47f9"
+    },
+    {
+      "member_name": "باسل الفقي",
+      "created_at": "2026-09-18T23:36:42.586Z",
+      "id": "rev_1789774602586_94ove",
+      "date": "2026-09-19",
+      "cycle_number": 1,
+      "member_id": "user_1789672330330_h7n5e",
+      "review_end_quarter": 2,
+      "review_start_quarter": 1
+    },
+    {
+      "review_end_quarter": 2,
+      "date": "2026-09-19",
+      "cycle_number": 1,
+      "member_name": "عبدالله مصطفى",
+      "created_at": "2026-09-19T04:00:59.302Z",
+      "member_id": "user_1789680396989_0eydo",
+      "review_start_quarter": 1,
+      "id": "rev_1789790459302_egq42"
+    },
+    {
+      "id": "rev_1789799110338_h55rn",
+      "created_at": "2026-09-19T06:25:10.338Z",
+      "review_start_quarter": 1,
+      "member_name": "علي عزب",
+      "cycle_number": 1,
+      "member_id": "user_1789681474665_6ytyi",
+      "date": "2026-09-19",
+      "review_end_quarter": 2
+    },
+    {
+      "member_id": "user_1789673203050_uvtze",
+      "review_start_quarter": 1,
+      "created_at": "2026-09-19T08:37:03.003Z",
+      "review_end_quarter": 2,
+      "cycle_number": 1,
+      "id": "rev_1789807023003_z795i",
+      "member_name": "إبراهيم بهي الدين",
+      "date": "2026-09-19"
+    },
+    {
+      "member_id": "user_1789674295333_6p8oi",
+      "created_at": "2026-09-19T10:18:02.381Z",
+      "review_end_quarter": 2,
+      "id": "rev_1789813082381_kqslp",
+      "member_name": "إبراهيم محمد",
+      "cycle_number": 1,
+      "review_start_quarter": 1,
+      "date": "2026-09-19"
+    }
+  ]
+}
