@@ -5,7 +5,7 @@ import fs from 'fs';
 import bcrypt from 'bcryptjs';
 import { createServer as createViteServer } from 'vite';
 import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo } from './src/types';
-import { calculateCycleInfo, calculateMemberRequiredQuarter, formatDate, getCalendarDaysElapsed } from './src/lib/calculations';
+import { calculateCycleInfo, calculateMemberRequiredQuarter, formatDate, getCalendarDaysElapsed, getActiveCycleDates } from './src/lib/calculations';
 import * as firestoreService from './src/server/firestoreService';
 import firebaseConfig from './firebase-applet-config.json';
 
@@ -520,16 +520,6 @@ app.post('/api/recitations', async (req: Request, res: Response) => {
     });
   }
 
-  // Rule: Member must confirm daily revision before recording their own recitation
-  const hasReviewedToday = db.revisionLogs.some(
-    (r) => r.member_id === currentUser.id && r.date === logDate
-  );
-  if (!hasReviewedToday) {
-    return res.status(400).json({
-      error: 'يجب تأكيد مراجعة اليوم أولاً قبل تسجيل التسميع. يرجى تأكيد إتمام المراجعة اليومية ثم العودة لتسجيل التسميع.',
-    });
-  }
-
   const memberQuarterStatus = calculateMemberRequiredQuarter(
     currentUser.id,
     currentCycleInfo.quarter_of_day,
@@ -655,13 +645,44 @@ app.post('/api/revisions', async (req: Request, res: Response) => {
   }
 
   const { notes, date } = req.body;
-  const logDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : getTodayDate(req);
+  const todayDate = getTodayDate(req);
+  const logDate = date && /^\d{4}-\d{2}-\d{2}$/.test(date) ? date : todayDate;
+
+  // Validate date: must be within valid active cycle dates from start date up to today
+  const startDate = db.settings.start_date;
+  if (!startDate || logDate < startDate) {
+    return res.status(400).json({
+      error: 'التاريخ المحدد غير صالح: لا يمكن تسجيل مراجعة لتاريخ يسبق بداية برنامج المقرأة.',
+    });
+  }
+
+  if (logDate > todayDate) {
+    return res.status(400).json({
+      error: 'التاريخ المحدد غير صالح: لا يمكن تسجيل مراجعة لتاريخ مستقبلي بعد اليوم الحالي.',
+    });
+  }
+
+  // Check if date was a rest day
+  const isRestDay = db.restDays.some((rd) => rd.date === logDate);
+  if (isRestDay) {
+    return res.status(400).json({
+      error: 'التاريخ المحدد كان يوم راحة/استدراك للمجموعة، ولا يتطلب تسجيل مراجعة رسمية.',
+    });
+  }
+
+  // Check if active cycle date (handles paused days as well)
+  const activeDates = getActiveCycleDates(startDate, todayDate, db.restDays, db.settings);
+  if (!activeDates.includes(logDate)) {
+    return res.status(400).json({
+      error: 'التاريخ المحدد ليس يومًا نشطًا في دورة المقرأة الحالية.',
+    });
+  }
 
   const cycleInfo = calculateCycleInfo(db.settings, db.restDays, logDate);
 
   if (!cycleInfo.has_started) {
     return res.status(400).json({
-      error: 'برنامج المقرأة لم يبدأ بعد! سيبدأ البرنامج بإذن الله يوم الجمعة 18 سبتمبر 2026 الساعة 12:00 صباحًا، وسيتاح تأكيد المراجعة حينها.',
+      error: 'برنامج المقرأة لم يبدأ بعد في التاريخ المحدد.',
     });
   }
 
@@ -703,7 +724,7 @@ app.post('/api/revisions', async (req: Request, res: Response) => {
 
   res.status(201).json({
     revision: newRevision,
-    message: `تم تسجيل إتمام مراجعة اليوم (من الربع ${cycleInfo.review_start} إلى ${cycleInfo.review_end}) بنجاح`,
+    message: `تم تسجيل إتمام مراجعة ${logDate === todayDate ? 'اليوم' : `يوم ${logDate}`} (من الربع ${cycleInfo.review_start} إلى ${cycleInfo.review_end}) بنجاح`,
   });
 });
 

@@ -1,4 +1,4 @@
-import { CycleInfo, GroupSettings, RestDay, RevisionLog } from '../types';
+import { CycleInfo, GroupSettings, RestDay, RevisionLog, RecitationLog, User } from '../types';
 
 /**
  * Format a Date object to YYYY-MM-DD string with timezone support.
@@ -472,3 +472,69 @@ export function getHijriDate(dateStr?: string): string {
     return '';
   }
 }
+
+export interface ListenerStatsItem {
+  user: User;
+  timesListened: number;
+}
+
+/**
+ * Calculate the listening peer leaderboard for active members over an optional date range.
+ * If startDate and endDate are omitted, calculates all-time listening since course start.
+ */
+export function calculateListenersLeaderboard(
+  activeMembers: User[],
+  recitations: RecitationLog[],
+  startDate?: string,
+  endDate?: string
+): ListenerStatsItem[] {
+  const filteredRecitations = recitations.filter((r) => {
+    if (!r.listener_id) return false;
+    const reciterId = r.member_id || r.reciter_id;
+    if (reciterId === r.listener_id) return false;
+    if (startDate && r.date < startDate) return false;
+    if (endDate && r.date > endDate) return false;
+    return true;
+  });
+
+  const countsMap = new Map<string, number>();
+  for (const r of filteredRecitations) {
+    if (r.listener_id) {
+      countsMap.set(r.listener_id, (countsMap.get(r.listener_id) || 0) + 1);
+    }
+  }
+
+  const list: ListenerStatsItem[] = activeMembers.map((m) => ({
+    user: m,
+    timesListened: countsMap.get(m.id) || 0,
+  }));
+
+  list.sort((a, b) => {
+    if (b.timesListened !== a.timesListened) {
+      return b.timesListened - a.timesListened;
+    }
+    return a.user.name.localeCompare(b.user.name, 'ar');
+  });
+
+  return list;
+}
+
+/**
+ * Calculate total listening count for a specific user over an optional date range.
+ */
+export function calculateUserListeningCount(
+  userId: string,
+  recitations: RecitationLog[],
+  startDate?: string,
+  endDate?: string
+): number {
+  return recitations.filter((r) => {
+    if (r.listener_id !== userId) return false;
+    const reciterId = r.member_id || r.reciter_id;
+    if (reciterId === userId) return false;
+    if (startDate && r.date < startDate) return false;
+    if (endDate && r.date > endDate) return false;
+    return true;
+  }).length;
+}
+

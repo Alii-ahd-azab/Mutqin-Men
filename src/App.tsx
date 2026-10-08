@@ -68,7 +68,7 @@ const MainApp: React.FC = () => {
     await loadAppData();
   };
 
-  const handleRecordRevision = async (payload: { notes?: string }) => {
+  const handleRecordRevision = async (payload: { notes?: string; date?: string }) => {
     await api.recordRevision(payload);
     await loadAppData();
   };

@@ -17,7 +17,6 @@ interface RecitationModalProps {
   cycleInfo: CycleInfo;
   recitations: RecitationLog[];
   loading: boolean;
-  hasReviewedToday?: boolean;
 }
 
 export const RecitationModal: React.FC<RecitationModalProps> = ({
@@ -29,7 +28,6 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
   cycleInfo,
   recitations,
   loading,
-  hasReviewedToday = true,
 }) => {
   const [listenerId, setListenerId] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
@@ -60,11 +58,6 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg('');
-
-    if (!hasReviewedToday) {
-      setErrorMsg('يجب تأكيد مراجعة اليوم أولاً قبل تسجيل التسميع. يرجى إتمام المراجعة اليومية أولاً.');
-      return;
-    }
 
     if (!listenerId) {
       setErrorMsg('يرجى اختيار الزميل المستمع من أعضاء المقرأة (لا يمكن التسميع على شخص من الخارج)');
@@ -249,10 +242,10 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
             <button
               id="submit-recitation-btn"
               type="submit"
-              disabled={loading || !hasReviewedToday}
+              disabled={loading}
               className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-emerald-700 hover:bg-emerald-800 shadow-xs transition disabled:opacity-50"
             >
-              {loading ? 'جاري التسجيل...' : !hasReviewedToday ? 'يلزم تأكيد المراجعة أولاً' : 'تأكيد إتمام التسميع'}
+              {loading ? 'جاري التسجيل...' : 'تأكيد إتمام التسميع'}
             </button>
           </div>
         </form>
@@ -264,9 +257,15 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
 interface RevisionModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onSubmit: (payload: { notes?: string }) => Promise<void>;
+  onSubmit: (payload: { notes?: string; date?: string }) => Promise<void>;
   cycleInfo: CycleInfo;
   loading: boolean;
+  targetDate?: string;
+  targetDateLabel?: string;
+  isMissedDay?: boolean;
+  reviewStart?: number;
+  reviewEnd?: number;
+  reviewCount?: number;
 }
 
 export const RevisionModal: React.FC<RevisionModalProps> = ({
@@ -275,6 +274,12 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
   onSubmit,
   cycleInfo,
   loading,
+  targetDate,
+  targetDateLabel,
+  isMissedDay = false,
+  reviewStart,
+  reviewEnd,
+  reviewCount,
 }) => {
   const [notes, setNotes] = useState<string>('');
   const [confirmed, setConfirmed] = useState<boolean>(true);
@@ -288,14 +293,21 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
 
   if (!isOpen) return null;
 
-  const startInfo = getQuarterInfo(cycleInfo.review_start);
-  const endInfo = getQuarterInfo(cycleInfo.review_end);
-  const revisionBounds = getRangeBounds(cycleInfo.review_start, cycleInfo.review_end);
+  const actualStart = reviewStart ?? cycleInfo.review_start;
+  const actualEnd = reviewEnd ?? cycleInfo.review_end;
+  const actualCount = reviewCount ?? (actualEnd - actualStart + 1);
+
+  const startInfo = getQuarterInfo(actualStart);
+  const endInfo = getQuarterInfo(actualEnd);
+  const revisionBounds = getRangeBounds(actualStart, actualEnd);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!confirmed) return;
-    const payload: { notes?: string } = notes.trim() ? { notes: notes.trim() } : {};
+    const payload: { notes?: string; date?: string } = {
+      ...(notes.trim() ? { notes: notes.trim() } : {}),
+      ...(targetDate ? { date: targetDate } : {}),
+    };
     await onSubmit(payload);
     onClose();
   };
@@ -307,10 +319,10 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
           <div>
             <h2 className="text-lg font-bold text-stone-900 flex items-center gap-2">
               <CheckCircle className="w-5 h-5 text-emerald-700" />
-              تأكيد المراجعة الفردية لليوم
+              {isMissedDay ? `تأكيد مراجعة متأخرة (${targetDateLabel || targetDate})` : 'تأكيد المراجعة الفردية لليوم'}
             </h2>
             <p className="text-xs text-stone-500">
-              تسجيل إتمام ورد المراجعة اليومي لنفسك
+              {isMissedDay ? `تسجيل إتمام ورد المراجعة الفائت ليوم ${targetDateLabel || targetDate}` : 'تسجيل إتمام ورد المراجعة اليومي لنفسك'}
             </p>
           </div>
           <button
@@ -324,17 +336,17 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
         <form onSubmit={handleSubmit} className="p-6 space-y-4 text-sm">
           <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between text-xs text-emerald-900">
-              <span>الكمية المطلوبة لمراجعة اليوم:</span>
+              <span>{isMissedDay ? 'الكمية المطلوبة لمراجعة هذا اليوم:' : 'الكمية المطلوبة لمراجعة اليوم:'}</span>
               <span className="font-bold text-emerald-950">
-                {cycleInfo.review_count} {cycleInfo.review_count === 1 ? 'ربع واحد' : 'أرباع'}
+                {actualCount} {actualCount === 1 ? 'ربع واحد' : 'أرباع'}
               </span>
             </div>
             <div className="text-center py-2 bg-white rounded-lg border border-emerald-200/70">
               <span className="text-xs text-stone-500">من</span>{' '}
-              <strong className="text-emerald-900 font-bold">الربع {cycleInfo.review_start}</strong>{' '}
+              <strong className="text-emerald-900 font-bold">الربع {actualStart}</strong>{' '}
               <span className="text-stone-400">({startInfo.surahName})</span>{' '}
               <span className="text-xs text-stone-500">إلى</span>{' '}
-              <strong className="text-emerald-900 font-bold">الربع {cycleInfo.review_end}</strong>{' '}
+              <strong className="text-emerald-900 font-bold">الربع {actualEnd}</strong>{' '}
               <span className="text-stone-400">({endInfo.surahName})</span>
             </div>
 
@@ -400,7 +412,7 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
               disabled={!confirmed || loading}
               className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-emerald-700 hover:bg-emerald-800 shadow-xs transition disabled:opacity-50"
             >
-              {loading ? 'جاري الحفظ...' : 'تأكيد إتمام المراجعة'}
+              {loading ? 'جاري الحفظ...' : isMissedDay ? 'تأكيد إتمام المراجعة المتأخرة' : 'تأكيد إتمام المراجعة'}
             </button>
           </div>
         </form>

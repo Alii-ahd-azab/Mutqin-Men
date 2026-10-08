@@ -9,6 +9,7 @@ import {
   calculateMemberRevisionStatus,
   formatArabicDateWithDayName,
   getPreLaunchMessage,
+  calculateListenersLeaderboard,
 } from '../lib/calculations';
 import { api } from '../api/client';
 import {
@@ -37,6 +38,7 @@ import {
   Plus,
   RefreshCw,
   Award,
+  Headphones,
 } from 'lucide-react';
 import { AdminMemberModal } from './AdminMemberModal';
 import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
@@ -203,6 +205,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         (r) => r.member_id === m.id || r.reciter_id === m.id
       ).length;
       const totalRevisions = revisions.filter((r) => r.member_id === m.id).length;
+      const totalTimesListened = recitations.filter(
+        (r) => r.listener_id === m.id && (r.member_id || r.reciter_id) !== m.id
+      ).length;
 
       return {
         user: m,
@@ -226,6 +231,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         severeReasons,
         totalRecitations,
         totalRevisions,
+        totalTimesListened,
       };
     });
   }, [activeMemberUsers, recitations, revisions, cycleInfo.today_date, cycleInfo.quarter_of_day, activeCycleDates]);
@@ -277,6 +283,14 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           r.date <= currentWeek.endDate
       );
 
+      const weeklyTimesListened = recitations.filter(
+        (r) =>
+          r.listener_id === m.id &&
+          (r.member_id || r.reciter_id) !== m.id &&
+          r.date >= currentWeek.startDate &&
+          r.date <= currentWeek.endDate
+      ).length;
+
       const quarterStatus = calculateMemberRequiredQuarter(
         m.id,
         cycleInfo.quarter_of_day,
@@ -302,6 +316,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         severeReasons: todayStatus?.severeReasons ?? [],
         weeklyRecitationsCount: weeklyRecitations.length,
         weeklyRevisionsCount: weeklyRevisions.length,
+        weeklyTimesListened,
         commitmentRate,
         hasRecitedToday: todayStatus?.hasRecited ?? false,
         hasReviewedToday: todayStatus?.hasReviewed ?? false,
@@ -311,31 +326,18 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Leaderboard of members chosen as listening peers for the current week (active members only)
   const listenersWeeklyLeaderboard = useMemo(() => {
-    const weeklyRecitations = recitations.filter(
-      (r) => r.date >= currentWeek.startDate && r.date <= currentWeek.endDate
+    return calculateListenersLeaderboard(
+      activeMemberUsers,
+      recitations,
+      currentWeek.startDate,
+      currentWeek.endDate
     );
-
-    const countsMap = new Map<string, number>();
-    for (const r of weeklyRecitations) {
-      if (r.listener_id && (r.member_id || r.reciter_id) !== r.listener_id) {
-        countsMap.set(r.listener_id, (countsMap.get(r.listener_id) || 0) + 1);
-      }
-    }
-
-    const list = activeMemberUsers.map((m) => ({
-      user: m,
-      timesListened: countsMap.get(m.id) || 0,
-    }));
-
-    list.sort((a, b) => {
-      if (b.timesListened !== a.timesListened) {
-        return b.timesListened - a.timesListened;
-      }
-      return a.user.name.localeCompare(b.user.name, 'ar');
-    });
-
-    return list;
   }, [activeMemberUsers, recitations, currentWeek.startDate, currentWeek.endDate]);
+
+  // Leaderboard of members chosen as listening peers since the start of the course (all-time, active members only)
+  const listenersAllTimeLeaderboard = useMemo(() => {
+    return calculateListenersLeaderboard(activeMemberUsers, recitations);
+  }, [activeMemberUsers, recitations]);
 
   // Add rest day handler
   const handleAddRestDaySubmit = async (e: React.FormEvent) => {
@@ -999,6 +1001,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   <div className={memberStatus.isSeverelyBehindRevision ? 'text-rose-700 font-bold' : memberStatus.missedRevisionDaysCount > 0 ? 'text-amber-700 font-medium' : 'text-stone-400'}>
                                     المراجعات الفائتة: {memberStatus.missedRevisionDaysCount}
                                   </div>
+                                  <div className="text-emerald-700 font-semibold">
+                                    جلسات الاستماع للزملاء: {memberStatus.totalTimesListened}
+                                  </div>
                                 </div>
                               )}
                             </div>
@@ -1114,6 +1119,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           const userRevsCount = revisions.filter(
                             (r) => r.member_id === u.id
                           ).length;
+                          const userListenedCount = recitations.filter(
+                            (r) => r.listener_id === u.id && (r.member_id || r.reciter_id) !== u.id
+                          ).length;
 
                           return (
                             <tr key={u.id} className="hover:bg-stone-50/50 transition">
@@ -1121,7 +1129,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               <td className="py-3 px-4 font-mono text-stone-600">{u.phone}</td>
                               <td className="py-3 px-4">
                                 <span className="inline-flex items-center gap-1 text-[11px] text-stone-600 font-semibold bg-stone-100 px-2 py-0.5 rounded-md">
-                                  {userRecsCount} تسميع • {userRevsCount} مراجعة
+                                  {userRecsCount} تسميع • {userRevsCount} مراجعة • {userListenedCount} استماع
                                 </span>
                               </td>
                               <td className="py-3 px-4">
@@ -1215,6 +1223,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     <th className="py-3 px-4">
                       {statsPeriodTab === 'current_week' ? 'مراجعات هذا الأسبوع' : 'إجمالي المراجعات'}
                     </th>
+                    <th className="py-3 px-4">
+                      {statsPeriodTab === 'current_week' ? 'استماع هذا الأسبوع' : 'إجمالي الاستماع للزملاء'}
+                    </th>
                     <th className="py-3 px-4">حالة الالتزام</th>
                   </tr>
                 </thead>
@@ -1244,6 +1255,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                         </td>
                         <td className="py-3 px-4">
                           <span className="font-bold text-emerald-800">{m.weeklyRevisionsCount}</span>
+                        </td>
+                        <td className="py-3 px-4">
+                          <span
+                            className={`inline-block font-bold text-xs px-2.5 py-0.5 rounded-md ${
+                              m.weeklyTimesListened > 0
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                : 'text-stone-400 bg-stone-100'
+                            }`}
+                          >
+                            {m.weeklyTimesListened}
+                          </span>
                         </td>
                         <td className="py-3 px-4">
                           <div className="flex items-center gap-2">
@@ -1291,6 +1313,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           <span className="font-bold text-emerald-800">{m.totalRevisions}</span>
                         </td>
                         <td className="py-3 px-4">
+                          <span
+                            className={`inline-block font-bold text-xs px-2.5 py-0.5 rounded-md ${
+                              m.totalTimesListened > 0
+                                ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                                : 'text-stone-400 bg-stone-100'
+                            }`}
+                          >
+                            {m.totalTimesListened}
+                          </span>
+                        </td>
+                        <td className="py-3 px-4">
                           {m.isSeverelyBehind ? (
                             <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-rose-50 text-rose-800 border border-rose-300">
                               تأخر شديد (مؤهل للإقصاء)
@@ -1313,35 +1346,81 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           </div>
 
-          {/* Weekly listening peer leaderboard */}
-          {statsPeriodTab === 'current_week' && (
-            <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
-              <div className="p-4 border-b border-stone-100 flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <Award className="w-4 h-4 text-emerald-700" />
-                  <h4 className="text-xs font-bold text-stone-900">
-                    ترتيب الزملاء الأكثر استماعًا (هذا الأسبوع)
-                  </h4>
-                </div>
-                <span className="text-[11px] text-stone-500 font-mono">
-                  {currentWeek.startDate} إلى {currentWeek.endDate}
-                </span>
+          {/* Listening peer leaderboard for selected period (Weekly or All-time since beginning of course) */}
+          <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
+            <div className="p-4 border-b border-stone-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <Award className="w-4 h-4 text-emerald-700" />
+                <h4 className="text-xs font-bold text-stone-900">
+                  {statsPeriodTab === 'current_week'
+                    ? 'ترتيب الزملاء الأكثر استماعًا (هذا الأسبوع)'
+                    : 'ترتيب الزملاء الأكثر استماعًا (منذ بداية الدورة)'}
+                </h4>
               </div>
+              <span className="text-[11px] text-stone-500 font-mono">
+                {statsPeriodTab === 'current_week'
+                  ? `${currentWeek.startDate} إلى ${currentWeek.endDate}`
+                  : `منذ بداية الدورة (${formatArabicDateWithDayName(cycleInfo.start_date)}) حتى اليوم (${formatArabicDateWithDayName(cycleInfo.today_date)})`}
+              </span>
+            </div>
 
-              <div className="overflow-x-auto">
-                <table className="w-full text-right text-xs">
-                  <thead>
-                    <tr className="bg-stone-50/80 border-b border-stone-200 text-stone-600 font-bold">
-                      <th className="py-3 px-4 w-14 text-center">#</th>
-                      <th className="py-3 px-4">الاسم</th>
-                      <th className="py-3 px-4 text-left">عدد مرات الاستماع</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-stone-100 text-stone-800">
-                    {listenersWeeklyLeaderboard.map((item, index) => (
+            {/* Summary statistics strip for all-time listening */}
+            {statsPeriodTab === 'all_time' && (
+              <div className="bg-stone-50/70 border-b border-stone-100 px-4 py-3 grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+                <div>
+                  <span className="text-stone-500 block text-[11px]">إجمالي جلسات الاستماع بالدورة</span>
+                  <span className="font-bold text-emerald-900 text-sm font-mono">
+                    {recitations.filter((r) => r.listener_id && (r.member_id || r.reciter_id) !== r.listener_id).length} جلسة
+                  </span>
+                </div>
+                <div>
+                  <span className="text-stone-500 block text-[11px]">أعلى مساهمة بالاستماع</span>
+                  <span className="font-bold text-emerald-900 text-sm">
+                    {listenersAllTimeLeaderboard[0]?.timesListened > 0
+                      ? `${listenersAllTimeLeaderboard[0]?.user.name} (${listenersAllTimeLeaderboard[0]?.timesListened} مرة)`
+                      : 'لا توجد جلسات بعد'}
+                  </span>
+                </div>
+                <div className="col-span-2 sm:col-span-1">
+                  <span className="text-stone-500 block text-[11px]">أعضاء شاركوا بالاستماع</span>
+                  <span className="font-bold text-stone-900 text-sm font-mono">
+                    {listenersAllTimeLeaderboard.filter((l) => l.timesListened > 0).length} / {activeMemberUsers.length} عضو
+                  </span>
+                </div>
+              </div>
+            )}
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-right text-xs">
+                <thead>
+                  <tr className="bg-stone-50/80 border-b border-stone-200 text-stone-600 font-bold">
+                    <th className="py-3 px-4 w-14 text-center">#</th>
+                    <th className="py-3 px-4">الاسم</th>
+                    <th className="py-3 px-4 text-left">
+                      {statsPeriodTab === 'current_week' ? 'عدد مرات الاستماع' : 'إجمالي مرات الاستماع'}
+                    </th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-stone-100 text-stone-800">
+                  {(statsPeriodTab === 'current_week' ? listenersWeeklyLeaderboard : listenersAllTimeLeaderboard).map(
+                    (item, index) => (
                       <tr key={item.user.id} className="hover:bg-stone-50/50 transition">
                         <td className="py-3 px-4 text-center font-bold text-stone-500 font-mono">
-                          {index + 1}
+                          {index === 0 && item.timesListened > 0 ? (
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-amber-100 text-amber-800 text-[11px] font-bold">
+                              🥇
+                            </span>
+                          ) : index === 1 && item.timesListened > 0 ? (
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-slate-200 text-slate-800 text-[11px] font-bold">
+                              🥈
+                            </span>
+                          ) : index === 2 && item.timesListened > 0 ? (
+                            <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-amber-700/20 text-amber-900 text-[11px] font-bold">
+                              🥉
+                            </span>
+                          ) : (
+                            index + 1
+                          )}
                         </td>
                         <td className="py-3 px-4 font-bold text-stone-900">{item.user.name}</td>
                         <td className="py-3 px-4 text-left">
@@ -1356,12 +1435,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </span>
                         </td>
                       </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
+                    )
+                  )}
+                </tbody>
+              </table>
             </div>
-          )}
+          </div>
         </div>
       )}
 
