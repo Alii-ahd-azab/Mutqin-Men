@@ -77,6 +77,71 @@
         "created_at": { "type": "string", "maxLength": 50 }
       },
       "required": ["id", "member_id", "date", "cycle_number", "review_start_quarter", "review_end_quarter", "created_at"]
+    },
+    "TestDefinition": {
+      "title": "TestDefinition",
+      "description": "بيانات وإعدادات الاختبار المحدد من قِبَل المشرف",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "title": { "type": "string", "maxLength": 100 },
+        "range_start": { "type": "number" },
+        "range_end": { "type": "number" },
+        "questions_count": { "type": "number" },
+        "lines_per_question": { "type": "number" },
+        "test_type": { "type": "string", "enum": ["mandatory", "recommended"] },
+        "is_active": { "type": "boolean" },
+        "created_at": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "range_start", "range_end", "questions_count", "lines_per_question", "test_type", "is_active", "created_at"]
+    },
+    "TestAttempt": {
+      "title": "TestAttempt",
+      "description": "نتائج وسجلات اختبارات الأعضاء لبعضهم",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "test_id": { "type": "string", "maxLength": 128 },
+        "candidate_id": { "type": "string", "maxLength": 128 },
+        "candidate_name": { "type": "string", "maxLength": 100 },
+        "examiner_id": { "type": "string", "maxLength": 128 },
+        "examiner_name": { "type": "string", "maxLength": 100 },
+        "total_errors": { "type": "number" },
+        "passed": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["passed", "failed"] },
+        "date": { "type": "string", "maxLength": 20 },
+        "created_at": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "test_id", "candidate_id", "examiner_id", "total_errors", "passed", "status", "date", "created_at"]
+    },
+    "PersonalTest": {
+      "title": "PersonalTest",
+      "description": "سجلات الاختبارات الذاتية الفردية (اختبر نفسك)",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "maxLength": 128 },
+        "member_id": { "type": "string", "maxLength": 128 },
+        "start_surah": { "type": "number" },
+        "start_surah_name": { "type": "string", "maxLength": 100 },
+        "end_surah": { "type": "number" },
+        "end_surah_name": { "type": "string", "maxLength": 100 },
+        "questions_count": { "type": "number" },
+        "lines_per_question": { "type": "number" },
+        "range_type": { "type": "string", "enum": ["surah", "juz", "quarter"] },
+        "range_label": { "type": "string", "maxLength": 100 },
+        "start_juz": { "type": "number" },
+        "end_juz": { "type": "number" },
+        "start_quarter": { "type": "number" },
+        "end_quarter": { "type": "number" },
+        "difficulty": { "type": "string", "maxLength": 30 },
+        "total_errors": { "type": "number" },
+        "grade": { "type": "number" },
+        "grade_label": { "type": "string", "maxLength": 50 },
+        "notes": { "type": "string", "maxLength": 500 },
+        "date": { "type": "string", "maxLength": 20 },
+        "created_at": { "type": "string", "maxLength": 50 }
+      },
+      "required": ["id", "member_id", "start_surah", "end_surah", "questions_count", "lines_per_question", "grade", "date", "created_at"]
     }
   },
   "firestore": {
@@ -99,6 +164,19 @@
     "/revisions/{revisionId}": {
       "schema": "RevisionLog",
       "description": "سجلات المراجعة اليومية"
+    },
+    "/tests/{testId}": {
+      "schema": "TestDefinition",
+      "description": "مجموعة الاختبارات المحددة من المشرف"
+    },
+    "/test_attempts/{attemptId}": {
+      "schema": "TestAttempt",
+      "description": "مجموعة نتائج اختبارات الأعضاء لبعضهم"
+    },
+    "/personal_tests/{recordId}": {
+      "schema": "PersonalTest",
+      "description": "مجموعة سجلات الاختبارات الذاتية للأعضاء"
     }
   }
 }
+

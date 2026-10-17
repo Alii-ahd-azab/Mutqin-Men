@@ -12,7 +12,7 @@ import {
   deleteDoc,
   Firestore,
 } from 'firebase/firestore';
-import { User, GroupSettings, RestDay, RecitationLog, RevisionLog } from '../types';
+import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, TestDefinition, TestAttempt } from '../types';
 import firebaseConfig from '../../firebase-applet-config.json';
 
 export type UserWithPassword = User & { password_hash: string };
@@ -28,15 +28,26 @@ export async function ensureServerAuth(): Promise<void> {
 
   if (!isAuthPromise) {
     isAuthPromise = (async () => {
-      const email = process.env.FIREBASE_SERVER_AUTH_EMAIL || 'herotero13@gmail.com';
-      const password = process.env.FIREBASE_SERVER_AUTH_PASSWORD || 'TempServerSecret2026!';
+      const email = process.env.FIREBASE_SERVER_AUTH_EMAIL;
+      const password = process.env.FIREBASE_SERVER_AUTH_PASSWORD;
+
+      if (!email || !password) {
+        const missing = [];
+        if (!email) missing.push('FIREBASE_SERVER_AUTH_EMAIL');
+        if (!password) missing.push('FIREBASE_SERVER_AUTH_PASSWORD');
+        const errMessage = `[Firestore LIVE Server Auth Error] Missing required environment variable(s): ${missing.join(', ')}. Server authentication aborted.`;
+        console.error(errMessage);
+        isAuthPromise = null;
+        throw new Error(errMessage);
+      }
+
       try {
         await signInWithEmailAndPassword(auth, email, password);
         console.log(`[Firestore LIVE Server Auth] Authenticated server session as: ${auth.currentUser?.email}`);
       } catch (err: unknown) {
         isAuthPromise = null;
         const msg = err instanceof Error ? err.message : String(err);
-        console.warn(`[Firestore LIVE Server Auth Warning] Failed to authenticate server identity: ${msg}`);
+        console.error(`[Firestore LIVE Server Auth Error] Failed to authenticate server identity: ${msg}`);
         throw err;
       }
     })();
@@ -299,6 +310,89 @@ export async function deleteLiveRevisionsForMember(memberId: string): Promise<nu
   console.log(`[Firestore LIVE Write] Deleted ${count} revision logs for member '${memberId}' in ${firebaseConfig.projectId}.`);
   return count;
 }
+
+// ----------------------------------------------------
+// TESTS COLLECTION (Collection: 'tests')
+// ----------------------------------------------------
+
+export async function getLiveTests(): Promise<TestDefinition[]> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  const snap = await getDocs(collection(db, 'tests'));
+  const tests: TestDefinition[] = [];
+  snap.forEach((d) => {
+    tests.push({ ...(d.data() as TestDefinition), id: d.id });
+  });
+  return tests;
+}
+
+export async function saveLiveTest(test: TestDefinition): Promise<void> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  const cleanPayload = cleanForFirestore(test);
+  console.log(`[Firestore LIVE Write] Saving test doc '${test.id}' in ${firebaseConfig.projectId}...`);
+  await setDoc(doc(db, 'tests', test.id), cleanPayload);
+}
+
+export async function updateLiveTest(id: string, updates: Partial<TestDefinition>): Promise<void> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  const cleanPayload = cleanForFirestore(updates);
+  console.log(`[Firestore LIVE Write] Updating test doc '${id}' in ${firebaseConfig.projectId}...`);
+  await updateDoc(doc(db, 'tests', id), cleanPayload);
+}
+
+// ----------------------------------------------------
+// TEST ATTEMPTS COLLECTION (Collection: 'test_attempts')
+// ----------------------------------------------------
+
+export async function getLiveTestAttempts(): Promise<TestAttempt[]> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  const snap = await getDocs(collection(db, 'test_attempts'));
+  const attempts: TestAttempt[] = [];
+  snap.forEach((d) => {
+    attempts.push({ ...(d.data() as TestAttempt), id: d.id });
+  });
+  return attempts;
+}
+
+export async function addLiveTestAttempt(attempt: TestAttempt): Promise<void> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  const cleanPayload = cleanForFirestore(attempt);
+  console.log(`[Firestore LIVE Write] Adding test_attempt doc '${attempt.id}' for candidate '${attempt.candidate_name}' in ${firebaseConfig.projectId}...`);
+  await setDoc(doc(db, 'test_attempts', attempt.id), cleanPayload);
+}
+
+export async function deleteLiveTestAttemptsForMember(memberId: string): Promise<number> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  const snap = await getDocs(collection(db, 'test_attempts'));
+  let count = 0;
+  const deletePromises: Promise<void>[] = [];
+  snap.forEach((d) => {
+    const data = d.data() as Record<string, unknown>;
+    if (data['candidate_id'] === memberId || data['examiner_id'] === memberId) {
+      deletePromises.push(deleteDoc(doc(db, 'test_attempts', d.id)));
+      count++;
+    }
+  });
+  await Promise.all(deletePromises);
+  console.log(`[Firestore LIVE Write] Deleted ${count} test attempt records referencing member '${memberId}' in ${firebaseConfig.projectId}.`);
+  return count;
+}
+
+export async function clearAllLiveTestAttempts(): Promise<void> {
+  await ensureServerAuth();
+  const db = getFirestoreDB();
+  console.log(`[Firestore LIVE Write] Clearing all test attempts for factory reset in ${firebaseConfig.projectId}...`);
+  const snap = await getDocs(collection(db, 'test_attempts'));
+  const deletePromises = snap.docs.map((d) => deleteDoc(doc(db, 'test_attempts', d.id)));
+  await Promise.all(deletePromises);
+  console.log(`[Firestore LIVE Write] Factory reset test attempts clearance completed (${snap.docs.length} attempts deleted).`);
+}
+
 
 // ----------------------------------------------------
 // INITIAL SEEDING TO FIRESTORE

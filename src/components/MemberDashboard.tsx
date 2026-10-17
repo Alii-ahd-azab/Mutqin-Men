@@ -1,5 +1,5 @@
 import React, { useState, useMemo } from 'react';
-import { User, CycleInfo, RecitationLog, RevisionLog, GroupSettings, RestDay } from '../types';
+import { User, CycleInfo, RecitationLog, RevisionLog, GroupSettings, RestDay, TestDefinition, TestAttempt } from '../types';
 import { getQuarterInfo, getQuarterBounds, getRangeBounds } from '../data/quranData';
 import {
   calculateMemberRequiredQuarter,
@@ -29,11 +29,15 @@ import {
   Compass,
   Lock,
   Headphones,
+  Award,
 } from 'lucide-react';
 import { RecitationModal, RevisionModal } from './Modals';
 import { MemberHistoryView } from './MemberHistoryView';
 import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
 import { DailyThoughtCard } from './DailyThoughtCard';
+import { PeerTestingModal } from './PeerTestingModal';
+import { PersonalTestModal } from './PersonalTestModal';
+import { TestConditionsCard } from './TestConditionsCard';
 
 interface RevisionDayItem {
   date: string;
@@ -58,6 +62,8 @@ interface MemberDashboardProps {
   allMembers: User[];
   recitations: RecitationLog[];
   revisions: RevisionLog[];
+  activeTest?: TestDefinition | null;
+  testAttempts?: TestAttempt[];
   onRecordRecitation: (payload: {
     quarter_number: number;
     listener_id: string;
@@ -76,6 +82,8 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   allMembers,
   recitations,
   revisions,
+  activeTest = null,
+  testAttempts = [],
   onRecordRecitation,
   onRecordRevision,
   onRefresh,
@@ -83,6 +91,9 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
 }) => {
   const [isRecitationModalOpen, setIsRecitationModalOpen] = useState(false);
   const [isRevisionModalOpen, setIsRevisionModalOpen] = useState(false);
+  const [isTestModalOpen, setIsTestModalOpen] = useState(false);
+  const [isPersonalTestOpen, setIsPersonalTestOpen] = useState(false);
+  const [showTestConditions, setShowTestConditions] = useState(false);
   const [activeRevisionIndex, setActiveRevisionIndex] = useState<number>(0);
   const [selectedRevisionTarget, setSelectedRevisionTarget] = useState<RevisionDayItem | null>(null);
   const [showHistory, setShowHistory] = useState(true);
@@ -140,6 +151,38 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   const reviewStartInfo = getQuarterInfo(cycleInfo.review_start);
   const reviewEndInfo = getQuarterInfo(cycleInfo.review_end);
   const revisionBounds = getRangeBounds(cycleInfo.review_start, cycleInfo.review_end);
+
+  // Audience & Mandatory test verification (القسم هـ)
+  const isInTestAudience = useMemo(() => {
+    if (!activeTest) return false;
+    const aud = activeTest.audience || 'selected';
+    if (aud === 'all') return true;
+    const selectedIds = Array.isArray(activeTest.selected_member_ids) ? activeTest.selected_member_ids : [];
+    return selectedIds.includes(currentUser.id);
+  }, [activeTest, currentUser.id]);
+
+  const hasPassedActiveTest = useMemo(() => {
+    if (!activeTest) return false;
+    return (testAttempts || []).some(
+      (a) =>
+        a.test_id === activeTest.id &&
+        a.candidate_id === currentUser.id &&
+        a.passed &&
+        a.covers_full_range !== false
+    );
+  }, [activeTest, testAttempts, currentUser.id]);
+
+  const isMandatoryActive = Boolean(
+    activeTest && activeTest.is_active && activeTest.test_type === 'mandatory' && isInTestAudience
+  );
+
+  const hasCompletedMandatoryRange = Boolean(
+    activeTest && userQuarterStatus.requiredQuarter > activeTest.range_end
+  );
+
+  const isBlockedByMandatoryTest = Boolean(
+    isMandatoryActive && !hasPassedActiveTest && hasCompletedMandatoryRange
+  );
 
   // Construct list of active revision days (past missed days in chronological order + today)
   const revisionDays: RevisionDayItem[] = useMemo(() => {
@@ -325,6 +368,114 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
 
       {/* Rest Day banner */}
       {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
+
+      {/* Peer Testing Banner (عند وجود اختبار نشط معتمد من المشرف وكان العضو ضمن الجمهور المستهدف) */}
+      {activeTest && activeTest.is_active && currentUser.is_active && isInTestAudience && (
+        <div className="rounded-3xl bg-gradient-to-l from-amber-500/10 via-amber-500/5 to-amber-500/15 border-2 border-amber-500/30 p-5 shadow-xs space-y-3">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3.5">
+              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-900 flex items-center justify-center shrink-0 mt-0.5 border border-amber-500/40">
+                <Award className="w-6 h-6 text-amber-800" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
+                    activeTest.test_type === 'mandatory'
+                      ? 'bg-rose-100 text-rose-950 border-rose-300'
+                      : 'bg-amber-200/80 text-amber-950 border-amber-300'
+                  }`}>
+                    {activeTest.test_type === 'mandatory' ? 'اختبار إلزامي' : 'اختبار موصى به'}
+                  </span>
+                  <span className="text-xs font-bold text-stone-900">
+                    اختبار الأرباع ({activeTest.range_start} ⟵ {activeTest.range_end})
+                  </span>
+                  {activeTest.difficulty && activeTest.difficulty !== 'any' && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100/90 text-amber-900 border border-amber-300">
+                      الصعوبة: {
+                        activeTest.difficulty === 'easy' ? 'سهل' :
+                        activeTest.difficulty === 'hard' ? 'صعب' :
+                        activeTest.difficulty === 'medium' ? 'متوسط' : 'متنوع'
+                      }
+                    </span>
+                  )}
+                  {hasPassedActiveTest && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                      ✓ اجتزت هذا الاختبار بنجاح
+                    </span>
+                  )}
+                </div>
+                <p className="text-xs text-stone-600 leading-relaxed max-w-xl">
+                  الاختبار بنظام تقييم الأقران: اختبر أحد زملائك المستوفين للشروط ليقوم النظام بتوليد الأسئلة وحساب الأخطاء وفق أسطر مصحف المدينة.
+                </p>
+              </div>
+            </div>
+
+            <div className="shrink-0 flex items-center gap-3">
+              <button
+                onClick={() => setIsTestModalOpen(true)}
+                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs shadow-xs transition flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <Award className="w-4 h-4 text-amber-200" />
+                <span>بدء اختبار زميل</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Collapsible Test Conditions */}
+          <div className="pt-2 border-t border-amber-500/20 flex flex-col gap-2">
+            <button
+              type="button"
+              onClick={() => setShowTestConditions((prev) => !prev)}
+              className="self-start text-[11px] font-bold text-amber-900 hover:text-amber-950 flex items-center gap-1.5 transition cursor-pointer"
+            >
+              <span>{showTestConditions ? 'إخفاء شروط الاختبار' : 'عرض شروط الاختبار'}</span>
+              {showTestConditions ? (
+                <ChevronUp className="w-3.5 h-3.5" />
+              ) : (
+                <ChevronDown className="w-3.5 h-3.5" />
+              )}
+            </button>
+
+            {showTestConditions && (
+              <div className="pt-1 animate-in fade-in duration-200">
+                <TestConditionsCard test={activeTest} />
+              </div>
+            )}
+          </div>
+
+          {/* Mandatory test blocking callout */}
+          {isBlockedByMandatoryTest && (
+            <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-950 text-xs flex items-start gap-2.5 animate-in fade-in duration-200">
+              <AlertTriangle className="w-4 h-4 text-rose-700 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold block">مطلوب اجتياز الاختبار الإلزامي لمواصلة التسميع</span>
+                <p className="text-[11px] text-rose-800 leading-relaxed mt-0.5">
+                  لقد أتممت أرباع النطاق ({activeTest.range_start} إلى {activeTest.range_end})، ويشترط المشرف اجتياز هذا الاختبار الإلزامي أولاً قبل التمكن من تسجيل تسميع الأرباع التالية. اطلب من أحد زملائك في المقرأة إجراء الاختبار لك ليتم تسجيل نتيجتك.
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Personal self-test (اختبر نفسك): available to every active member, separate from the program */}
+      {currentUser.is_active && (
+        <div className="rounded-3xl bg-emerald-50/60 border border-emerald-200 p-4 flex items-center justify-between gap-3">
+          <div className="space-y-0.5">
+            <div className="font-bold text-sm text-emerald-950 flex items-center gap-1.5">
+              <span>اختبر نفسك</span>
+              <span className="text-[10px] bg-emerald-200/80 text-emerald-900 font-bold px-2 py-0.5 rounded-full">بالسور والأجزاء والأرباع</span>
+            </div>
+            <p className="text-xs text-emerald-900/70 leading-relaxed">اختبار ذاتي لقياس مستواك مع درجات وسجل دائم خاص بك، منفصل عن البرنامج ولا يراه أحد.</p>
+          </div>
+          <button
+            onClick={() => setIsPersonalTestOpen(true)}
+            className="shrink-0 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs cursor-pointer"
+          >
+            ابدأ
+          </button>
+        </div>
+      )}
 
       {/* Exclusion / Suspension Notice Banner */}
       {!currentUser.is_active && (
@@ -790,13 +941,15 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             <button
               id="open-recitation-modal-btn"
               onClick={() => {
-                if (!currentUser.is_active) return;
+                if (!currentUser.is_active || isBlockedByMandatoryTest) return;
                 setIsRecitationModalOpen(true);
               }}
-              disabled={isAllCaughtUp || !currentUser.is_active}
+              disabled={isAllCaughtUp || !currentUser.is_active || isBlockedByMandatoryTest}
               className={`w-full py-3.5 px-4 rounded-2xl font-bold text-sm shadow-sm transition flex items-center justify-center gap-2 ${
                 !currentUser.is_active
                   ? 'bg-rose-50 text-rose-700 border border-rose-200 cursor-not-allowed'
+                  : isBlockedByMandatoryTest
+                  ? 'bg-amber-100 text-amber-900 border border-amber-300 cursor-not-allowed'
                   : isAllCaughtUp
                   ? 'bg-stone-100 text-stone-400 border border-stone-200 cursor-not-allowed'
                   : userQuarterStatus.isBehind
@@ -808,6 +961,11 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 <>
                   <UserX className="w-4 h-4" />
                   <span>حسابك مُقصَى حاليًا — لا يمكن تسجيل التسميع</span>
+                </>
+              ) : isBlockedByMandatoryTest ? (
+                <>
+                  <Award className="w-4 h-4 text-amber-800" />
+                  <span>مطلوب اجتياز الاختبار الإلزامي أولاً لمواصلة التسميع</span>
                 </>
               ) : (
                 <>
@@ -886,6 +1044,21 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         reviewEnd={selectedRevisionTarget?.reviewEnd}
         reviewCount={selectedRevisionTarget?.reviewCount}
       />
+
+      <PersonalTestModal isOpen={isPersonalTestOpen} onClose={() => setIsPersonalTestOpen(false)} />
+
+      {/* Peer Testing Modal */}
+      {activeTest && (
+        <PeerTestingModal
+          isOpen={isTestModalOpen}
+          onClose={() => setIsTestModalOpen(false)}
+          currentUser={currentUser}
+          activeTest={activeTest}
+          onCompleted={() => {
+            onRefresh();
+          }}
+        />
+      )}
     </div>
   );
 };

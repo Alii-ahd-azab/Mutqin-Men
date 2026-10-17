@@ -68,6 +68,38 @@ service cloud.firestore {
       );
       allow delete: if isServerOrAdmin();
     }
+
+    // 7. TESTS: Admin creates/updates tests, all signed-in users can read
+    match /tests/{testId} {
+      allow read: if isSignedIn();
+      allow write: if isServerOrAdmin();
+    }
+
+    // 8. TEST ATTEMPTS: Peer testing integrity
+    // Examiner tests candidate (examiner cannot test themselves)
+    match /test_attempts/{attemptId} {
+      allow read: if isSignedIn();
+      allow create: if isServerOrAdmin() || (
+        isMember() &&
+        request.resource.data.examiner_id == request.auth.uid &&
+        request.resource.data.candidate_id != request.auth.uid
+      );
+      allow update, delete: if isServerOrAdmin();
+    }
+
+    // 9. PERSONAL TESTS: private self-tests of members (اختبر نفسك)
+    match /personal_tests/{recordId} {
+      allow read: if isServerOrAdmin() || (
+        isSignedIn() && resource.data.member_id == request.auth.uid
+      );
+      allow create: if isServerOrAdmin() || (
+        isSignedIn() && request.resource.data.member_id == request.auth.uid
+      );
+      allow update, delete: if isServerOrAdmin() || (
+        isSignedIn() && resource.data.member_id == request.auth.uid
+      );
+    }
   }
 }
+
 

@@ -4,6 +4,7 @@ import { Header } from './components/Header';
 import { MemberDashboard } from './components/MemberDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { LoginView } from './components/LoginView';
+import { PersonalTestModal } from './components/PersonalTestModal';
 import { api } from './api/client';
 import {
   CycleInfo,
@@ -12,6 +13,8 @@ import {
   User,
   RecitationLog,
   RevisionLog,
+  TestDefinition,
+  TestAttempt,
 } from './types';
 import { BookOpen, RefreshCw } from 'lucide-react';
 
@@ -24,11 +27,17 @@ const MainApp: React.FC = () => {
   const [allUsers, setAllUsers] = useState<User[]>([]);
   const [recitations, setRecitations] = useState<RecitationLog[]>([]);
   const [revisions, setRevisions] = useState<RevisionLog[]>([]);
+  const [tests, setTests] = useState<TestDefinition[]>([]);
+  const [activeTest, setActiveTest] = useState<TestDefinition | null>(null);
+  const [testAttempts, setTestAttempts] = useState<TestAttempt[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
+  const [isPersonalTestOpen, setIsPersonalTestOpen] = useState(false);
 
+  const loadSeq = React.useRef(0);
   const loadAppData = useCallback(async () => {
     if (!currentUser) return;
+    const mySeq = ++loadSeq.current;
     setDataLoading(true);
     setInitError(null);
     try {
@@ -38,17 +47,21 @@ const MainApp: React.FC = () => {
         api.getRevisions(),
       ]);
 
+      if (mySeq !== loadSeq.current) return; // a newer load is in flight: drop this stale response
       setCycleInfo(bootstrapRes.cycleInfo);
       setSettings(bootstrapRes.settings);
       setRestDays(bootstrapRes.restDays);
       setAllUsers(bootstrapRes.users);
       setRecitations(recitationsRes.recitations);
       setRevisions(revisionsRes.revisions);
+      setTests(bootstrapRes.tests || []);
+      setActiveTest(bootstrapRes.activeTest || null);
+      setTestAttempts(bootstrapRes.testAttempts || []);
     } catch (err: any) {
       console.error('Error fetching app data:', err);
       setInitError(err?.message || 'تعذر جلب بيانات المقرأة');
     } finally {
-      setDataLoading(false);
+      if (mySeq === loadSeq.current) setDataLoading(false);
     }
   }, [currentUser]);
 
@@ -162,6 +175,7 @@ const MainApp: React.FC = () => {
         cycleInfo={cycleInfo}
         allUsers={allUsers}
         onRefresh={loadAppData}
+        onOpenPersonalTest={() => setIsPersonalTestOpen(true)}
       />
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 pt-6">
@@ -187,6 +201,8 @@ const MainApp: React.FC = () => {
               restDays={restDays}
               recitations={recitations}
               revisions={revisions}
+              tests={tests}
+              activeTest={activeTest}
               onAddMember={handleAddMember}
               onUpdateMember={handleUpdateMember}
               onAddRestDay={handleAddRestDay}
@@ -209,6 +225,8 @@ const MainApp: React.FC = () => {
               allMembers={allUsers}
               recitations={recitations}
               revisions={revisions}
+              activeTest={activeTest}
+              testAttempts={testAttempts}
               onRecordRecitation={handleRecordRecitation}
               onRecordRevision={handleRecordRevision}
               onRefresh={loadAppData}
@@ -222,6 +240,11 @@ const MainApp: React.FC = () => {
           </div>
         )}
       </main>
+
+      <PersonalTestModal
+        isOpen={isPersonalTestOpen}
+        onClose={() => setIsPersonalTestOpen(false)}
+      />
     </div>
   );
 };

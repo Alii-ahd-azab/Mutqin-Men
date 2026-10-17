@@ -1,11 +1,23 @@
 import './src/lib/suppressFirestoreWarnings';
+import { registerPersonalTestRoutes } from './src/server/personalTests';
+import { personalTestsFirestoreStore } from './src/server/personalTestsFirestore';
 import express, { Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import bcrypt from 'bcryptjs';
+import crypto from 'crypto';
 import { createServer as createViteServer } from 'vite';
-import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo } from './src/types';
-import { calculateCycleInfo, calculateMemberRequiredQuarter, formatDate, getCalendarDaysElapsed, getActiveCycleDates } from './src/lib/calculations';
+import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo, TestDefinition, TestAttempt } from './src/types';
+import { calculateCycleInfo, calculateMemberRequiredQuarter, formatDate, getCalendarDaysElapsed, getActiveCycleDates, calculateMemberRevisionStatus } from './src/lib/calculations';
+import {
+  generateTestQuestions,
+  estimateRangeLines,
+  isInTestAudience,
+  getQuarterStartIndex,
+  getQuarterEndIndex,
+  getVerseIndexBySurahAyah,
+  ALL_VERSES,
+} from './src/lib/testGenerator';
 import * as firestoreService from './src/server/firestoreService';
 import firebaseConfig from './firebase-applet-config.json';
 
@@ -13,6 +25,16 @@ const app = express();
 const PORT = 3000;
 
 app.use(express.json());
+
+// Do not serve API requests from the stale local snapshot while the first Firestore sync is still running.
+app.use('/api', async (_req, _res, next) => {
+  try {
+    await Promise.race([initialSyncDone.catch(() => undefined), new Promise((r) => setTimeout(r, 12000))]);
+  } catch {
+    /* ignore */
+  }
+  next();
+});
 
 // Database storage setup
 const DATA_DIR = path.join(process.cwd(), 'data');
@@ -27,6 +49,8 @@ interface DatabaseSchema {
   restDays: RestDay[];
   recitationLogs: RecitationLog[];
   revisionLogs: RevisionLog[];
+  tests?: TestDefinition[];
+  testAttempts?: TestAttempt[];
 }
 
 function getInitialData(): DatabaseSchema {
@@ -195,6 +219,13 @@ function loadDatabase(): DatabaseSchema {
       });
     }
 
+    if (!Array.isArray(parsed.tests)) {
+      parsed.tests = [];
+    }
+    if (!Array.isArray(parsed.testAttempts)) {
+      parsed.testAttempts = [];
+    }
+
     return parsed;
   } catch (err) {
     console.error('Error reading database, falling back to initial data:', err);
@@ -214,18 +245,89 @@ function saveDatabase(data: DatabaseSchema): void {
 }
 
 let db = loadDatabase();
-const sessions = new Map<string, string>();
+const sessions = new Map<string, string>(); // legacy (kept for compatibility); tokens are now stateless signed tokens
 
-// Synchronization helper with live Firestore
-async function syncFromFirestore(): Promise<void> {
+// Stateless signed session tokens: survive server restarts / multiple instances.
+const SESSION_TTL_MS = 90 * 24 * 60 * 60 * 1000;
+const SESSION_SECRET: string =
+  process.env.SESSION_SECRET ||
+  (process.env.FIREBASE_SERVER_AUTH_PASSWORD
+    ? crypto.createHash('sha256').update('mutqin-session|' + process.env.FIREBASE_SERVER_AUTH_PASSWORD + '|' + firebaseConfig.projectId).digest('hex')
+    : crypto.createHash('sha256').update('mutqin-session|' + firebaseConfig.projectId + '|' + (firebaseConfig as any).apiKey).digest('hex'));
+
+function signSession(userId: string, passwordHash: string): string {
+  const exp = Date.now() + SESSION_TTL_MS;
+  const fp = crypto.createHash('sha256').update(passwordHash || '').digest('hex').slice(0, 12);
+  const body = Buffer.from(JSON.stringify({ u: userId, e: exp, f: fp })).toString('base64url');
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(body).digest('base64url');
+  return `st1.${body}.${sig}`;
+}
+
+function verifySession(token: string): { userId: string; fp: string } | null {
+  const parts = token.split('.');
+  if (parts.length !== 3 || parts[0] !== 'st1') return null;
+  const expected = crypto.createHmac('sha256', SESSION_SECRET).update(parts[1]).digest('base64url');
+  const a = Buffer.from(parts[2]);
+  const b = Buffer.from(expected);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) return null;
   try {
-    const [liveUsers, liveSettings, liveRestDays, liveRecitations, liveRevisions] =
+    const data = JSON.parse(Buffer.from(parts[1], 'base64url').toString('utf-8'));
+    if (!data.u || typeof data.e !== 'number' || data.e < Date.now()) return null;
+    return { userId: data.u, fp: data.f };
+  } catch {
+    return null;
+  }
+}
+
+// Logs written recently: kept so a concurrent sync (which may have read Firestore BEFORE the write
+// committed) never wipes them from memory.
+const RECENT_WRITE_TTL_MS = 3 * 60 * 1000;
+const recentRevisions = new Map<string, { log: RevisionLog; ts: number }>();
+const recentRecitations = new Map<string, { log: RecitationLog; ts: number }>();
+const inFlightKeys = new Set<string>();
+
+function mergeRecent<T extends { id: string }>(live: T[], recent: Map<string, { log: T; ts: number }>): T[] {
+  const now = Date.now();
+  const ids = new Set(live.map((l) => l.id));
+  const out = [...live];
+  for (const [id, v] of recent) {
+    if (now - v.ts > RECENT_WRITE_TTL_MS) {
+      recent.delete(id);
+    } else if (!ids.has(id)) {
+      out.push(v.log);
+    }
+  }
+  return out;
+}
+
+// Single-flight: concurrent callers share one sync run.
+let syncInFlight: Promise<void> | null = null;
+function syncFromFirestore(): Promise<void> {
+  if (!syncInFlight) {
+    syncInFlight = doSyncFromFirestore().finally(() => {
+      syncInFlight = null;
+    });
+  }
+  return syncInFlight;
+}
+
+async function doSyncFromFirestore(): Promise<void> {
+  try {
+    const [liveUsers, liveSettings, liveRestDays, liveRecitations, liveRevisions, liveTests, liveAttempts] =
       await Promise.all([
         firestoreService.getLiveUsers(),
         firestoreService.getLiveSettings(),
         firestoreService.getLiveRestDays(),
         firestoreService.getLiveRecitations(),
         firestoreService.getLiveRevisions(),
+        firestoreService.getLiveTests().catch((e) => {
+          console.warn('[Firestore getLiveTests warning]', e);
+          return null;
+        }),
+        firestoreService.getLiveTestAttempts().catch((e) => {
+          console.warn('[Firestore getLiveTestAttempts warning]', e);
+          return null;
+        }),
       ]);
 
     if (liveUsers && liveUsers.length > 0) {
@@ -238,10 +340,16 @@ async function syncFromFirestore(): Promise<void> {
       db.restDays = liveRestDays;
     }
     if (liveRecitations) {
-      db.recitationLogs = liveRecitations;
+      db.recitationLogs = mergeRecent(liveRecitations, recentRecitations);
     }
     if (liveRevisions) {
-      db.revisionLogs = liveRevisions;
+      db.revisionLogs = mergeRecent(liveRevisions, recentRevisions);
+    }
+    if (liveTests !== null && Array.isArray(liveTests)) {
+      db.tests = liveTests;
+    }
+    if (liveAttempts !== null && Array.isArray(liveAttempts)) {
+      db.testAttempts = liveAttempts;
     }
     saveDatabase(db);
   } catch (err: unknown) {
@@ -251,7 +359,7 @@ async function syncFromFirestore(): Promise<void> {
 }
 
 // Perform initial connection check & seed if Firestore is empty
-firestoreService.testFirestoreConnection().then(async (status) => {
+const initialSyncDone: Promise<void> = firestoreService.testFirestoreConnection().then(async (status) => {
   if (status.success) {
     console.log(`[Firestore LIVE] Successfully connected to project: ${firebaseConfig.projectId}`);
     await firestoreService.seedFirestoreIfEmpty(db);
@@ -265,6 +373,13 @@ function getAuthUser(req: Request): (User & { password_hash: string }) | null {
   const authHeader = req.headers.authorization;
   if (!authHeader) return null;
   const token = authHeader.replace('Bearer ', '').trim();
+  const verified = verifySession(token);
+  if (verified) {
+    const u = db.users.find((x) => x.id === verified.userId) || null;
+    if (!u) return null;
+    const fp = crypto.createHash('sha256').update(u.password_hash || '').digest('hex').slice(0, 12);
+    return fp === verified.fp ? u : null; // password change invalidates old tokens
+  }
   const userId = sessions.get(token);
   if (!userId) return null;
   return db.users.find((u) => u.id === userId) || null;
@@ -362,8 +477,7 @@ app.post('/api/auth/login', async (req: Request, res: Response) => {
   // Note: Excluded members (!user.is_active) are permitted to log in to view their status,
   // but cannot record recitation or revision.
 
-  const token = `tok_${user.id}_${Date.now()}_${Math.random().toString(36).substring(2, 8)}`;
-  sessions.set(token, user.id);
+  const token = signSession(user.id, user.password_hash);
 
   const { password_hash, ...safeUser } = user;
   res.json({ user: safeUser, token });
@@ -458,6 +572,28 @@ app.get('/api/bootstrap', async (req: Request, res: Response) => {
   const todayRecitations = db.recitationLogs.filter((r) => r.date === todayStr);
   const todayRevisions = db.revisionLogs.filter((r) => r.date === todayStr);
 
+  const user = getAuthUser(req);
+  const isAdmin = user?.role === 'admin';
+
+  const allTests = db.tests || [];
+  const rawActiveTest = allTests.find((t) => t.is_active && !t.is_finished) || null;
+  const activeTest = (rawActiveTest && (isAdmin || (user && isInTestAudience(rawActiveTest, user.id))))
+    ? rawActiveTest
+    : null;
+
+  let clientTests: TestDefinition[] = [];
+  let clientAttempts: TestAttempt[] = [];
+
+  if (isAdmin) {
+    clientTests = allTests;
+    clientAttempts = db.testAttempts || [];
+  } else if (user) {
+    clientTests = activeTest ? [activeTest] : [];
+    clientAttempts = (db.testAttempts || []).filter(
+      (a) => a.candidate_id === user.id || a.examiner_id === user.id
+    );
+  }
+
   res.json({
     cycleInfo,
     settings: db.settings,
@@ -465,6 +601,9 @@ app.get('/api/bootstrap', async (req: Request, res: Response) => {
     users: safeUsers,
     todayRecitations,
     todayRevisions,
+    tests: clientTests,
+    activeTest,
+    testAttempts: clientAttempts,
   });
 });
 
@@ -547,6 +686,23 @@ app.post('/api/recitations', async (req: Request, res: Response) => {
     });
   }
 
+  // Mandatory Test Enforcement (المنع الإلزامي - القسم هـ)
+  const activeMandatoryTest = (db.tests || []).find((t) => t.is_active && !t.is_finished && t.test_type === 'mandatory');
+  if (activeMandatoryTest && isInTestAudience(activeMandatoryTest, currentUser.id)) {
+    const hasPassedMandatory = (db.testAttempts || []).some(
+      (a) =>
+        a.test_id === activeMandatoryTest.id &&
+        a.candidate_id === currentUser.id &&
+        a.passed &&
+        a.covers_full_range !== false
+    );
+    if (!hasPassedMandatory && quarter > activeMandatoryTest.range_end) {
+      return res.status(403).json({
+        error: `يجب اجتياز الاختبار الإلزامي للأرباع (${activeMandatoryTest.range_start} - ${activeMandatoryTest.range_end}) بنجاح أولاً قبل متابعة تسميع الأرباع التالية.`,
+      });
+    }
+  }
+
   // Guard against duplicate records for the exact same quarter
   const alreadyCompletedQuarter = db.recitationLogs.some(
     (r) => (r.member_id === currentUser.id || r.reciter_id === currentUser.id) && r.quarter_number === quarter
@@ -602,7 +758,8 @@ app.post('/api/recitations', async (req: Request, res: Response) => {
     });
   }
 
-  db.recitationLogs.push(newLog);
+  recentRecitations.set(newLog.id, { log: newLog, ts: Date.now() });
+  if (!db.recitationLogs.some((r) => r.id === newLog.id)) db.recitationLogs.push(newLog);
   saveDatabase(db);
 
   res.status(201).json({
@@ -612,7 +769,8 @@ app.post('/api/recitations', async (req: Request, res: Response) => {
 });
 
 // Revision logs list
-app.get('/api/revisions', (req: Request, res: Response) => {
+app.get('/api/revisions', async (req: Request, res: Response) => {
+  await syncFromFirestore();
   const { member_id, date } = req.query;
   let logs = [...db.revisionLogs];
 
@@ -662,22 +820,16 @@ app.post('/api/revisions', async (req: Request, res: Response) => {
     });
   }
 
-  // Check if date was a rest day
-  const isRestDay = db.restDays.some((rd) => rd.date === logDate);
-  if (isRestDay) {
-    return res.status(400).json({
-      error: 'التاريخ المحدد كان يوم راحة/استدراك للمجموعة، ولا يتطلب تسجيل مراجعة رسمية.',
-    });
-  }
+  // Rest days and paused days are allowed to be recorded (they are never counted as "missed").
+  // Make sure memory reflects Firestore before the duplicate check.
+  await syncFromFirestore();
 
-  // Check if active cycle date (handles paused days as well)
-  const activeDates = getActiveCycleDates(startDate, todayDate, db.restDays, db.settings);
-  if (!activeDates.includes(logDate)) {
-    return res.status(400).json({
-      error: 'التاريخ المحدد ليس يومًا نشطًا في دورة المقرأة الحالية.',
-    });
+  const lockKey = `rev:${currentUser.id}:${logDate}`;
+  if (inFlightKeys.has(lockKey)) {
+    return res.status(409).json({ error: 'جارٍ حفظ مراجعة هذا اليوم، انتظر لحظة.' });
   }
-
+  inFlightKeys.add(lockKey);
+  try {
   const cycleInfo = calculateCycleInfo(db.settings, db.restDays, logDate);
 
   if (!cycleInfo.has_started) {
@@ -691,13 +843,16 @@ app.post('/api/revisions', async (req: Request, res: Response) => {
   );
 
   if (existingIndex >= 0) {
-    return res.status(400).json({
-      error: 'تم تأكيد مراجعة هذا اليوم مسبقًا، وتأكيد المراجعة نهائي وغير قابل للتعديل.',
+    // Idempotent: a retry after a lost response must look like success, not an error.
+    return res.status(200).json({
+      revision: db.revisionLogs[existingIndex],
+      already_recorded: true,
+      message: 'تم تأكيد مراجعة هذا اليوم مسبقًا.',
     });
   }
 
   const newRevision: RevisionLog = {
-    id: `rev_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    id: `rev_${currentUser.id}_${logDate}`,
     member_id: currentUser.id,
     member_name: currentUser.name,
     date: logDate,
@@ -710,7 +865,10 @@ app.post('/api/revisions', async (req: Request, res: Response) => {
 
   // Write to Firestore FIRST - do NOT save locally or return success if Firestore fails!
   try {
-    await firestoreService.addLiveRevision(newRevision);
+    await Promise.race([
+      firestoreService.addLiveRevision(newRevision),
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('Firestore write timeout')), 20000)),
+    ]);
   } catch (fsErr: unknown) {
     const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
     console.error('[Firestore Revision Write Error]', msg);
@@ -719,13 +877,17 @@ app.post('/api/revisions', async (req: Request, res: Response) => {
     });
   }
 
-  db.revisionLogs.push(newRevision);
+  recentRevisions.set(newRevision.id, { log: newRevision, ts: Date.now() });
+  if (!db.revisionLogs.some((r) => r.id === newRevision.id)) db.revisionLogs.push(newRevision);
   saveDatabase(db);
 
   res.status(201).json({
     revision: newRevision,
     message: `تم تسجيل إتمام مراجعة ${logDate === todayDate ? 'اليوم' : `يوم ${logDate}`} (من الربع ${cycleInfo.review_start} إلى ${cycleInfo.review_end}) بنجاح`,
   });
+  } finally {
+    inFlightKeys.delete(lockKey);
+  }
 });
 
 // ==================== ADMIN ENDPOINTS ====================
@@ -857,6 +1019,7 @@ app.delete('/api/admin/members/:id/completely', requireAdmin, async (req: Reques
     await firestoreService.deleteLiveUser(id);
     await firestoreService.deleteLiveRecitationsForMember(id);
     await firestoreService.deleteLiveRevisionsForMember(id);
+    await firestoreService.deleteLiveTestAttemptsForMember(id);
   } catch (fsErr: unknown) {
     const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
     console.error('[Firestore Member Complete Delete Error]', msg);
@@ -878,7 +1041,16 @@ app.delete('/api/admin/members/:id/completely', requireAdmin, async (req: Reques
   // 3. Remove all revision logs for this member
   const initialRevCount = db.revisionLogs.length;
   db.revisionLogs = db.revisionLogs.filter((r) => r.member_id !== id);
+  for (const [k, v] of recentRevisions) if (v.log.member_id === id) recentRevisions.delete(k);
+  for (const [k, v] of recentRecitations) if (v.log.member_id === id || v.log.reciter_id === id) recentRecitations.delete(k);
   const deletedRevsCount = initialRevCount - db.revisionLogs.length;
+
+  // Clean test attempts referencing this member
+  if (Array.isArray(db.testAttempts)) {
+    db.testAttempts = db.testAttempts.filter(
+      (a) => a.candidate_id !== id && a.examiner_id !== id
+    );
+  }
 
   // 4. Invalidate any active session for this user
   for (const [token, uid] of sessions.entries()) {
@@ -1003,14 +1175,20 @@ app.post('/api/admin/resume', requireAdmin, async (req: Request, res: Response) 
     return res.json({ settings: db.settings, message: 'البرنامج غير متوقف حاليًا.' });
   }
 
-  let additionalDays = 0;
+  // Close the pause as a dated period: paused_at .. the day BEFORE resuming (the resume day is active).
+  const closedPeriods = [...(db.settings.pause_periods || [])];
   if (db.settings.paused_at) {
-    additionalDays = getCalendarDaysElapsed(db.settings.paused_at, todayStr);
+    const d = new Date(db.settings.paused_at + 'T00:00:00Z');
+    const t = new Date(todayStr + 'T00:00:00Z');
+    const prev = new Date(t.getTime() - 86400000);
+    if (prev >= d) {
+      closedPeriods.push({ from: db.settings.paused_at, to: prev.toISOString().slice(0, 10) });
+    }
   }
 
   const updatedSettings: GroupSettings = {
     ...db.settings,
-    total_paused_days: (db.settings.total_paused_days || 0) + additionalDays,
+    pause_periods: closedPeriods,
     is_paused: false,
     paused_at: null,
   };
@@ -1035,6 +1213,92 @@ app.post('/api/admin/resume', requireAdmin, async (req: Request, res: Response) 
     cycleInfo,
     message: 'تم استئناف البرنامج بنجاح ومواصلة الدورة.',
   });
+});
+
+// Record a past pause period whose dates were not stored (Admin only).
+// Moves `days` out of the legacy total_paused_days counter into a dated period. Never touches member logs.
+app.post('/api/admin/pause-periods', requireAdmin, async (req: Request, res: Response) => {
+  const { from, to } = req.body || {};
+  const re = /^\d{4}-\d{2}-\d{2}$/;
+  if (!re.test(from || '') || !re.test(to || '') || to < from) {
+    return res.status(400).json({ error: 'تواريخ الإيقاف غير صالحة (من/إلى).' });
+  }
+  const days = getCalendarDaysElapsed(from, to);
+  const legacy = db.settings.total_paused_days || 0;
+  const updatedSettings: GroupSettings = {
+    ...db.settings,
+    total_paused_days: Math.max(0, legacy - days),
+    pause_periods: [...(db.settings.pause_periods || []), { from, to }],
+  };
+  try {
+    await firestoreService.saveLiveSettings(updatedSettings);
+  } catch (fsErr: unknown) {
+    console.error('[Firestore Settings Write Error]', fsErr instanceof Error ? fsErr.message : String(fsErr));
+    return res.status(500).json({ error: 'فشل حفظ فترة الإيقاف في Firestore. حاول مرة أخرى.' });
+  }
+  db.settings = updatedSettings;
+  saveDatabase(db);
+  res.json({ settings: db.settings, message: 'تم تسجيل فترة الإيقاف.' });
+});
+
+// One-time admin backfill: record missing daily revisions for all active members up to `until` (inclusive).
+// Only ADDS missing logs (deterministic id rev_<member>_<date>); never edits or deletes existing data. Idempotent.
+app.post('/api/admin/backfill-revisions', requireAdmin, async (req: Request, res: Response) => {
+  const { until } = req.body || {};
+  const todayDate = getTodayDate(req);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(until || '') || until > todayDate) {
+    return res.status(400).json({ error: 'تاريخ النهاية غير صالح.' });
+  }
+  await syncFromFirestore();
+  const startDate = db.settings.start_date;
+  if (!startDate || until < startDate) {
+    return res.status(400).json({ error: 'تاريخ النهاية يسبق بداية البرنامج.' });
+  }
+
+  const existing = new Set(db.revisionLogs.map((r) => `${r.member_id}|${r.date}`));
+  const members = db.users.filter((u) => u.role === 'member' && u.is_active);
+  const toCreate: RevisionLog[] = [];
+  const msPerDay = 86400000;
+  const startMs = new Date(startDate + 'T00:00:00Z').getTime();
+  const endMs = new Date(until + 'T00:00:00Z').getTime();
+  for (let t = startMs; t <= endMs; t += msPerDay) {
+    const dStr = new Date(t).toISOString().slice(0, 10);
+    const info = calculateCycleInfo(db.settings, db.restDays, dStr);
+    if (!info.has_started) continue;
+    for (const m of members) {
+      if (existing.has(`${m.id}|${dStr}`)) continue;
+      toCreate.push({
+        id: `rev_${m.id}_${dStr}`,
+        member_id: m.id,
+        member_name: m.name,
+        date: dStr,
+        cycle_number: db.settings.current_cycle_number,
+        review_start_quarter: info.review_start,
+        review_end_quarter: info.review_end,
+        notes: 'تسجيل إداري: تعذّر حفظ المراجعة بسبب خلل تقني',
+        created_at: new Date().toISOString(),
+      });
+    }
+  }
+
+  let created = 0;
+  try {
+    for (let i = 0; i < toCreate.length; i += 25) {
+      const chunk = toCreate.slice(i, i + 25);
+      await Promise.all(chunk.map((l) => firestoreService.addLiveRevision(l)));
+      for (const l of chunk) {
+        recentRevisions.set(l.id, { log: l, ts: Date.now() });
+        if (!db.revisionLogs.some((r) => r.id === l.id)) db.revisionLogs.push(l);
+      }
+      created += chunk.length;
+    }
+  } catch (fsErr: unknown) {
+    saveDatabase(db);
+    console.error('[Firestore Backfill Error]', fsErr instanceof Error ? fsErr.message : String(fsErr));
+    return res.status(500).json({ error: `توقف الحفظ بعد إضافة ${created} سجل. أعد المحاولة (آمنة ولا تكرر).`, created });
+  }
+  saveDatabase(db);
+  res.json({ created, members: members.length, until, message: `تمت إضافة ${created} سجل مراجعة ناقص حتى ${until}.` });
 });
 
 // Update Settings: start_date (Admin only)
@@ -1148,12 +1412,14 @@ app.post('/api/admin/factory-reset', requireAdmin, async (req: Request, res: Res
     is_paused: false,
     paused_at: null,
     total_paused_days: 0,
+    pause_periods: [],
   };
 
   // Clear Firestore collections and reset settings FIRST
   try {
     await firestoreService.saveLiveSettings(resetSettings);
     await firestoreService.clearAllLiveLogsAndRestDays();
+    await firestoreService.clearAllLiveTestAttempts();
   } catch (fsErr: unknown) {
     const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
     console.error('[Firestore Factory Reset Error]', msg);
@@ -1165,7 +1431,10 @@ app.post('/api/admin/factory-reset', requireAdmin, async (req: Request, res: Res
   db.settings = resetSettings;
   db.recitationLogs = [];
   db.revisionLogs = [];
+  recentRevisions.clear();
+  recentRecitations.clear();
   db.restDays = [];
+  db.testAttempts = [];
   saveDatabase(db);
 
   const cycleInfo = calculateCycleInfo(db.settings, db.restDays, todayStr);
@@ -1237,7 +1506,904 @@ app.get('/api/admin/stats', requireAdmin, (req: Request, res: Response) => {
   });
 });
 
+// ==================== PERSONAL SELF-TESTS (اختبر نفسك) ====================
+registerPersonalTestRoutes(app, {
+  getAuthUser,
+  getTodayDate,
+  store: personalTestsFirestoreStore,
+});
+
+// ==================== PEER TESTING (الاختبارات المتبادلة) ====================
+
+function parseStrictInteger(val: unknown): number | null {
+  if (val === null || val === undefined || val === '') return null;
+  const n = Number(val);
+  if (!Number.isFinite(n) || !Number.isInteger(n)) return null;
+  return n;
+}
+
+/**
+ * Unified candidate eligibility calculation.
+ * Used identically in /api/tests/:id/eligible-candidates and POST /api/tests/attempts.
+ */
+function computeCandidateStatus(
+  test: TestDefinition,
+  member: User,
+  todayStr: string
+): {
+  is_eligible: boolean;
+  reasons: string[];
+  has_passed: boolean;
+  attempts_count: number;
+  effective_range_end: number;
+  covers_full_range: boolean;
+} {
+  const attempts = (db.testAttempts || []).filter(
+    (a) => a.test_id === test.id && a.candidate_id === member.id
+  );
+  // Full pass only if covers_full_range !== false (legacy attempts count as full range)
+  const hasPassedFull = attempts.some((a) => a.passed && a.covers_full_range !== false);
+  const reasons: string[] = [];
+  let isEligible = true;
+
+  // 1. Must be active member and in test audience
+  if (!member.is_active || member.role !== 'member') {
+    isEligible = false;
+    reasons.push('العضو غير نشط أو ليس عضواً عادياً في المقرأة');
+  }
+  if (!isInTestAudience(test, member.id)) {
+    isEligible = false;
+    reasons.push('العضو ليس ضمن الجمهور المستهدف لهذا الاختبار');
+  }
+
+  // 2. Must not have already passed this test fully
+  if (hasPassedFull) {
+    isEligible = false;
+    reasons.push('اجتاز العضو هذا الاختبار بنجاح مسبقاً');
+  }
+
+  // 3. Determine member's last completed consecutive quarter from recitation logs
+  const memberLogs = (db.recitationLogs || []).filter(
+    (l) => l.member_id === member.id || l.reciter_id === member.id
+  );
+  const completedQuarterSet = new Set<number>(memberLogs.map((l) => l.quarter_number));
+  let lastCompletedConsecutive = 0;
+  while (completedQuarterSet.has(lastCompletedConsecutive + 1)) {
+    lastCompletedConsecutive++;
+  }
+
+  const requireAllQuarters = !!test.prerequisites?.require_all_quarters_completed;
+  let effectiveRangeEnd = test.range_end;
+  let coversFullRange = true;
+
+  if (requireAllQuarters) {
+    // Condition enabled: every quarter of the test range must have been recited
+    // (the member's position relative to today's quarter does NOT matter).
+    let missingInRange = 0;
+    for (let q = test.range_start; q <= test.range_end; q++) {
+      if (!completedQuarterSet.has(q)) missingInRange++;
+    }
+    if (missingInRange > 0) {
+      isEligible = false;
+      reasons.push(
+        `لم يتم تسميع جميع أرباع نطاق الاختبار بعد (متبقٍ ${missingInRange} ربع من الأرباع ${test.range_start} إلى ${test.range_end})`
+      );
+    }
+    effectiveRangeEnd = test.range_end;
+    coversFullRange = true;
+  } else {
+    // Condition disabled: enough to have completed at least the first quarter of the range
+    if (lastCompletedConsecutive < test.range_start) {
+      isEligible = false;
+      reasons.push(
+        `لم يتم تسميع بداية نطاق الاختبار بعد (أتمّ حتى الربع ${lastCompletedConsecutive} ويبدأ الاختبار من الربع ${test.range_start})`
+      );
+    }
+    effectiveRangeEnd = Math.min(test.range_end, lastCompletedConsecutive);
+    coversFullRange = effectiveRangeEnd === test.range_end;
+
+    // If candidate already passed a partial test covering up to or past effectiveRangeEnd,
+    // they cannot be retested until they complete more quarters:
+    const hasPassedAtOrAbove = attempts.some(
+      (a) =>
+        a.passed &&
+        (a.covers_full_range !== false ||
+          (typeof a.effective_range_end === 'number' && a.effective_range_end >= effectiveRangeEnd))
+    );
+    if (!hasPassedFull && hasPassedAtOrAbove) {
+      isEligible = false;
+      reasons.push(
+        `اجتاز العضو الاختبار لهذا النطاق مسبقًا (حتى الربع ${effectiveRangeEnd})، ويمكن إعادة اختباره بعد إتمام أرباع إضافية`
+      );
+    }
+  }
+
+  // 5. Condition B: Revision completed if enforced
+  if (test.prerequisites?.require_revision_completed) {
+    const activeCycleDates = getActiveCycleDates(
+      db.settings.start_date,
+      todayStr,
+      db.restDays,
+      db.settings
+    );
+    const revisionStatus = calculateMemberRevisionStatus(
+      member.id,
+      activeCycleDates,
+      db.revisionLogs,
+      todayStr
+    );
+    if (revisionStatus.missedRevisionDaysCount > 0) {
+      isEligible = false;
+      reasons.push(`توجد أيام مراجعة فائتة (${revisionStatus.missedRevisionDaysCount} يوم)`);
+    }
+    if (!revisionStatus.hasReviewedToday) {
+      isEligible = false;
+      reasons.push('لم يتم تأكيد مراجعة اليوم بعد');
+    }
+  }
+
+  return {
+    is_eligible: isEligible && reasons.length === 0,
+    reasons,
+    has_passed: hasPassedFull,
+    attempts_count: attempts.length,
+    effective_range_end: effectiveRangeEnd,
+    covers_full_range: coversFullRange,
+  };
+}
+
+// 1. Get tests list (Admin can see all, Members see only active test if in audience)
+app.get('/api/tests', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول أولاً' });
+  }
+
+  const allTests = db.tests || [];
+  const rawActiveTest = allTests.find((t) => t.is_active && !t.is_finished) || null;
+  const isAdmin = user.role === 'admin';
+  const activeTest =
+    rawActiveTest && (isAdmin || isInTestAudience(rawActiveTest, user.id))
+      ? rawActiveTest
+      : null;
+
+  res.json({
+    tests: isAdmin ? allTests : (activeTest ? [activeTest] : []),
+    activeTest,
+  });
+});
+
+// 2. Admin: Preview questions for any test (without saving)
+app.get('/api/admin/tests/:id/preview-questions', requireAdmin, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const test = (db.tests || []).find((t) => t.id === id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+
+  const questions = generateTestQuestions(
+    test.range_start,
+    test.range_end,
+    test.questions_count,
+    test.lines_per_question,
+    test.difficulty || 'any'
+  );
+
+  if (questions.length < test.questions_count) {
+    return res.status(422).json({
+      error: 'النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول',
+    });
+  }
+
+  res.json({
+    test_id: test.id,
+    questions,
+  });
+});
+
+// 2b. Admin: Test Impact analysis before activation (التحقق من عدد الأعضاء الممنوعين فوراً)
+app.get('/api/admin/tests/:id/impact', requireAdmin, (req: Request, res: Response) => {
+  const { id } = req.params;
+  const test = (db.tests || []).find((t) => t.id === id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+
+  const todayStr = getTodayDate(req);
+  const cycleInfo = calculateCycleInfo(db.settings, db.restDays, todayStr);
+
+  // Active members in test audience
+  const audienceMembers = db.users.filter(
+    (u) => u.role === 'member' && u.is_active && isInTestAudience(test, u.id)
+  );
+
+  const blockedMembers = audienceMembers.filter((m) => {
+    // Has completed recitation past range_end
+    const quarterStatus = calculateMemberRequiredQuarter(
+      m.id,
+      cycleInfo.quarter_of_day,
+      db.recitationLogs
+    );
+    const isPastRange = quarterStatus.requiredQuarter > test.range_end;
+    if (!isPastRange) return false;
+
+    // Has not passed this test fully
+    const hasPassed = (db.testAttempts || []).some(
+      (a) => a.test_id === test.id && a.candidate_id === m.id && a.passed && a.covers_full_range !== false
+    );
+    return !hasPassed;
+  });
+
+  res.json({
+    test_id: test.id,
+    test_type: test.test_type,
+    range_start: test.range_start,
+    range_end: test.range_end,
+    blocked_count: blockedMembers.length,
+    blocked_members: blockedMembers.map((m) => ({ id: m.id, name: m.name })),
+  });
+});
+
+// 3. Admin: Create or update test definition
+app.post('/api/admin/tests', requireAdmin, async (req: Request, res: Response) => {
+  const admin = getAuthUser(req)!;
+  const {
+    id,
+    title,
+    range_start,
+    range_end,
+    questions_count,
+    lines_per_question,
+    prerequisites,
+    has_max_errors,
+    max_errors_allowed,
+    test_type,
+    difficulty,
+    audience,
+    selected_member_ids,
+    is_active,
+  } = req.body;
+
+  // Strict integer validation using parseStrictInteger
+  const rStart = parseStrictInteger(range_start);
+  const rEnd = parseStrictInteger(range_end);
+  const qCount = parseStrictInteger(questions_count);
+  const lPerQ = parseStrictInteger(lines_per_question);
+
+  if (rStart === null || rStart < 1 || rStart > 240) {
+    return res.status(400).json({ error: 'بداية نطاق الاختبار يجب أن تكون عدداً صحيحاً بين 1 و 240' });
+  }
+  if (rEnd === null || rEnd < 1 || rEnd > 240) {
+    return res.status(400).json({ error: 'نهاية نطاق الاختبار يجب أن تكون عدداً صحيحاً بين 1 و 240' });
+  }
+  if (rStart > rEnd) {
+    return res.status(400).json({ error: 'بداية النطاق يجب أن تكون أقل من أو تساوي نهاية النطاق' });
+  }
+  if (qCount === null || qCount < 1 || qCount > 50) {
+    return res.status(400).json({ error: 'عدد الأسئلة يجب أن يكون عدداً صحيحاً بين 1 و 50' });
+  }
+  if (lPerQ === null || lPerQ < 1 || lPerQ > 60) {
+    return res.status(400).json({ error: 'عدد الأسطر لكل سؤال يجب أن يكون عدداً صحيحاً بين 1 و 60' });
+  }
+
+  // Capacity check using estimateRangeLines
+  const totalRangeLines = estimateRangeLines(rStart, rEnd);
+  if (qCount * lPerQ > 0.8 * totalRangeLines) {
+    return res.status(400).json({
+      error: 'النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول، قلّل العدد أو الأسطر أو وسّع النطاق',
+    });
+  }
+
+  // Title validation
+  const cleanTitle = title ? String(title).trim().slice(0, 120) : `اختبار الأرباع (${rStart} - ${rEnd})`;
+
+  // Max errors validation
+  const hasMax = !!has_max_errors;
+  let maxErr: number | undefined = undefined;
+  if (hasMax) {
+    const parsedMax = parseStrictInteger(max_errors_allowed);
+    if (parsedMax === null || parsedMax < 0 || parsedMax > 100) {
+      return res.status(400).json({ error: 'الحد الأقصى للأخطاء يجب أن يكون عدداً صحيحاً بين 0 و 100' });
+    }
+    maxErr = parsedMax;
+  }
+
+  const tType = test_type === 'mandatory' ? 'mandatory' : 'recommended';
+  const shouldBeActive = is_active !== undefined ? !!is_active : true;
+  const targetAudience: 'all' | 'selected' = audience === 'all' ? 'all' : 'selected';
+  const selectedMembers = Array.isArray(selected_member_ids)
+    ? selected_member_ids.map(String).filter(Boolean)
+    : [];
+
+  // Reject selected audience if member list is empty
+  if (targetAudience === 'selected' && selectedMembers.length === 0) {
+    return res.status(400).json({
+      error: 'يرجى تحديد عضو واحد على الأقل في قائمة الأعضاء المختارين، أو اختيار (كل الأعضاء)',
+    });
+  }
+
+  // Validate difficulty from 5 allowed values
+  const validDifficulties = ['any', 'easy', 'medium', 'hard', 'mixed'] as const;
+  const testDiff: 'any' | 'easy' | 'medium' | 'hard' | 'mixed' = validDifficulties.includes(difficulty)
+    ? difficulty
+    : 'any';
+
+  if (!db.tests) db.tests = [];
+
+  const nowStr = new Date().toISOString();
+  const existingIdx = id ? db.tests.findIndex((t) => t.id === id) : -1;
+  const existingTest = existingIdx >= 0 ? db.tests[existingIdx] : null;
+
+  if (existingTest?.is_finished) {
+    return res.status(400).json({
+      error: 'هذا الاختبار منتهٍ نهائيًا ولا يمكن إعادة تفعيله، أنشئ اختبارًا جديدًا',
+    });
+  }
+
+  // Check if test has prior attempts
+  const hasAttempts = existingTest
+    ? (db.testAttempts || []).some((a) => a.test_id === existingTest.id)
+    : false;
+
+  let createNewDueToMaterialChange = false;
+  if (existingTest && hasAttempts) {
+    const materialChanged =
+      existingTest.range_start !== rStart ||
+      existingTest.range_end !== rEnd ||
+      existingTest.questions_count !== qCount ||
+      existingTest.lines_per_question !== lPerQ ||
+      (existingTest.difficulty || 'any') !== testDiff;
+    if (materialChanged) {
+      createNewDueToMaterialChange = true;
+    }
+  }
+
+  const targetTestId =
+    createNewDueToMaterialChange || !id
+      ? `test_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`
+      : String(id).trim();
+
+  const testDoc: TestDefinition = {
+    id: targetTestId,
+    title: cleanTitle,
+    range_start: rStart,
+    range_end: rEnd,
+    questions_count: qCount,
+    lines_per_question: lPerQ,
+    prerequisites: {
+      require_all_quarters_completed: !!prerequisites?.require_all_quarters_completed,
+      require_revision_completed: !!prerequisites?.require_revision_completed,
+    },
+    has_max_errors: hasMax,
+    max_errors_allowed: maxErr,
+    test_type: tType,
+    difficulty: testDiff,
+    audience: targetAudience,
+    selected_member_ids: selectedMembers,
+    is_active: shouldBeActive,
+    created_at: createNewDueToMaterialChange || !existingTest ? nowStr : existingTest.created_at,
+    created_by_admin_id: admin.id,
+    updated_at: nowStr,
+  };
+
+  // Atomic write to Firestore FIRST
+  try {
+    // If archiving old test due to material changes
+    if (createNewDueToMaterialChange && existingTest) {
+      await firestoreService.updateLiveTest(existingTest.id, {
+        is_active: false,
+        updated_at: nowStr,
+      });
+    }
+
+    // If activating new test, deactivate any other active tests first
+    if (shouldBeActive) {
+      for (const other of db.tests) {
+        if (other.id !== targetTestId && other.is_active) {
+          await firestoreService.updateLiveTest(other.id, {
+            is_active: false,
+            updated_at: nowStr,
+          });
+        }
+      }
+    }
+
+    // Save test doc to Firestore
+    await firestoreService.saveLiveTest(testDoc);
+  } catch (fsErr: unknown) {
+    const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+    console.error('[Firestore Test Save Error]', msg);
+    return res.status(500).json({
+      error: 'فشل حفظ الاختبار في قاعدة البيانات السحابية (Firestore). لم يتم حفظ الاختبار، يرجى المحاولة ثانية.',
+    });
+  }
+
+  // Update memory only upon Firestore success
+  if (createNewDueToMaterialChange && existingTest) {
+    existingTest.is_active = false;
+  }
+  if (shouldBeActive) {
+    for (const other of db.tests) {
+      if (other.id !== targetTestId) {
+        other.is_active = false;
+      }
+    }
+  }
+
+  const existingMemoryIdx = db.tests.findIndex((t) => t.id === targetTestId);
+  if (existingMemoryIdx >= 0) {
+    db.tests[existingMemoryIdx] = testDoc;
+  } else {
+    db.tests.push(testDoc);
+  }
+  saveDatabase(db);
+
+  res.json({
+    success: true,
+    message: createNewDueToMaterialChange
+      ? 'نظراً لوجود محاولات سابقة، تم حفظ التعديلات كاختبار جديد وأرشفة الاختبار السابق لحفظ سجل النتائج.'
+      : 'تم حفظ الاختبار بنجاح.',
+    test: testDoc,
+  });
+});
+
+// 4. Admin: Toggle active status of a test
+app.patch('/api/admin/tests/:id/status', requireAdmin, async (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { is_active } = req.body;
+
+  if (!db.tests) db.tests = [];
+  const test = db.tests.find((t) => t.id === id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+
+  if (test.is_finished) {
+    return res.status(400).json({
+      error: 'هذا الاختبار منتهٍ نهائيًا ولا يمكن إعادة تفعيله، أنشئ اختبارًا جديدًا',
+    });
+  }
+
+  const nextActive = !!is_active;
+
+  // Reject activation of selected-audience test if selected_member_ids is empty
+  if (
+    nextActive &&
+    (test.audience === 'selected' || !test.audience) &&
+    (!test.selected_member_ids || test.selected_member_ids.length === 0)
+  ) {
+    return res.status(400).json({
+      error: 'لا يمكن تفعيل اختبار مخصص لأعضاء مختارين دون تحديد أي عضو في قائمته',
+    });
+  }
+
+  const nowStr = new Date().toISOString();
+
+  // Write to Firestore FIRST
+  try {
+    if (nextActive) {
+      for (const other of db.tests) {
+        if (other.id !== id && other.is_active) {
+          await firestoreService.updateLiveTest(other.id, {
+            is_active: false,
+            updated_at: nowStr,
+          });
+        }
+      }
+    }
+    await firestoreService.updateLiveTest(id, {
+      is_active: nextActive,
+      updated_at: nowStr,
+    });
+  } catch (fsErr: unknown) {
+    const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+    console.error('[Firestore Test Status Error]', msg);
+    return res.status(500).json({
+      error: 'فشل تعديل حالة الاختبار في قاعدة البيانات السحابية (Firestore). يرجى المحاولة ثانية.',
+    });
+  }
+
+  // Update memory only upon Firestore success
+  if (nextActive) {
+    for (const other of db.tests) {
+      if (other.id !== id) {
+        other.is_active = false;
+      }
+    }
+  }
+  test.is_active = nextActive;
+  saveDatabase(db);
+
+  res.json({
+    success: true,
+    message: nextActive ? 'تم تفعيل الاختبار بنجاح' : 'تم إيقاف الاختبار بنجاح',
+    test,
+  });
+});
+
+// Admin: Finish test permanently (إنهاء الاختبار نهائيًا)
+app.post('/api/admin/tests/:id/finish', requireAdmin, async (req: Request, res: Response) => {
+  const { id } = req.params;
+
+  if (!db.tests) db.tests = [];
+  const test = db.tests.find((t) => t.id === id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+
+  if (test.is_finished) {
+    return res.status(400).json({ error: 'هذا الاختبار منتهٍ بالفعل ولا يمكن إنهاؤه مجدداً' });
+  }
+
+  const nowStr = new Date().toISOString();
+
+  // Write to Firestore FIRST
+  try {
+    await firestoreService.updateLiveTest(id, {
+      is_active: false,
+      is_finished: true,
+      finished_at: nowStr,
+      updated_at: nowStr,
+    });
+  } catch (fsErr: unknown) {
+    const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+    console.error('[Firestore Test Finish Error]', msg);
+    return res.status(500).json({
+      error: 'فشل إنهاء الاختبار في قاعدة البيانات السحابية (Firestore). يرجى المحاولة ثانية.',
+    });
+  }
+
+  // Update memory only upon Firestore success
+  test.is_active = false;
+  test.is_finished = true;
+  test.finished_at = nowStr;
+  test.updated_at = nowStr;
+  saveDatabase(db);
+
+  res.json({
+    success: true,
+    message: 'تم إنهاء الاختبار نهائيًا بنجاح',
+    test,
+  });
+});
+
+// 5. Eligible candidates for the active test
+app.get('/api/tests/:id/eligible-candidates', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول أولاً' });
+  }
+
+  const { id } = req.params;
+  const test = (db.tests || []).find((t) => t.id === id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+
+  // Examiner must be member, active, and in audience
+  const isAdmin = user.role === 'admin';
+  if (!isAdmin) {
+    if (user.role !== 'member' || !user.is_active || !isInTestAudience(test, user.id)) {
+      return res.status(403).json({ error: 'لست ضمن قائمة الأعضاء المخولين بالمشاركة في هذا الاختبار' });
+    }
+  }
+
+  const todayStr = getTodayDate(req);
+
+  // Eligible peers: active members in test audience (and not the tester themselves)
+  const candidatePool = db.users.filter(
+    (u) => u.role === 'member' && u.is_active && u.id !== user.id && isInTestAudience(test, u.id)
+  );
+
+  const eligibleCandidates = candidatePool.map((m) => {
+    const status = computeCandidateStatus(test, m, todayStr);
+    return {
+      id: m.id,
+      name: m.name,
+      phone: m.phone,
+      is_eligible: status.is_eligible,
+      ineligibility_reasons: status.reasons,
+      has_passed: status.has_passed,
+      attempts_count: status.attempts_count,
+      effective_range_end: status.effective_range_end,
+      covers_full_range: status.covers_full_range,
+    };
+  });
+
+  res.json({
+    test,
+    candidates: eligibleCandidates,
+  });
+});
+
+// 6. Generate test questions for an active test session
+app.get('/api/tests/:id/generate-questions', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول أولاً' });
+  }
+
+  const { id } = req.params;
+  const test = (db.tests || []).find((t) => t.id === id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+
+  const isAdmin = user.role === 'admin';
+  if (!isAdmin && (!user.is_active || user.role !== 'member' || !isInTestAudience(test, user.id))) {
+    return res.status(403).json({ error: 'لست ضمن قائمة الأعضاء المخولين بالمشاركة في هذا الاختبار' });
+  }
+
+  const todayStr = getTodayDate(req);
+  const candidateId = typeof req.query.candidate_id === 'string' ? req.query.candidate_id : undefined;
+
+  let effectiveRangeEnd = test.range_end;
+
+  if (candidateId) {
+    const candidate = db.users.find((u) => u.id === candidateId && u.is_active);
+    if (!candidate) {
+      return res.status(404).json({ error: 'العضو المختبَر غير موجود' });
+    }
+    const status = computeCandidateStatus(test, candidate, todayStr);
+    if (!status.is_eligible) {
+      return res.status(400).json({
+        error: `العضو غير مؤهل للاختبار: ${status.reasons.join('، ')}`,
+      });
+    }
+    effectiveRangeEnd = status.effective_range_end;
+  }
+
+  const questions = generateTestQuestions(
+    test.range_start,
+    effectiveRangeEnd,
+    test.questions_count,
+    test.lines_per_question,
+    test.difficulty || 'any'
+  );
+
+  if (questions.length < test.questions_count) {
+    return res.status(422).json({
+      error: 'النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول',
+    });
+  }
+
+  res.json({
+    test_id: test.id,
+    effective_range_end: effectiveRangeEnd,
+    questions,
+  });
+});
+
+// 7. Record a completed test attempt (peer testing submission)
+app.post('/api/tests/attempts', async (req: Request, res: Response) => {
+  const examiner = getAuthUser(req);
+  if (!examiner) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول أولاً' });
+  }
+
+  const { test_id, candidate_id, questions_results, notes } = req.body;
+
+  if (!test_id || !candidate_id) {
+    return res.status(400).json({ error: 'يرجى تحديد الاختبار والعضو المُختبَر' });
+  }
+
+  const test = (db.tests || []).find((t) => t.id === test_id);
+  if (!test) {
+    return res.status(404).json({ error: 'الاختبار غير موجود' });
+  }
+  if (!test.is_active) {
+    return res.status(400).json({ error: 'هذا الاختبار غير مفعّل حالياً' });
+  }
+
+  // Examiner validation
+  if (examiner.role !== 'member' || !examiner.is_active) {
+    return res.status(403).json({ error: 'يجب أن يكون المُختبِر عضواً نشطاً في المقرأة' });
+  }
+  if (!isInTestAudience(test, examiner.id)) {
+    return res.status(403).json({ error: 'أنت لست ضمن قائمة الأعضاء المخولين بإجراء هذا الاختبار' });
+  }
+
+  // Cannot test oneself
+  if (examiner.id === candidate_id) {
+    return res.status(400).json({ error: 'لا يمكن للعضو اختبار نفسه؛ يجب أن يختبرك زميل في المقرأة' });
+  }
+
+  // Candidate validation
+  const candidate = db.users.find((u) => u.id === candidate_id);
+  if (!candidate || candidate.role !== 'member' || !candidate.is_active) {
+    return res.status(404).json({ error: 'العضو المُختبَر غير موجود أو حسابه غير نشط' });
+  }
+  if (!isInTestAudience(test, candidate.id)) {
+    return res.status(400).json({ error: 'العضو المُختبَر ليس ضمن قائمة الأعضاء المشمولين بهذا الاختبار' });
+  }
+
+  // Anti-duplicate / Spam prevention: reject matching attempt within last 60 seconds
+  const nowMs = Date.now();
+  const recentDuplicate = (db.testAttempts || []).find((a) => {
+    if (a.test_id === test.id && a.candidate_id === candidate.id && a.examiner_id === examiner.id) {
+      const attemptTime = new Date(a.created_at).getTime();
+      return nowMs - attemptTime < 60000;
+    }
+    return false;
+  });
+  if (recentDuplicate) {
+    return res.status(429).json({
+      error: 'تم تسجيل محاولة لنفس العضو من قِبلك للتو! يرجى الانتظار دقيقة واحدة قبل تسجيل محاولة جديدة منعاً للتكرار.',
+    });
+  }
+
+  const todayStr = getTodayDate(req);
+
+  // Candidate eligibility check at submission time using unified function
+  const candidateStatus = computeCandidateStatus(test, candidate, todayStr);
+  if (candidateStatus.has_passed) {
+    return res.status(400).json({ error: 'العضو اجتاز هذا الاختبار بالفعل بنجاح ولا يحتاج لإعادته' });
+  }
+  if (!candidateStatus.is_eligible) {
+    return res.status(400).json({
+      error: `العضو غير مؤهل لخوض هذا الاختبار حالياً: ${candidateStatus.reasons.join('، ')}`,
+    });
+  }
+
+  // Untrusted client validation for questions
+  if (!Array.isArray(questions_results) || questions_results.length === 0) {
+    return res.status(400).json({ error: 'يجب إرسال بيانات أسئلة الاختبار' });
+  }
+  if (questions_results.length !== test.questions_count) {
+    return res.status(400).json({
+      error: `عدد الأسئلة المرسلة (${questions_results.length}) لا يطابق عدد أسئلة الاختبار المطلوب بالضبط (${test.questions_count})`,
+    });
+  }
+
+  const effectiveRangeEnd = candidateStatus.effective_range_end;
+  const minVerseIdx = getQuarterStartIndex(test.range_start);
+  const maxVerseIdx = getQuarterEndIndex(effectiveRangeEnd);
+
+  const verifiedQuestionsResults = [];
+  let calculatedTotalErrors = 0;
+  let prevEndVerseIdx = -1;
+
+  for (let i = 0; i < questions_results.length; i++) {
+    const q = questions_results[i];
+    const sSurah = parseStrictInteger(q?.start_surah);
+    const sAyah = parseStrictInteger(q?.start_ayah);
+    const eSurah = parseStrictInteger(q?.end_surah);
+    const eAyah = parseStrictInteger(q?.end_ayah);
+    const qErrors = parseStrictInteger(q?.errors_count);
+
+    if (sSurah === null || sAyah === null || eSurah === null || eAyah === null) {
+      return res.status(400).json({ error: `بيانات السورة أو الآية غير صالحة في السؤال رقم ${i + 1}` });
+    }
+
+    const startIdx = getVerseIndexBySurahAyah(sSurah, sAyah);
+    const endIdx = getVerseIndexBySurahAyah(eSurah, eAyah);
+
+    if (startIdx === undefined || endIdx === undefined) {
+      return res.status(400).json({ error: `الآية المحددة غير موجودة في المصحف الشريف في السؤال رقم ${i + 1}` });
+    }
+    if (startIdx > endIdx) {
+      return res.status(400).json({ error: `بداية السؤال يجب أن تسبق نهايته في السؤال رقم ${i + 1}` });
+    }
+    if (startIdx < minVerseIdx || endIdx > maxVerseIdx) {
+      return res.status(400).json({
+        error: `السؤال رقم ${i + 1} يقع خارج نطاق أرباع الاختبار (${test.range_start} إلى ${effectiveRangeEnd})`,
+      });
+    }
+    if (i > 0 && startIdx <= prevEndVerseIdx) {
+      return res.status(400).json({ error: `يوجد تداخل بين السؤال رقم ${i + 1} والسؤال السابق له` });
+    }
+    prevEndVerseIdx = endIdx;
+
+    if (qErrors === null || qErrors < 0 || qErrors > 99) {
+      return res.status(400).json({ error: `عدد الأخطاء يجب أن يكون رقماً صحيحاً بين 0 و 99 في السؤال رقم ${i + 1}` });
+    }
+    calculatedTotalErrors += qErrors;
+
+    const startVerseObj = ALL_VERSES[startIdx];
+    const endVerseObj = ALL_VERSES[endIdx];
+
+    const cleanQNotes = q.notes ? String(q.notes).trim().slice(0, 300) : undefined;
+
+    verifiedQuestionsResults.push({
+      question_number: i + 1,
+      start_surah: startVerseObj.surah,
+      start_surah_name: startVerseObj.surah_name,
+      start_ayah: startVerseObj.ayah,
+      end_surah: endVerseObj.surah,
+      end_surah_name: endVerseObj.surah_name,
+      end_ayah: endVerseObj.ayah,
+      errors_count: qErrors,
+      notes: cleanQNotes,
+    });
+  }
+
+  // Calculate pass/fail strictly on server
+  let passed = true;
+  if (test.has_max_errors && typeof test.max_errors_allowed === 'number') {
+    passed = calculatedTotalErrors <= test.max_errors_allowed;
+  }
+
+  const cleanOverallNotes = notes ? String(notes).trim().slice(0, 300) : undefined;
+  const nowIso = new Date().toISOString();
+  const attemptId = `att_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
+
+  const attemptDoc: TestAttempt = {
+    id: attemptId,
+    test_id: test.id,
+    candidate_id: candidate.id,
+    candidate_name: candidate.name,
+    examiner_id: examiner.id,
+    examiner_name: examiner.name,
+    total_errors: calculatedTotalErrors,
+    passed,
+    status: passed ? 'passed' : 'failed',
+    date: todayStr,
+    questions_results: verifiedQuestionsResults,
+    notes: cleanOverallNotes,
+    created_at: nowIso,
+    effective_range_end: effectiveRangeEnd,
+    covers_full_range: candidateStatus.covers_full_range,
+  };
+
+  // Write to Firestore FIRST
+  try {
+    await firestoreService.addLiveTestAttempt(attemptDoc);
+  } catch (fsErr: unknown) {
+    const msg = fsErr instanceof Error ? fsErr.message : String(fsErr);
+    console.error('[Firestore Test Attempt Write Error]', msg);
+    return res.status(500).json({
+      error: 'فشل حفظ نتيجة الاختبار في قاعدة البيانات السحابية (Firestore). لم يتم حفظ النتيجة، يرجى المحاولة ثانية.',
+    });
+  }
+
+  // Update memory only upon Firestore success
+  if (!db.testAttempts) db.testAttempts = [];
+  db.testAttempts.unshift(attemptDoc);
+  saveDatabase(db);
+
+  res.json({
+    success: true,
+    message: passed
+      ? 'تم تسجيل الاختبار بنجاح واجتياز العضو للاختبار!'
+      : 'تم تسجيل الاختبار (لم يجتز العضو بنجاح بسبب تجاوز حد الأخطاء المسموح).',
+    attempt: attemptDoc,
+  });
+});
+
+// 8. Get test attempts (with privacy filter: non-admins only see attempts they took part in)
+app.get('/api/tests/attempts', (req: Request, res: Response) => {
+  const user = getAuthUser(req);
+  if (!user) {
+    return res.status(401).json({ error: 'يجب تسجيل الدخول أولاً' });
+  }
+
+  const { test_id, candidate_id, examiner_id } = req.query;
+  const isAdmin = user.role === 'admin';
+
+  let attempts = [...(db.testAttempts || [])];
+
+  // Privacy filter: Regular members only see their own attempts
+  if (!isAdmin) {
+    attempts = attempts.filter((a) => a.candidate_id === user.id || a.examiner_id === user.id);
+  }
+
+  if (test_id) {
+    attempts = attempts.filter((a) => a.test_id === test_id);
+  }
+  if (candidate_id) {
+    attempts = attempts.filter((a) => a.candidate_id === candidate_id);
+  }
+  if (examiner_id) {
+    attempts = attempts.filter((a) => a.examiner_id === examiner_id);
+  }
+
+  res.json({
+    attempts,
+  });
+});
+
 // ==================== VITE / STATIC SERVING ====================
+
 
 async function startServer() {
   if (process.env.NODE_ENV !== 'production') {

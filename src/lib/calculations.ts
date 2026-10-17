@@ -97,6 +97,33 @@ export function getCalendarDaysElapsed(startDateStr: string, targetDateStr: stri
   return diffDays + 1;
 }
 
+/** Paused periods (inclusive 'from' and 'to') plus the currently open pause, if any. */
+export function getPausePeriods(settings?: GroupSettings | null, targetDateStr?: string): { from: string; to: string }[] {
+  if (!settings) return [];
+  const periods: { from: string; to: string }[] = [...(settings.pause_periods || [])];
+  if (settings.is_paused && settings.paused_at) {
+    periods.push({ from: settings.paused_at, to: targetDateStr && targetDateStr > settings.paused_at ? targetDateStr : settings.paused_at });
+  }
+  return periods;
+}
+
+export function isPausedDate(settings: GroupSettings | undefined | null, dateStr: string): boolean {
+  if (!settings) return false;
+  if ((settings.pause_periods || []).some((p) => dateStr >= p.from && dateStr <= p.to)) return true;
+  return !!(settings.is_paused && settings.paused_at && dateStr >= settings.paused_at);
+}
+
+/** Number of paused calendar days between start and target (inclusive), legacy counter included. */
+export function countPausedDays(settings: GroupSettings, startDateStr: string, targetDateStr: string): number {
+  let n = settings.total_paused_days || 0; // legacy days with unknown dates
+  for (const p of getPausePeriods(settings, targetDateStr)) {
+    const from = p.from < startDateStr ? startDateStr : p.from;
+    const to = p.to > targetDateStr ? targetDateStr : p.to;
+    if (to >= from) n += getCalendarDaysElapsed(from, to);
+  }
+  return n;
+}
+
 /**
  * Core mathematical calculation engine for Motqin group plan:
  * - TOTAL_QUARTERS = 240
@@ -153,19 +180,11 @@ export function calculateCycleInfo(
 
   // Count rest days that occurred between start_date and targetDate (inclusive)
   const restDaysInPeriod = restDays.filter((rd) => {
-    return rd.date >= startDate && rd.date <= targetDateStr;
+    return rd.date >= startDate && rd.date <= targetDateStr && !isPausedDate(settings, rd.date);
   });
   const restDaysCount = restDaysInPeriod.length;
 
-  // Calculate paused days
-  let currentPauseDays = 0;
-  if (settings.is_paused && settings.paused_at) {
-    if (targetDateStr >= settings.paused_at) {
-      // Days between paused_at and targetDateStr (inclusive of the paused duration)
-      currentPauseDays = getCalendarDaysElapsed(settings.paused_at, targetDateStr);
-    }
-  }
-  const totalPausedDays = (settings.total_paused_days || 0) + currentPauseDays;
+  const totalPausedDays = countPausedDays(settings, startDate, targetDateStr);
 
   // Calculate raw cycle day: subtract rest days and paused days
   let calculatedCycleDay = daysElapsed - restDaysCount - totalPausedDays;
@@ -318,10 +337,8 @@ export function getActiveCycleDates(
     // Skip rest days
     if (restDaySet.has(dStr)) continue;
 
-    // Skip paused dates if currently paused
-    if (settings?.is_paused && settings.paused_at && dStr >= settings.paused_at) {
-      continue;
-    }
+    // Skip paused dates
+    if (isPausedDate(settings, dStr)) continue;
 
     activeDates.push(dStr);
   }

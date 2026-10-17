@@ -283,11 +283,15 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
 }) => {
   const [notes, setNotes] = useState<string>('');
   const [confirmed, setConfirmed] = useState<boolean>(true);
+  const [submitting, setSubmitting] = useState<boolean>(false);
+  const [submitError, setSubmitError] = useState<string>('');
 
   useEffect(() => {
     if (isOpen) {
       setNotes('');
       setConfirmed(true);
+      setSubmitting(false);
+      setSubmitError('');
     }
   }, [isOpen]);
 
@@ -303,13 +307,21 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!confirmed) return;
+    if (!confirmed || submitting) return;
+    setSubmitting(true);
+    setSubmitError('');
     const payload: { notes?: string; date?: string } = {
       ...(notes.trim() ? { notes: notes.trim() } : {}),
       ...(targetDate ? { date: targetDate } : {}),
     };
-    await onSubmit(payload);
-    onClose();
+    try {
+      await onSubmit(payload);
+      onClose();
+    } catch (err: any) {
+      setSubmitError(err?.message || 'تعذر حفظ المراجعة. لم يتم الحفظ، أعد المحاولة.');
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -398,6 +410,12 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
             />
           </div>
 
+          {submitError && (
+            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-bold">
+              {submitError}
+            </div>
+          )}
+
           <div className="pt-2 flex items-center justify-end gap-2 border-t border-stone-100">
             <button
               type="button"
@@ -409,10 +427,10 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
             <button
               id="submit-revision-btn"
               type="submit"
-              disabled={!confirmed || loading}
+              disabled={!confirmed || loading || submitting}
               className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-emerald-700 hover:bg-emerald-800 shadow-xs transition disabled:opacity-50"
             >
-              {loading ? 'جاري الحفظ...' : isMissedDay ? 'تأكيد إتمام المراجعة المتأخرة' : 'تأكيد إتمام المراجعة'}
+              {loading || submitting ? 'جاري الحفظ...' : isMissedDay ? 'تأكيد إتمام المراجعة المتأخرة' : 'تأكيد إتمام المراجعة'}
             </button>
           </div>
         </form>

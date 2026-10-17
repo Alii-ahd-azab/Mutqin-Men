@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo } from '../types';
+import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo, TestDefinition } from '../types';
 import { getQuarterInfo } from '../data/quranData';
 import {
   calculateMemberRequiredQuarter,
@@ -43,6 +43,7 @@ import {
 import { AdminMemberModal } from './AdminMemberModal';
 import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
 import { DailyThoughtEditor } from './DailyThoughtEditor';
+import { AdminTestsTab } from './AdminTestsTab';
 
 interface AdminDashboardProps {
   currentUser: User;
@@ -74,6 +75,8 @@ interface AdminDashboardProps {
   onFactoryReset: () => Promise<void>;
   onRefresh: () => void;
   loading: boolean;
+  tests?: TestDefinition[];
+  activeTest?: TestDefinition | null;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -96,8 +99,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onFactoryReset,
   onRefresh,
   loading,
+  tests = [],
+  activeTest = null,
 }) => {
   const [activeTab, setActiveTab] = useState<'today' | 'members' | 'stats' | 'settings'>('today');
+  const [settingsSubTab, setSettingsSubTab] = useState<'general' | 'tests'>('general');
   const [membersSubTab, setMembersSubTab] = useState<'active' | 'excluded'>('active');
   const [memberToDeleteCompletely, setMemberToDeleteCompletely] = useState<User | null>(null);
   const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
@@ -136,6 +142,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Settings: Start Date
   const [startDateInput, setStartDateInput] = useState(settings.start_date || '');
   const [settingsMsg, setSettingsMsg] = useState('');
+  const [ppFrom, setPpFrom] = useState('');
+  const [ppTo, setPpTo] = useState('');
+  const [ppMsg, setPpMsg] = useState('');
+  const [bfConfirm, setBfConfirm] = useState(false);
+  const [bfMsg, setBfMsg] = useState('');
 
   // Password reset inline state
   const [editingPasswordUserId, setEditingPasswordUserId] = useState<string | null>(null);
@@ -1449,15 +1460,51 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* =================================================================== */}
       {activeTab === 'settings' && (
         <div className="space-y-6">
-          {/* Section: خاطرة اليوم (Daily Thought Editor) */}
-          <DailyThoughtEditor
-            currentThought={settings.daily_thought}
-            updatedAt={settings.daily_thought_updated_at}
-            updatedBy={settings.daily_thought_updated_by}
-            onSave={(htmlContent) => onUpdateDailyThought({ daily_thought: htmlContent })}
-            onDelete={onDeleteDailyThought}
-            loading={loading}
-          />
+          {/* Settings Sub Tabs (عامة / الاختبارات) */}
+          <div className="flex bg-stone-100 p-1 rounded-2xl gap-1 text-xs font-bold border border-stone-200 max-w-sm">
+            <button
+              onClick={() => setSettingsSubTab('general')}
+              className={`flex-1 py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 transition ${
+                settingsSubTab === 'general'
+                  ? 'bg-white text-emerald-900 shadow-xs border border-stone-200'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              <Settings className="w-3.5 h-3.5 text-emerald-700" />
+              <span>إعدادات الدورة والإيقاف</span>
+            </button>
+
+            <button
+              onClick={() => setSettingsSubTab('tests')}
+              className={`flex-1 py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 transition ${
+                settingsSubTab === 'tests'
+                  ? 'bg-white text-emerald-900 shadow-xs border border-stone-200'
+                  : 'text-stone-600 hover:text-stone-900'
+              }`}
+            >
+              <Award className="w-3.5 h-3.5 text-emerald-700" />
+              <span>الاختبارات {activeTest ? '(نشط)' : ''}</span>
+            </button>
+          </div>
+
+          {settingsSubTab === 'tests' ? (
+            <AdminTestsTab
+              tests={tests}
+              activeTest={activeTest}
+              members={users.filter((u) => u.role === 'member' && u.is_active)}
+              onRefresh={onRefresh}
+            />
+          ) : (
+            <div className="space-y-6">
+              {/* Section: خاطرة اليوم (Daily Thought Editor) */}
+              <DailyThoughtEditor
+                currentThought={settings.daily_thought}
+                updatedAt={settings.daily_thought_updated_at}
+                updatedBy={settings.daily_thought_updated_by}
+                onSave={(htmlContent) => onUpdateDailyThought({ daily_thought: htmlContent })}
+                onDelete={onDeleteDailyThought}
+                loading={loading}
+              />
 
           {/* Section 1: Pause / Resume the entire program */}
           <div className="bg-white rounded-3xl border border-stone-200 p-6 shadow-2xs space-y-4">
@@ -1492,6 +1539,64 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <p className="text-xs text-stone-600 leading-relaxed">
                 • إجمالي أيام الإيقاف المؤقت المحسوبة سابقًا: <strong>{cycleInfo.paused_days_count} يومًا</strong>.
               </p>
+
+              <div className="pt-2 space-y-2 border-t border-stone-200">
+                <p className="text-xs font-bold text-stone-800">تسجيل المراجعات الناقصة حتى الجمعة 16 أكتوبر 2026</p>
+                <p className="text-[11px] text-stone-500">يضيف مراجعة لكل عضو نشط في كل يوم ناقص من بداية البرنامج حتى 2026-10-16 (بسبب خلل الحفظ). لا يعدّل ولا يحذف أي سجل موجود، وتكرار الضغط آمن.</p>
+                {!bfConfirm ? (
+                  <button onClick={() => setBfConfirm(true)} className="px-4 py-2 rounded-lg bg-amber-700 text-white text-xs font-bold cursor-pointer">
+                    تسجيل المراجعات الناقصة
+                  </button>
+                ) : (
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-xs text-rose-700 font-bold">تأكيد: سيتم تسجيل المراجعات لجميع الأعضاء النشطين.</span>
+                    <button
+                      onClick={async () => {
+                        try {
+                          const r = await api.adminBackfillRevisions('2026-10-16');
+                          setBfMsg(r.message);
+                          onRefresh();
+                        } catch (e: any) {
+                          setBfMsg(e?.message || 'تعذر الحفظ');
+                        }
+                        setBfConfirm(false);
+                      }}
+                      className="px-4 py-2 rounded-lg bg-rose-700 text-white text-xs font-bold cursor-pointer"
+                    >
+                      نعم، سجّل
+                    </button>
+                    <button onClick={() => setBfConfirm(false)} className="px-4 py-2 rounded-lg border border-stone-300 text-xs cursor-pointer">إلغاء</button>
+                  </div>
+                )}
+                {bfMsg && <p className="text-[11px] text-emerald-700">{bfMsg}</p>}
+              </div>
+
+              <div className="pt-2 space-y-2 border-t border-stone-200">
+                <p className="text-xs font-bold text-stone-800">تسجيل فترة إيقاف سابقة (لتصحيح الأيام المتأخرة الخاطئة)</p>
+                <p className="text-[11px] text-stone-500">أدخل أول يوم وآخر يوم كان البرنامج فيهما متوقفًا. لا يتم تعديل أي سجل للأعضاء.</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <input type="date" value={ppFrom} onChange={(e) => setPpFrom(e.target.value)} className="px-3 py-2 rounded-lg border border-stone-300 text-xs" />
+                  <input type="date" value={ppTo} onChange={(e) => setPpTo(e.target.value)} className="px-3 py-2 rounded-lg border border-stone-300 text-xs" />
+                  <button
+                    disabled={!ppFrom || !ppTo || ppTo < ppFrom}
+                    onClick={async () => {
+                      try {
+                        const r = await api.adminAddPausePeriod(ppFrom, ppTo);
+                        setPpMsg(r.message);
+                        setPpFrom('');
+                        setPpTo('');
+                        onRefresh();
+                      } catch (e: any) {
+                        setPpMsg(e?.message || 'تعذر الحفظ');
+                      }
+                    }}
+                    className="px-4 py-2 rounded-lg bg-stone-800 text-white text-xs font-bold disabled:opacity-40 cursor-pointer"
+                  >
+                    حفظ فترة الإيقاف
+                  </button>
+                </div>
+                {ppMsg && <p className="text-[11px] text-emerald-700">{ppMsg}</p>}
+              </div>
 
               <div className="pt-2">
                 {cycleInfo.is_paused ? (
@@ -1629,7 +1734,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <span>إعادة ضبط المصنع وبدء دورة ختمة جديدة</span>
             </h3>
             <p className="text-xs text-rose-800 leading-relaxed">
-              إعادة عداد الخطة إلى اليوم رقم 1، وتصفير أيام الإيقاف والاستدراك، ومسح جميع سجلات التسميع والمراجعة. يُستخدم عند إتمام الختمة (اليوم 240) أو إعادة تأسيس المقرأة.
+              إعادة عداد الخطة إلى اليوم رقم 1، وتصفير أيام الإيقاف والاستدراك، ومسح جميع سجلات التسميع والمراجعة وجميع محاولات الاختبارات. يُستخدم عند إتمام الختمة (اليوم 240) أو إعادة تأسيس المقرأة مع بقاء تعريفات الاختبارات وحسابات الأعضاء.
             </p>
 
             <button
@@ -1642,6 +1747,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
       )}
+    </div>
+  )}
+
 
       {/* Admin Member Modal */}
       <AdminMemberModal
@@ -1666,7 +1774,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
 
             <p className="text-xs text-stone-600 leading-relaxed">
-              سيتم مسح جميع سجلات التسميع والمراجعة السابقة لجميع الأعضاء، وتعيين بداية الدورة لتاريخ اليوم، والعودة إلى اليوم رقم 1 ورقم الدورة 1.
+              سيتم مسح جميع سجلات التسميع والمراجعة السابقة وجميع محاولات الاختبارات لجميع الأعضاء، وتعيين بداية الدورة لتاريخ اليوم، والعودة إلى اليوم رقم 1 ورقم الدورة 1 (مع الإبقاء على تعريفات الاختبارات وحسابات الأعضاء).
             </p>
 
             <div>
