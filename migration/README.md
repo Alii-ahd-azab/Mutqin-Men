@@ -4,6 +4,8 @@ Read REVIEW.md first. The user approved the updated review and authorized produc
 
 **Completed:** Men production now contains 2,007 rows across 20 tables representing all 926 source documents plus normalized/derived/private records. Import-time and separate post-commit validation passed. See PRODUCTION_REPORT.md. Do not run `--apply-schema` again on this populated destination; a future source delta requires explicit reconciliation.
 
+**Application cutover (Phase 2 of the move to Supabase):** see cutover/CUTOVER_REPORT.md for the code changes, verification, reconciliation results and the go-live runbook. Note: `database.mjs` `applySchema` now applies only the Phase 1 (20261025*) migrations.
+
 Run from the Mutqin Men repository root in PowerShell. No app startup is needed.
 
 ```powershell
