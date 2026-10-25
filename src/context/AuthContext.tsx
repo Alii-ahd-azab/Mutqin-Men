@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types';
-import { api, getAccessToken, clearLegacyToken } from '../api/client';
-import { getSupabase } from '../lib/supabase';
+import { api } from '../api/client';
+import { supabase } from '../lib/supabase';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -13,46 +13,62 @@ interface AuthContextType {
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
 
+// Pre-Supabase session token of the old application; unused, removed on first load.
+function clearLegacyToken() {
+  try {
+    localStorage.removeItem('motqin_auth_token');
+  } catch {
+    // ignore
+  }
+}
+
+/*
+ * Supabase Auth session handling (as in Mutqin for Sisters): the session persists in the browser and
+ * refreshes automatically; the profile is loaded for the signed-in user and inactive accounts are
+ * signed out.
+ */
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
 
-  const initAuth = async () => {
-    clearLegacyToken();
-    const token = await getAccessToken();
-    if (!token) {
-      setLoading(false);
-      return;
-    }
-    try {
-      const res = await api.getMe();
-      setCurrentUser(res.user);
-    } catch (err) {
-      console.warn('Session expired or invalid:', err);
-      await api.logout();
-      setCurrentUser(null);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   useEffect(() => {
-    initAuth();
-    // A session ended elsewhere (expiry, revocation, another tab) returns this tab to the login screen.
-    let unsubscribe: (() => void) | undefined;
-    let cancelled = false;
-    getSupabase()
-      .then((supabase) => {
-        if (cancelled) return;
-        const { data } = supabase.auth.onAuthStateChange((event) => {
-          if (event === 'SIGNED_OUT') setCurrentUser(null);
-        });
-        unsubscribe = () => data.subscription.unsubscribe();
-      })
-      .catch(() => undefined);
+    let mounted = true;
+    clearLegacyToken();
+
+    async function applySession(hasUser: boolean) {
+      if (!hasUser) {
+        if (mounted) setCurrentUser(null);
+        return;
+      }
+      try {
+        const { user } = await api.getMe();
+        if (!user.is_active) {
+          await supabase.auth.signOut();
+          if (mounted) setCurrentUser(null);
+          return;
+        }
+        // Keep the same object when nothing changed, so dashboards do not reload.
+        if (mounted) setCurrentUser((prev) => (prev && JSON.stringify(prev) === JSON.stringify(user) ? prev : user));
+      } catch (err) {
+        console.warn('Session expired or invalid:', err);
+        if (mounted) setCurrentUser(null);
+      }
+    }
+
+    supabase.auth
+      .getUser()
+      .then(({ data }) => applySession(!!data.user))
+      .finally(() => mounted && setLoading(false));
+
+    const { data } = supabase.auth.onAuthStateChange((event, session) => {
+      // Token refreshes keep the same account: no reload. Run outside the auth callback.
+      if (event === 'SIGNED_OUT') setTimeout(() => mounted && setCurrentUser(null), 0);
+      if (event === 'SIGNED_IN' || event === 'USER_UPDATED') setTimeout(() => void applySession(!!session?.user), 0);
+    });
+
     return () => {
-      cancelled = true;
-      unsubscribe?.();
+      mounted = false;
+      data.subscription.unsubscribe();
     };
   }, []);
 
@@ -85,15 +101,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   return (
-    <AuthContext.Provider
-      value={{
-        currentUser,
-        loading,
-        login,
-        logout,
-        refreshUser,
-      }}
-    >
+    <AuthContext.Provider value={{ currentUser, loading, login, logout, refreshUser }}>
       {children}
     </AuthContext.Provider>
   );

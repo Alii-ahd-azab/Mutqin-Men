@@ -1,17 +1,17 @@
-// Phase G: Firebase ↔ Supabase read parity.
+// Firebase ↔ Supabase read parity for the Sisters-style application data layer.
 //
-// Rebuilds the exact in-memory state the legacy server held after syncFromFirestore() (same field
-// normalization as src/server/firestoreService.ts) from a Firestore export, and compares it field by
-// field with what the new repository (src/server/store.ts) returns from Supabase.
+// Rebuilds the exact in-memory state the legacy Firebase server held (same field normalization as the
+// old firestoreService) from a Firestore export, and compares it field by field with what the new
+// browser data layer (src/lib/menData.ts → supabase-js → PostgREST) returns from Men production.
 //
-//   npx tsx migration/cutover/parity.ts BACKUP_DIR                       # local PGlite copy (default)
-//   npx tsx migration/cutover/parity.ts BACKUP_DIR --project uaublandjewfzmhnbflc
-//        # production, read-only, using MEN_MIGRATION_DATABASE_URL (owner) — never writes
-//
-// Exit code 1 when any difference is found. Differences are listed, never hidden.
+//   npx tsx --env-file=.env.local migration/cutover/parity.ts BACKUP_DIR --project uaublandjewfzmhnbflc
+// Reads only (secret key, so RLS does not hide rows). Exit code 1 when any difference is found.
 import fs from 'node:fs';
 import path from 'node:path';
-import { loadState, type AppState, type Queryable } from '../../src/server/store';
+import { createClient } from '@supabase/supabase-js';
+import { loadBatchIds, loadProgram, type ProgramState } from '../../src/lib/menData';
+
+type AppState = ProgramState;
 // @ts-ignore - shared ESM tooling
 import { readBackup, decode } from '../analyze.mjs';
 // @ts-ignore
@@ -129,33 +129,17 @@ export function compareStates(legacy: ReturnType<typeof legacyStateFromExport>, 
 async function main() {
   const args = process.argv.slice(2);
   const dir = args[0];
-  if (!dir) throw new Error('Usage: npx tsx migration/cutover/parity.ts BACKUP_DIR [--project REF]');
+  if (!dir) throw new Error('Usage: npx tsx migration/cutover/parity.ts BACKUP_DIR --project REF');
   const legacy = legacyStateFromExport(dir);
-  let state: AppState;
-  if (args.includes('--project')) {
-    // @ts-ignore
-    const { connectOwner, requireProjectArg } = await import('./production.mjs');
-    const client = await connectOwner(requireProjectArg(args));
-    try {
-      await client.query('begin isolation level repeatable read read only');
-      state = await loadState(client as unknown as Queryable);
-      await client.query('rollback');
-    } finally {
-      await client.end();
-    }
-  } else {
-    // @ts-ignore
-    const { createCutoverDb } = await import('./harness.mjs');
-    const { db } = await createCutoverDb(dir, { linkAuth: false });
-    try {
-      state = await loadState(db);
-    } finally {
-      await db.close();
-    }
-  }
+  // @ts-ignore
+  const { authAdmin, requireProjectArg } = await import('./production.mjs');
+  const client = authAdmin(requireProjectArg(args));
+  const batches = await loadBatchIds(client);
+  if (batches.length !== 1) throw new Error(`Expected one Men batch, found ${batches.length}`);
+  const state: AppState = await loadProgram(client, batches[0]);
   const result = compareStates(legacy, state);
-  const report = { source: path.resolve(dir), target: args.includes('--project') ? 'production (read-only)' : 'local PGlite', ...result };
-  fs.writeFileSync(path.join(dir, `parity-${args.includes('--project') ? 'production' : 'local'}.json`), JSON.stringify(report, null, 2));
+  const report = { source: path.resolve(dir), target: 'production via supabase-js (read-only)', ...result };
+  fs.writeFileSync(path.join(dir, 'parity-supabase-js.json'), JSON.stringify(report, null, 2));
   // Console shows field paths only; values (member data) stay in the private report file.
   const paths = result.differences.map((d) => d.split(': expected')[0]);
   console.log(JSON.stringify({ ...report, differences: paths.slice(0, 50), differenceCount: paths.length }, null, 2));
