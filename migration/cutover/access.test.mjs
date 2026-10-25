@@ -1,4 +1,4 @@
-// Phase D: RLS/grant behavior per role on the real migrated snapshot (local PGlite only).
+// RLS/grant behavior per role on the real migrated snapshot (local PGlite only). Write paths: tests/db.test.ts.
 import test, { before, after } from "node:test";
 import assert from "node:assert/strict";
 import { createCutoverDb, defaultBackup, asRole } from "./harness.mjs";
@@ -71,14 +71,15 @@ test("active member: own + batch-visible rows only", async () => {
   });
 });
 
-test("member writes are rejected (writes go through the server)", async () => {
+test("member cannot change accounts, others' data or privileged functions", async () => {
   await asRole(db, "authenticated", who.member, async (tx) => {
-    const cycle = (await tx.query("select id from cycles")).rows[0].id;
-    await denied(tx, "insert into tasmia_submissions(cycle_id,user_id,quarter_number,listener_name_snapshot) values($1,$2,240,'x')", [cycle, who.member]);
+    // listener_name_snapshot is not insertable by the browser (the database sets it).
+    await denied(tx, "insert into tasmia_submissions(cycle_id,user_id,quarter_number,listener_name_snapshot) select id,$1,240,'x' from cycles", [who.member]);
     await denied(tx, "update profiles set role='admin' where id=$1", [who.member]);
     await denied(tx, "delete from review_confirmations where user_id=$1", [who.member]);
-    await denied(tx, "select app_private.delete_member_completely($1)", [who.other]);
-    await denied(tx, "select app_private.revoke_user_sessions($1)", [who.other]);
+    await denied(tx, "delete from tasmia_submissions where user_id=$1", [who.member]);
+    await denied(tx, "select public.men_delete_member_completely($1)", [who.other]);
+    await denied(tx, "select public.men_set_account_role($1,'admin',null,null)", [who.member]);
   });
 });
 
@@ -90,11 +91,13 @@ test("inactive member sees only their own profile", async () => {
   });
 });
 
-test("master admin reads every batch row", async () => {
+test("master admin reads every batch row; may change only the start date of a cycle", async () => {
   await asRole(db, "authenticated", who.admin, async (tx) => {
     for (const t of ["profiles", "tasmia_submissions", "review_confirmations", "peer_tests", "peer_test_attempts", "peer_test_selected_members"])
       assert.equal(await count(tx, `select 1 from public.${t}`), who.totals[t], t);
-    await denied(tx, "update cycles set starts_on=starts_on");
+    await tx.query("update cycles set starts_on=starts_on");
+    await denied(tx, "update cycles set status='archived'");
+    await denied(tx, "update profiles set active=false");
   });
 });
 
@@ -152,21 +155,4 @@ test("personal tests are private to their owner", async () => {
   } finally {
     await db.query("rollback");
   }
-});
-
-test("server role: explicit table access, no auth/provenance access, guarded deletion", async () => {
-  await asRole(db, "mutqin_app_server", null, async (tx) => {
-    assert.equal(await count(tx, "select 1 from profiles"), who.totals.profiles);
-    await denied(tx, "select 1 from auth.users");
-    await denied(tx, "select 1 from migration_private.source_documents");
-    await denied(tx, "select 1 from migration_private.user_credentials");
-    await denied(tx, "delete from profiles where id=$1", [who.other]);
-    await rejects(tx, "select app_private.delete_member_completely($1)", [who.admin], /admin profiles cannot be deleted/);
-  });
-  await asRole(db, "mutqin_app_server", null, async (tx) => {
-    const r = (await tx.query("select app_private.delete_member_completely($1) as r", [who.other])).rows[0].r;
-    assert.ok(r.recitations > 0);
-    assert.equal(await count(tx, "select 1 from profiles where id=$1", [who.other]), 0);
-    assert.equal(await count(tx, "select 1 from tasmia_submissions where user_id=$1", [who.other]), 0);
-  });
 });

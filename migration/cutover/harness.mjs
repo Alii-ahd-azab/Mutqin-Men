@@ -12,7 +12,7 @@ const migrations = new URL("../../supabase/migrations/", import.meta.url);
 export const AUTH_STUBS = `
 create role anon nologin;
 create role authenticated nologin;
-create role service_role nologin;
+create role service_role nologin bypassrls;
 create schema auth;
 create table auth.users (id uuid primary key, email text unique, encrypted_password text);
 create table auth.sessions (id uuid primary key default gen_random_uuid(), user_id uuid not null references auth.users(id) on delete cascade);
@@ -31,10 +31,13 @@ export function cutoverMigrationFiles() {
     .sort();
 }
 
-export async function applyCutover(db, { startAt, stopBefore } = {}) {
+const AUTH_LINK = "20261026000200_men_auth_link.sql";
+
+export async function applyCutover(db, { startAt, stopBefore, skip = [] } = {}) {
   for (const name of cutoverMigrationFiles()) {
     if (startAt && name < startAt) continue;
     if (stopBefore && name >= stopBefore) break;
+    if (skip.includes(name)) continue;
     await db.exec(fs.readFileSync(new URL(name, migrations), "utf8"));
   }
 }
@@ -52,19 +55,20 @@ export async function linkAuthLocally(db) {
   return rows.length;
 }
 
-// linkAuth=false skips the auth.users link/FK: in-process app tests use a fake Auth service,
-// which cannot write auth.users while PGlite (single connection) is inside a transaction.
+// Production order: access migration, Auth link + FK, then the later runtime migrations.
+// linkAuth=false skips only the auth.users link/FK step.
 export async function createCutoverDb(backupDir, { linkAuth = true } = {}) {
   const { rows } = transform(backupDir);
   const db = new PGlite();
   await db.exec(AUTH_STUBS);
   await applySchema(db);
   await load(db, rows);
-  await applyCutover(db, { stopBefore: "20261026000200" });
+  await applyCutover(db, { stopBefore: AUTH_LINK });
   if (linkAuth) {
     await linkAuthLocally(db);
-    await applyCutover(db, { startAt: "20261026000200" });
+    await applyCutover(db, { startAt: AUTH_LINK, stopBefore: "20261026000300" });
   }
+  await applyCutover(db, { startAt: "20261026000300" });
   return { db, rows };
 }
 
