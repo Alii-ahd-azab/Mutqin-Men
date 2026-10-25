@@ -1,0 +1,22 @@
+# Supabase CLI configuration for Mutqin for Men (project uaublandjewfzmhnbflc).
+# Only the Edge Function settings are used for deployment; they match Mutqin for Sisters.
+# Each function verifies the caller's session itself (getAdminCaller / getActiveCaller).
+project_id = "Mutqin-app-men"
+
+[functions.admin-users]
+enabled = true
+verify_jwt = false
+import_map = "./functions/admin-users/deno.json"
+entrypoint = "./functions/admin-users/index.ts"
+
+[functions.admin-actions]
+enabled = true
+verify_jwt = false
+import_map = "./functions/admin-actions/deno.json"
+entrypoint = "./functions/admin-actions/index.ts"
+
+[functions.peer-tests]
+enabled = true
+verify_jwt = false
+import_map = "./functions/peer-tests/deno.json"
+entrypoint = "./functions/peer-tests/index.ts"
