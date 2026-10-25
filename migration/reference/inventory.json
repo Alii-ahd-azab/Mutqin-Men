@@ -1,0 +1,160 @@
+{
+  "20261014120000_multi_batches.sql": {
+    "tables": [
+      "public.batches",
+      "public.batch_memberships"
+    ],
+    "functions": [
+      "app_private.is_master_admin",
+      "app_private.member_batch_id",
+      "app_private.managed_batch_ids",
+      "app_private.viewable_batch_ids",
+      "app_private.managed_cycle_ids",
+      "app_private.member_active_cycle_id",
+      "app_private.viewable_profile_ids",
+      "app_private.cycle_batch_id",
+      "app_private.batch_memberships_guard",
+      "app_private.profiles_batch_guard",
+      "app_private.tasmia_batch_guard",
+      "app_private.review_batch_guard",
+      "public.create_batch_with_cycle",
+      "public.start_next_cycle",
+      "public.create_profile_with_membership",
+      "public.set_admin_batches"
+    ],
+    "views": [],
+    "enums": [],
+    "triggers": [
+      "batch_memberships_guard",
+      "profiles_batch_guard",
+      "tasmia_batch_guard",
+      "review_batch_guard"
+    ],
+    "policies": [
+      "profiles_select_visible",
+      "batches_select_accessible",
+      "batch_memberships_select_accessible",
+      "cycles_select_accessible",
+      "cycles_update_managed",
+      "group_rest_days_select_accessible",
+      "group_rest_days_insert_managed",
+      "group_rest_days_delete_managed",
+      "program_pauses_select_accessible",
+      "program_pauses_insert_managed",
+      "program_pauses_update_managed",
+      "daily_thoughts_select_accessible",
+      "daily_thoughts_insert_managed",
+      "daily_thoughts_update_managed",
+      "tasmia_submissions_select_accessible",
+      "tasmia_submissions_insert_own_batch",
+      "review_confirmations_select_accessible",
+      "review_confirmations_insert_own_batch"
+    ]
+  },
+  "20261016120000_listener_name_snapshot.sql": {
+    "tables": [],
+    "functions": [
+      "app_private.tasmia_batch_guard"
+    ],
+    "views": [],
+    "enums": [],
+    "triggers": [],
+    "policies": []
+  },
+  "20261017120000_member_batch_transfer.sql": {
+    "tables": [
+      "public.batch_membership_transfers"
+    ],
+    "functions": [
+      "app_private.batch_memberships_guard",
+      "public.move_member_batch",
+      "public.history_member_names"
+    ],
+    "views": [],
+    "enums": [],
+    "triggers": [],
+    "policies": []
+  },
+  "20261018120000_peer_testing.sql": {
+    "tables": [
+      "public.peer_tests",
+      "public.peer_test_attempts",
+      "public.peer_test_attempt_questions"
+    ],
+    "functions": [
+      "app_private.peer_test_is_live",
+      "app_private.managed_peer_test_ids",
+      "app_private.visible_peer_attempt_ids",
+      "app_private.peer_test_future_window",
+      "app_private.assert_no_overlapping_peer_test",
+      "public.peer_test_save",
+      "public.peer_test_set_status",
+      "public.peer_test_start_attempt",
+      "public.peer_test_submit_attempt",
+      "app_private.tasmia_batch_guard",
+      "public.start_next_cycle"
+    ],
+    "views": [],
+    "enums": [],
+    "triggers": [],
+    "policies": [
+      "peer_tests_select",
+      "peer_test_attempts_select",
+      "peer_test_attempt_questions_select"
+    ]
+  },
+  "20261019120000_tasmia_listener_correction.sql": {
+    "tables": [],
+    "functions": [
+      "app_private.tasmia_listener_name",
+      "app_private.tasmia_batch_guard",
+      "public.correct_tasmia_listener"
+    ],
+    "views": [],
+    "enums": [],
+    "triggers": [],
+    "policies": []
+  },
+  "sisters-public-schema.sql": {
+    "tables": [
+      "public.cycles",
+      "public.daily_thoughts",
+      "public.group_rest_days",
+      "public.profiles",
+      "public.program_pauses",
+      "public.review_confirmations",
+      "public.tasmia_submissions"
+    ],
+    "functions": [
+      "public.rls_auto_enable",
+      "public.sync_deactivated_at"
+    ],
+    "views": [],
+    "enums": [],
+    "triggers": [
+      "trg_sync_deactivated_at"
+    ],
+    "policies": [
+      "\"Admins delete rest days\" ON public.group_rest_days FOR DELETE TO authenticated USING (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins delete thoughts\" ON public.daily_thoughts FOR DELETE TO authenticated USING (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins insert cycles\" ON public.cycles FOR INSERT TO authenticated WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins insert pauses\" ON public.program_pauses FOR INSERT TO authenticated WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins insert rest days\" ON public.group_rest_days FOR INSERT TO authenticated WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins insert thoughts\" ON public.daily_thoughts FOR INSERT TO authenticated WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins update cycles\" ON public.cycles FOR UPDATE TO authenticated USING (( SELECT private.is_admin() AS is_admin)) WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins update pauses\" ON public.program_pauses FOR UPDATE TO authenticated USING (( SELECT private.is_admin() AS is_admin)) WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins update profiles\" ON public.profiles FOR UPDATE TO authenticated USING (( SELECT private.is_admin() AS is_admin)) WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins update rest days\" ON public.group_rest_days FOR UPDATE TO authenticated USING (( SELECT private.is_admin() AS is_admin)) WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Admins update thoughts\" ON public.daily_thoughts FOR UPDATE TO authenticated USING (( SELECT private.is_admin() AS is_admin)) WITH CHECK (( SELECT private.is_admin() AS is_admin));",
+      "\"Members confirm own reviews\" ON public.review_confirmations FOR INSERT TO authenticated WITH CHECK ((( SELECT private.is_active_user() AS is_active_user) AND (user_id = ( SELECT auth.uid() AS uid)) AND ( SELECT private.is_active_cycle(review_confirmations.cycle_id) AS is_active_cycle)));",
+      "\"Members submit own tasmia\" ON public.tasmia_submissions FOR INSERT TO authenticated WITH CHECK ((( SELECT private.is_active_user() AS is_active_user) AND (user_id = ( SELECT auth.uid() AS uid)) AND ( SELECT private.is_active_cycle(tasmia_submissions.cycle_id) AS is_active_cycle)));",
+      "\"Read appropriate profiles\" ON public.profiles FOR SELECT TO authenticated USING (((( SELECT private.is_active_user() AS is_active_user) AND (active = true)) OR ( SELECT private.is_admin() AS is_admin) OR (id = ( SELECT auth.uid() AS uid))));",
+      "\"Read cycles\" ON public.cycles FOR SELECT TO authenticated USING (((( SELECT private.is_active_user() AS is_active_user) AND (status = 'active'::text)) OR ( SELECT private.is_admin() AS is_admin)));",
+      "\"Read daily thoughts\" ON public.daily_thoughts FOR SELECT TO authenticated USING (((( SELECT private.is_active_user() AS is_active_user) AND (is_published = true)) OR ( SELECT private.is_admin() AS is_admin)));",
+      "\"Read group rest days\" ON public.group_rest_days FOR SELECT TO authenticated USING ((( SELECT private.is_admin() AS is_admin) OR (( SELECT private.is_active_user() AS is_active_user) AND ( SELECT private.is_active_cycle(group_rest_days.cycle_id) AS is_active_cycle))));",
+      "\"Read program pauses\" ON public.program_pauses FOR SELECT TO authenticated USING ((( SELECT private.is_admin() AS is_admin) OR (( SELECT private.is_active_user() AS is_active_user) AND ( SELECT private.is_active_cycle(program_pauses.cycle_id) AS is_active_cycle))));",
+      "\"Read review confirmations\" ON public.review_confirmations FOR SELECT TO authenticated USING ((( SELECT private.is_admin() AS is_admin) OR (( SELECT private.is_active_user() AS is_active_user) AND ( SELECT private.is_active_cycle(review_confirmations.cycle_id) AS is_active_cycle) AND (user_id = ( SELECT auth.uid() AS uid)))));",
+      "\"Read tasmia activity\" ON public.tasmia_submissions FOR SELECT TO authenticated USING ((( SELECT private.is_admin() AS is_admin) OR (( SELECT private.is_active_user() AS is_active_user) AND ( SELECT private.is_active_cycle(tasmia_submissions.cycle_id) AS is_active_cycle) AND ((user_id = ( SELECT auth.uid() AS uid)) OR (listener_id = ( SELECT auth.uid() AS uid))))));"
+    ]
+  }
+}

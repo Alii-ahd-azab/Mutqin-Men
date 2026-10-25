@@ -1,0 +1,123 @@
+{
+  "grantComparison": "Unknown: live dump contains no ACL/GRANT/REVOKE/default privilege objects; do not treat restore defaults as live grants.",
+  "categories": {
+    "schemas": {
+      "added": [
+        "private"
+      ],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "tables": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "columns": {
+      "added": [
+        "public.profile_batch_overview.user_id",
+        "public.profile_batch_overview.full_name",
+        "public.profile_batch_overview.phone",
+        "public.profile_batch_overview.role",
+        "public.profile_batch_overview.active",
+        "public.profile_batch_overview.deactivated_at",
+        "public.profile_batch_overview.is_master_admin",
+        "public.profile_batch_overview.batches"
+      ],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "constraints": {
+      "added": [],
+      "removed": [],
+      "changed": [
+        {
+          "id": "public.peer_tests.peer_tests_range_check",
+          "fields": [
+            "definition"
+          ],
+          "semanticFields": [
+            "definition"
+          ],
+          "before": {
+            "definition": "CHECK ((((range_start >= 1) AND (range_start <= 240)) AND ((range_end >= 1) AND (range_end <= 240)) AND (range_start <= range_end)))"
+          },
+          "after": {
+            "definition": "CHECK (((range_start >= 1) AND (range_start <= 240) AND ((range_end >= 1) AND (range_end <= 240)) AND (range_start <= range_end)))"
+          },
+          "behaviorEquivalent": true,
+          "reason": "Only grouping of associative AND predicates differs; same range predicates and SQL NULL behavior."
+        }
+      ],
+      "textOnly": []
+    },
+    "indexes": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "functions": {
+      "added": [
+        "private.is_active_cycle(target_cycle uuid)",
+        "private.is_active_user()",
+        "private.is_admin()",
+        "public.rls_auto_enable()"
+      ],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "triggers": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "event_triggers": {
+      "added": [
+        "ensure_rls"
+      ],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "policies": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "views": {
+      "added": [
+        "public.profile_batch_overview"
+      ],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "types": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "enums": {
+      "added": [],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    },
+    "access": {
+      "added": [
+        "public.profile_batch_overview"
+      ],
+      "removed": [],
+      "changed": [],
+      "textOnly": []
+    }
+  }
+}

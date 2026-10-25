@@ -6,3 +6,11 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Firestore migration: credentials and private artifacts
+*firebase-adminsdk*.json
+*service-account*.json
+*.pem
+migration/backups/
+migration/private/
+supabase/.temp/

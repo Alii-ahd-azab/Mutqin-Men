@@ -1,0 +1,707 @@
+{
+  "collections": [
+    {
+      "path": "groupSettings",
+      "count": 1
+    },
+    {
+      "path": "recitations",
+      "count": 388
+    },
+    {
+      "path": "rest_days",
+      "count": 1
+    },
+    {
+      "path": "revisions",
+      "count": 486
+    },
+    {
+      "path": "settings",
+      "count": 2
+    },
+    {
+      "path": "test_attempts",
+      "count": 15
+    },
+    {
+      "path": "tests",
+      "count": 3
+    },
+    {
+      "path": "users",
+      "count": 30
+    }
+  ],
+  "missingParents": [],
+  "schemas": {
+    "groupSettings": {
+      "count": 1,
+      "fields": {
+        "id": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "start_date": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "total_quarters": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "review_window": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "current_cycle_number": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "is_paused": {
+          "present": 1,
+          "types": {
+            "boolean": 1
+          }
+        },
+        "paused_at": {
+          "present": 1,
+          "types": {
+            "null": 1
+          }
+        },
+        "total_paused_days": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        }
+      },
+      "shapes": {
+        "current_cycle_number,id,is_paused,paused_at,review_window,start_date,total_paused_days,total_quarters": 1
+      }
+    },
+    "recitations": {
+      "count": 388,
+      "fields": {
+        "id": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "member_id": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "member_name": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "listener_id": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "listener_name": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "quarter_number": {
+          "present": 388,
+          "types": {
+            "integer": 388
+          }
+        },
+        "cycle_number": {
+          "present": 388,
+          "types": {
+            "integer": 388
+          }
+        },
+        "date": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "created_at": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "reciter_id": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "reciter_name": {
+          "present": 388,
+          "types": {
+            "string": 388
+          }
+        },
+        "notes": {
+          "present": 5,
+          "types": {
+            "string": 5
+          }
+        }
+      },
+      "shapes": {
+        "created_at,cycle_number,date,id,listener_id,listener_name,member_id,member_name,quarter_number,reciter_id,reciter_name": 383,
+        "created_at,cycle_number,date,id,listener_id,listener_name,member_id,member_name,notes,quarter_number,reciter_id,reciter_name": 5
+      }
+    },
+    "rest_days": {
+      "count": 1,
+      "fields": {
+        "id": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "date": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "note": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "added_by_admin_id": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "added_by_name": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "created_at": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        }
+      },
+      "shapes": {
+        "added_by_admin_id,added_by_name,created_at,date,id,note": 1
+      }
+    },
+    "revisions": {
+      "count": 486,
+      "fields": {
+        "id": {
+          "present": 486,
+          "types": {
+            "string": 486
+          }
+        },
+        "member_id": {
+          "present": 486,
+          "types": {
+            "string": 486
+          }
+        },
+        "member_name": {
+          "present": 486,
+          "types": {
+            "string": 486
+          }
+        },
+        "date": {
+          "present": 486,
+          "types": {
+            "string": 486
+          }
+        },
+        "cycle_number": {
+          "present": 486,
+          "types": {
+            "integer": 486
+          }
+        },
+        "review_start_quarter": {
+          "present": 486,
+          "types": {
+            "integer": 486
+          }
+        },
+        "review_end_quarter": {
+          "present": 486,
+          "types": {
+            "integer": 486
+          }
+        },
+        "created_at": {
+          "present": 486,
+          "types": {
+            "string": 486
+          }
+        }
+      },
+      "shapes": {
+        "created_at,cycle_number,date,id,member_id,member_name,review_end_quarter,review_start_quarter": 486
+      }
+    },
+    "settings": {
+      "count": 2,
+      "fields": {
+        "logs": {
+          "present": 1,
+          "types": {
+            "array": 1
+          }
+        },
+        "total_paused_days": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "review_window": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "daily_thought_updated_by": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "daily_thought_updated_at": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "paused_at": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "start_date": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "is_paused": {
+          "present": 1,
+          "types": {
+            "boolean": 1
+          }
+        },
+        "id": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        },
+        "current_cycle_number": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "total_quarters": {
+          "present": 1,
+          "types": {
+            "integer": 1
+          }
+        },
+        "daily_thought": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        }
+      },
+      "shapes": {
+        "logs": 1,
+        "current_cycle_number,daily_thought,daily_thought_updated_at,daily_thought_updated_by,id,is_paused,paused_at,review_window,start_date,total_paused_days,total_quarters": 1
+      }
+    },
+    "test_attempts": {
+      "count": 15,
+      "fields": {
+        "id": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "test_id": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "candidate_id": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "candidate_name": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "examiner_id": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "examiner_name": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "total_errors": {
+          "present": 15,
+          "types": {
+            "integer": 15
+          }
+        },
+        "passed": {
+          "present": 15,
+          "types": {
+            "boolean": 15
+          }
+        },
+        "status": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "date": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "questions_results": {
+          "present": 15,
+          "types": {
+            "array": 15
+          }
+        },
+        "questions_results[]": {
+          "present": 89,
+          "types": {
+            "map": 89
+          }
+        },
+        "questions_results[].question_number": {
+          "present": 89,
+          "types": {
+            "integer": 89
+          }
+        },
+        "questions_results[].start_surah": {
+          "present": 89,
+          "types": {
+            "integer": 89
+          }
+        },
+        "questions_results[].start_surah_name": {
+          "present": 89,
+          "types": {
+            "string": 89
+          }
+        },
+        "questions_results[].start_ayah": {
+          "present": 89,
+          "types": {
+            "integer": 89
+          }
+        },
+        "questions_results[].end_surah": {
+          "present": 89,
+          "types": {
+            "integer": 89
+          }
+        },
+        "questions_results[].end_surah_name": {
+          "present": 89,
+          "types": {
+            "string": 89
+          }
+        },
+        "questions_results[].end_ayah": {
+          "present": 89,
+          "types": {
+            "integer": 89
+          }
+        },
+        "questions_results[].errors_count": {
+          "present": 89,
+          "types": {
+            "integer": 89
+          }
+        },
+        "created_at": {
+          "present": 15,
+          "types": {
+            "string": 15
+          }
+        },
+        "effective_range_end": {
+          "present": 15,
+          "types": {
+            "integer": 15
+          }
+        },
+        "covers_full_range": {
+          "present": 15,
+          "types": {
+            "boolean": 15
+          }
+        },
+        "notes": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "questions_results[].notes": {
+          "present": 1,
+          "types": {
+            "string": 1
+          }
+        }
+      },
+      "shapes": {
+        "candidate_id,candidate_name,covers_full_range,created_at,date,effective_range_end,examiner_id,examiner_name,id,passed,questions_results,status,test_id,total_errors": 12,
+        "candidate_id,candidate_name,covers_full_range,created_at,date,effective_range_end,examiner_id,examiner_name,id,notes,passed,questions_results,status,test_id,total_errors": 3
+      }
+    },
+    "tests": {
+      "count": 3,
+      "fields": {
+        "id": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "title": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "range_start": {
+          "present": 3,
+          "types": {
+            "integer": 3
+          }
+        },
+        "range_end": {
+          "present": 3,
+          "types": {
+            "integer": 3
+          }
+        },
+        "questions_count": {
+          "present": 3,
+          "types": {
+            "integer": 3
+          }
+        },
+        "lines_per_question": {
+          "present": 3,
+          "types": {
+            "integer": 3
+          }
+        },
+        "prerequisites": {
+          "present": 3,
+          "types": {
+            "map": 3
+          }
+        },
+        "prerequisites.require_all_quarters_completed": {
+          "present": 3,
+          "types": {
+            "boolean": 3
+          }
+        },
+        "prerequisites.require_revision_completed": {
+          "present": 3,
+          "types": {
+            "boolean": 3
+          }
+        },
+        "has_max_errors": {
+          "present": 3,
+          "types": {
+            "boolean": 3
+          }
+        },
+        "max_errors_allowed": {
+          "present": 3,
+          "types": {
+            "integer": 3
+          }
+        },
+        "test_type": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "difficulty": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "audience": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "selected_member_ids": {
+          "present": 3,
+          "types": {
+            "array": 3
+          }
+        },
+        "selected_member_ids[]": {
+          "present": 2,
+          "types": {
+            "string": 2
+          }
+        },
+        "created_at": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "created_by_admin_id": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "is_active": {
+          "present": 3,
+          "types": {
+            "boolean": 3
+          }
+        },
+        "finished_at": {
+          "present": 2,
+          "types": {
+            "string": 2
+          }
+        },
+        "updated_at": {
+          "present": 3,
+          "types": {
+            "string": 3
+          }
+        },
+        "is_finished": {
+          "present": 2,
+          "types": {
+            "boolean": 2
+          }
+        }
+      },
+      "shapes": {
+        "audience,created_at,created_by_admin_id,difficulty,finished_at,has_max_errors,id,is_active,is_finished,lines_per_question,max_errors_allowed,prerequisites,questions_count,range_end,range_start,selected_member_ids,test_type,title,updated_at": 2,
+        "audience,created_at,created_by_admin_id,difficulty,has_max_errors,id,is_active,lines_per_question,max_errors_allowed,prerequisites,questions_count,range_end,range_start,selected_member_ids,test_type,title,updated_at": 1
+      }
+    },
+    "users": {
+      "count": 30,
+      "fields": {
+        "id": {
+          "present": 30,
+          "types": {
+            "string": 30
+          }
+        },
+        "name": {
+          "present": 30,
+          "types": {
+            "string": 30
+          }
+        },
+        "phone": {
+          "present": 30,
+          "types": {
+            "string": 30
+          }
+        },
+        "password_hash": {
+          "present": 30,
+          "types": {
+            "string": 30
+          }
+        },
+        "role": {
+          "present": 30,
+          "types": {
+            "string": 30
+          }
+        },
+        "is_active": {
+          "present": 30,
+          "types": {
+            "boolean": 30
+          }
+        },
+        "created_at": {
+          "present": 30,
+          "types": {
+            "string": 30
+          }
+        }
+      },
+      "shapes": {
+        "created_at,id,is_active,name,password_hash,phone,role": 30
+      }
+    }
+  }
+}
