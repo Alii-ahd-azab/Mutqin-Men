@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User } from '../types';
-import { api, getStoredToken, setStoredToken } from '../api/client';
+import { api, getAccessToken, clearLegacyToken } from '../api/client';
+import { getSupabase } from '../lib/supabase';
 
 interface AuthContextType {
   currentUser: User | null;
@@ -17,7 +18,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const [loading, setLoading] = useState(true);
 
   const initAuth = async () => {
-    const token = getStoredToken();
+    clearLegacyToken();
+    const token = await getAccessToken();
     if (!token) {
       setLoading(false);
       return;
@@ -27,7 +29,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       setCurrentUser(res.user);
     } catch (err) {
       console.warn('Session expired or invalid:', err);
-      setStoredToken(null);
+      await api.logout();
       setCurrentUser(null);
     } finally {
       setLoading(false);
@@ -36,6 +38,22 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   useEffect(() => {
     initAuth();
+    // A session ended elsewhere (expiry, revocation, another tab) returns this tab to the login screen.
+    let unsubscribe: (() => void) | undefined;
+    let cancelled = false;
+    getSupabase()
+      .then((supabase) => {
+        if (cancelled) return;
+        const { data } = supabase.auth.onAuthStateChange((event) => {
+          if (event === 'SIGNED_OUT') setCurrentUser(null);
+        });
+        unsubscribe = () => data.subscription.unsubscribe();
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+      unsubscribe?.();
+    };
   }, []);
 
   const login = async (phone: string, password: string) => {

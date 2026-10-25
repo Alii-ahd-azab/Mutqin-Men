@@ -11,31 +11,42 @@ import {
   TestQuestion,
 } from '../types';
 import { formatDate } from '../lib/calculations';
+import { getSupabase } from '../lib/supabase';
+import { phoneToAuthEmail } from '../lib/authIdentity';
 
-const TOKEN_KEY = 'motqin_auth_token';
+// Pre-Supabase session token; no longer valid anywhere, removed on first load.
+const LEGACY_TOKEN_KEY = 'motqin_auth_token';
 
-export function getStoredToken(): string | null {
+export function clearLegacyToken(): void {
   try {
-    return localStorage.getItem(TOKEN_KEY);
+    localStorage.removeItem(LEGACY_TOKEN_KEY);
+  } catch {
+    // ignore
+  }
+}
+
+/** Current Supabase access token (refreshed automatically by supabase-js), or null when signed out. */
+export async function getAccessToken(): Promise<string | null> {
+  try {
+    const supabase = await getSupabase();
+    const { data } = await supabase.auth.getSession();
+    return data.session?.access_token ?? null;
   } catch {
     return null;
   }
 }
 
-export function setStoredToken(token: string | null): void {
+async function signOutLocally(): Promise<void> {
   try {
-    if (token) {
-      localStorage.setItem(TOKEN_KEY, token);
-    } else {
-      localStorage.removeItem(TOKEN_KEY);
-    }
+    const supabase = await getSupabase();
+    await supabase.auth.signOut({ scope: 'local' });
   } catch {
     // ignore
   }
 }
 
 async function request<T>(endpoint: string, options: RequestInit = {}): Promise<T> {
-  const token = getStoredToken();
+  const token = await getAccessToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
     ...(options.headers as Record<string, string>),
@@ -60,9 +71,9 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
     headers,
   });
 
-  if (response.status === 401 && token && !endpoint.startsWith('/api/auth/login')) {
+  if (response.status === 401 && token) {
     // Session is no longer valid: go back to login instead of silently failing saves.
-    setStoredToken(null);
+    await signOutLocally();
     try { window.location.reload(); } catch { /* ignore */ }
   }
 
@@ -78,21 +89,30 @@ async function request<T>(endpoint: string, options: RequestInit = {}): Promise<
 
 export const api = {
   // Auth
-  async login(phone: string, password: string): Promise<{ user: User; token: string }> {
-    const res = await request<{ user: User; token: string }>('/api/auth/login', {
-      method: 'POST',
-      body: JSON.stringify({ phone, password }),
-    });
-    setStoredToken(res.token);
-    return res;
+  async login(phone: string, password: string): Promise<{ user: User }> {
+    const supabase = await getSupabase();
+    const { error } = await supabase.auth.signInWithPassword({ email: phoneToAuthEmail(phone), password });
+    if (error) {
+      const status = (error as { status?: number }).status;
+      throw new Error(
+        status === 400 || status === 401 || status === 422
+          ? 'رقم الهاتف أو كلمة المرور غير صحيحة'
+          : status === 429
+            ? 'محاولات كثيرة، يرجى الانتظار قليلًا ثم المحاولة مجددًا'
+            : 'تعذر الاتصال بخادم الدخول، يرجى المحاولة مرة أخرى'
+      );
+    }
+    try {
+      return await request<{ user: User }>('/api/auth/me');
+    } catch (e) {
+      await signOutLocally();
+      throw e;
+    }
   },
 
   async logout(): Promise<void> {
-    try {
-      await request('/api/auth/logout', { method: 'POST' });
-    } finally {
-      setStoredToken(null);
-    }
+    // Ends only this device's session, like discarding the old token did.
+    await signOutLocally();
   },
 
   async getMe(): Promise<{ user: User }> {
@@ -308,13 +328,8 @@ export const api = {
     return request('/api/admin/stats');
   },
 
-  async getFirestoreStatus(): Promise<{
-    projectId: string;
-    databaseId: string;
-    connected: boolean;
-    error: string | null;
-  }> {
-    return request('/api/firestore/status');
+  async getBackendStatus(): Promise<{ backend: string; connected: boolean }> {
+    return request('/api/status');
   },
 
   // Peer Testing API methods

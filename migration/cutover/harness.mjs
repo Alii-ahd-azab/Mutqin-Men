@@ -52,15 +52,19 @@ export async function linkAuthLocally(db) {
   return rows.length;
 }
 
-export async function createCutoverDb(backupDir) {
+// linkAuth=false skips the auth.users link/FK: in-process app tests use a fake Auth service,
+// which cannot write auth.users while PGlite (single connection) is inside a transaction.
+export async function createCutoverDb(backupDir, { linkAuth = true } = {}) {
   const { rows } = transform(backupDir);
   const db = new PGlite();
   await db.exec(AUTH_STUBS);
   await applySchema(db);
   await load(db, rows);
   await applyCutover(db, { stopBefore: "20261026000200" });
-  await linkAuthLocally(db);
-  await applyCutover(db, { startAt: "20261026000200" });
+  if (linkAuth) {
+    await linkAuthLocally(db);
+    await applyCutover(db, { startAt: "20261026000200" });
+  }
   return { db, rows };
 }
 

@@ -1,4 +1,5 @@
 import type { Express, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import {
   ALL_VERSES,
   ALL_QUARTERS,
@@ -14,7 +15,7 @@ import {
 /**
  * Personal self-tests ("اختبر نفسك").
  * Completely separate from the program and from the admin's peer-testing system:
- *  - own Firestore collection `personal_tests`
+ *  - own tables `personal_tests` / `personal_test_questions`
  *  - every route only ever reads/writes the CALLING user's own records
  *  - nothing here is added to /api/bootstrap, no admin route reads these records
  *  - never blocks recitation/revision and never affects mandatory tests
@@ -87,7 +88,7 @@ function strictInt(v: unknown): number | null {
 }
 
 interface Deps {
-  getAuthUser: (req: Request) => { id: string; name: string; is_active: boolean } | null;
+  getAuthUser: (req: Request) => Promise<{ id: string; name: string; is_active: boolean } | null>;
   getTodayDate: (req: Request) => string;
   store: PersonalTestStore;
 }
@@ -228,8 +229,15 @@ function parseSetup(body: any): { error: string } | ParsedSetup {
 export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
   const { getAuthUser, getTodayDate, store } = deps;
 
-  const authed = (req: Request, res: Response) => {
-    const user = getAuthUser(req);
+  const authed = async (req: Request, res: Response) => {
+    let user: Awaited<ReturnType<Deps['getAuthUser']>>;
+    try {
+      user = await getAuthUser(req);
+    } catch (e) {
+      console.error('[Personal Test Auth Error]', e instanceof Error ? e.message : e);
+      res.status(500).json({ error: 'تعذّر التحقق من الحساب، يرجى المحاولة مرة أخرى.' });
+      return null;
+    }
     if (!user) {
       res.status(401).json({ error: 'يجب تسجيل الدخول أولاً' });
       return null;
@@ -242,16 +250,16 @@ export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
   };
 
   // Surah list for the range pickers (preserved for backwards compatibility)
-  app.get('/api/personal-tests/surahs', (req: Request, res: Response) => {
-    if (!authed(req, res)) return;
+  app.get('/api/personal-tests/surahs', async (req: Request, res: Response) => {
+    if (!(await authed(req, res))) return;
     res.json({
       surahs: getSurahs().map((s) => ({ number: s.number, name: s.name, ayah_count: s.ayah_count })),
     });
   });
 
   // Full metadata for range pickers: Surahs, Juz (1..30), and Quarters (1..240)
-  app.get('/api/personal-tests/meta', (req: Request, res: Response) => {
-    if (!authed(req, res)) return;
+  app.get('/api/personal-tests/meta', async (req: Request, res: Response) => {
+    if (!(await authed(req, res))) return;
     res.json({
       surahs: getSurahs().map((s) => ({ number: s.number, name: s.name, ayah_count: s.ayah_count })),
       juzList: getJuzList(),
@@ -266,8 +274,8 @@ export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
   });
 
   // Generate questions (nothing is saved here)
-  app.post('/api/personal-tests/generate', (req: Request, res: Response) => {
-    if (!authed(req, res)) return;
+  app.post('/api/personal-tests/generate', async (req: Request, res: Response) => {
+    if (!(await authed(req, res))) return;
     const setup = parseSetup(req.body);
     if ('error' in setup) return res.status(400).json({ error: setup.error });
 
@@ -282,7 +290,7 @@ export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
 
   // Save a finished personal test (grade is computed here, never trusted from the client)
   app.post('/api/personal-tests', async (req: Request, res: Response) => {
-    const user = authed(req, res);
+    const user = await authed(req, res);
     if (!user) return;
     const setup = parseSetup(req.body);
     if ('error' in setup) return res.status(400).json({ error: setup.error });
@@ -341,7 +349,7 @@ export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
     const grade = Math.round(questions.reduce((a, q) => a + q.grade, 0) / questions.length);
     const notes = req.body?.notes ? String(req.body.notes).trim().slice(0, 300) : '';
     const record: PersonalTestRecord = {
-      id: `pt_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
+      id: randomUUID(),
       member_id: user.id,
       range_type: setup.range_type,
       range_label: setup.range_label,
@@ -374,7 +382,7 @@ export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
 
   // My own history only
   app.get('/api/personal-tests', async (req: Request, res: Response) => {
-    const user = authed(req, res);
+    const user = await authed(req, res);
     if (!user) return;
     try {
       const all = (await store.listByMember(user.id))
@@ -392,7 +400,7 @@ export function registerPersonalTestRoutes(app: Express, deps: Deps): void {
 
   // Delete one of my own records
   app.delete('/api/personal-tests/:id', async (req: Request, res: Response) => {
-    const user = authed(req, res);
+    const user = await authed(req, res);
     if (!user) return;
     try {
       const ok = await store.remove(user.id, req.params.id);
