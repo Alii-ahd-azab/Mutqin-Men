@@ -211,7 +211,9 @@ begin
 end;
 $$;
 
--- Ends every Supabase Auth session of a user (password change/reset, deactivation).
+-- Ends every Supabase Auth session of a user (password change/reset).
+-- Returns the number of sessions ended, or -1 if the platform does not allow it (the caller logs it;
+-- the password change itself still succeeds, matching Supabase's own behavior).
 CREATE FUNCTION app_private.revoke_user_sessions(p_user_id uuid) RETURNS integer
     LANGUAGE plpgsql SECURITY DEFINER
     SET search_path TO ''
@@ -222,6 +224,9 @@ begin
   delete from auth.sessions s where s.user_id = p_user_id;
   get diagnostics v_count = row_count;
   return v_count;
+exception
+  when insufficient_privilege then
+    return -1;
 end;
 $$;
 

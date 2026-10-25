@@ -452,7 +452,8 @@ export async function deleteMemberCompletely(q: Queryable, id: string): Promise<
 }
 
 export async function revokeSessions(q: Queryable, userId: string): Promise<void> {
-  await q.query('select app_private.revoke_user_sessions($1)', [userId]);
+  const { rows } = await q.query<{ n: number }>('select app_private.revoke_user_sessions($1) as n', [userId]);
+  if (rows[0]?.n < 0) console.warn(`[Supabase] Could not end existing sessions of ${userId}; they expire on their own.`);
 }
 
 export async function insertRestDay(
