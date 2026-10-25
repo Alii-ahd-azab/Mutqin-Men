@@ -1,3 +1,6 @@
+// RETIRED after go-live: Firebase is frozen read-only and the final delta was applied on 2026-10-25.
+// The Sisters-runtime insert guards (20261027000100) now reject backdated legacy rows by design, so this
+// tool must not be run against production again. Kept as the record of how the final delta was applied.
 // Phase H: reconcile Firestore writes made after the Phase 1 import into Supabase.
 //
 // Transforms a fresh export with the approved Phase 1 mapping (unknown fields/collections fail closed),

@@ -1,5 +1,7 @@
 # Mutqin for Men — application cutover to Supabase
 
+> **Superseded (26 Oct 2026):** the application now uses the Mutqin for Sisters runtime architecture — see [SISTERS_RUNTIME.md](SISTERS_RUNTIME.md). The Express server, direct Postgres connection and `mutqin_app_server` role described below were removed. The migration, reconciliation, Firebase freeze and Auth-link results remain valid.
+
 Branch `supabase-cutover` (from `main` at `0acad94`). Prepared 26 October 2026. Phase A details: [AUDIT.md](AUDIT.md).
 
 ## Status at a glance
