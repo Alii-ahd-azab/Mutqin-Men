@@ -27,7 +27,8 @@ export const order = [
 export async function applySchema(db) {
   for (const name of fs
     .readdirSync(new URL("../supabase/migrations/", import.meta.url))
-    .filter((n) => n.endsWith(".sql"))
+    // Phase 1 files only; later cutover migrations are applied separately.
+    .filter((n) => n.startsWith("20261025") && n.endsWith(".sql"))
     .sort())
     await db.exec(
       fs.readFileSync(
