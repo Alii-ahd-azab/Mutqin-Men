@@ -44,7 +44,7 @@ const key = process.env.GOOGLE_APPLICATION_CREDENTIALS;
 if (!key)
   throw Error("Set GOOGLE_APPLICATION_CREDENTIALS to existing key file.");
 const config = JSON.parse(
-  fs.readFileSync(new URL("../firebase-applet-config.json", import.meta.url)),
+  fs.readFileSync(new URL("archive/firebase/firebase-applet-config.json", import.meta.url)),
 );
 let credential;
 try {

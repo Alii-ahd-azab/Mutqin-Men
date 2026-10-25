@@ -21,6 +21,7 @@ try {
   await client.query(
     "create table if not exists migration_private.cutover_migrations (name text primary key, applied_at timestamptz not null default now())",
   );
+  await client.query("alter table migration_private.cutover_migrations enable row level security");
   await client.query("revoke all on table migration_private.cutover_migrations from public");
   const done = await client.query("select 1 from migration_private.cutover_migrations where name = $1", [name]);
   if (done.rowCount) throw Error(`${name} is already applied.`);

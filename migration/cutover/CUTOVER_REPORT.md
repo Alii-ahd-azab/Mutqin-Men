@@ -190,3 +190,26 @@ Every step targets `uaublandjewfzmhnbflc`. Credentials go only in your environme
 9. **Smoke test:** sign in as a member and an admin, record one revision, check the admin dashboard. Writes now reach Supabase only.
 
 **Rollback** before step 9 writes anything: redeploy `main` and the archived rules. After go-live, Supabase-only writes would need a manual replay into Firestore; no reverse sync exists.
+
+---
+
+## Production execution log — runbook steps 1–5 (25 Oct 2026, ~22:52–23:01 UTC)
+
+Credentials came from `.env.local` (git-ignored), loaded with `node --env-file=.env.local`. No values were printed. Verified first: all four variables present; URL, database and Auth key all belong to `uaublandjewfzmhnbflc`; nothing references Sisters; public sign-ups disabled.
+
+| Step | Result |
+|---|---|
+| Freeze Firebase writes | `freeze-firestore.mjs freeze`: read-only rules live on `mutqin-7f0bb` (ruleset `fca71fad…`, 22:57:47Z). The exact previous live ruleset is saved in `migration/private/firestore-rules-before-freeze.json` (it differs from the archived repo copy). `restore` redeploys it. |
+| Final export | `migration/backups/2026-10-26-final-cutover`, 933 documents. |
+| Compare with Phase 1 | 7 added (3 recitations, 4 revisions), 0 changed, 0 removed. No new fields, collections or subcollections. |
+| Reconcile plan | missing 3 tasmia + 4 reviews + 7 provenance; 0 conflicts; 0 removed. |
+| Reconcile apply | 14 rows inserted and re-validated; a re-plan finds 0 missing. |
+| Parity (production) | 0 differences, 0 order differences (30 users, 1 rest day, 391 recitations, 490 revisions, 3 tests, 15 attempts, settings). |
+| Phase 1 validator (production) | passed: 933/933 documents, 9,429/9,429 scalar values, exact timestamps, array order. |
+| Freeze confirmation | two later exports (22:59Z, 23:01Z) identical to the final export. |
+| Access migration | `20261026000100_men_app_access.sql` applied and recorded in `migration_private.cutover_migrations`. |
+| Verification (`verify-access.mjs`, rolled back) | `mutqin_app_server` exists (NOLOGIN, no superuser/BYPASSRLS/INHERIT); 15 authenticated + 15 server policies; new review constraint in place. Anon denied. A member sees 22 profiles and none of others' tasmia/reviews; inserts and credential reads are denied. Inactive member: 1 profile. Admin: all 391 tasmia. API roles have no write grants; service_role has none; RLS is on every table. |
+
+Addendum: the apply tool's bookkeeping table was created without RLS (reachable by no API role); RLS was enabled on it and the tool fixed. `migration/export.mjs` now reads the archived Firebase web config. The owner role cannot `SET ROLE mutqin_app_server` (PostgreSQL 16+ default), so that role's grants were checked in the catalog rather than by live queries.
+
+**Not yet done (by instruction):** `mutqin_app_server` password, Auth account linking, auth-link migration, deployment, merge. Firebase stays frozen read-only, so until deployment members cannot save in the current app.

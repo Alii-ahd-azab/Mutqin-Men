@@ -1,10 +1,10 @@
 rules_version = '2';
-// Phase J (post-cutover): Firestore becomes a read-only rollback/reference copy of Mutqin for Men.
-// Deploy only after the Supabase application is live:
-//   firebase deploy --only firestore:rules --project mutqin-7f0bb   (with this file as the rules source)
+// Phase J: Firestore becomes a read-only rollback/reference copy of Mutqin for Men.
+// Deployed at the START of the go-live window (runbook step 1) so no write can land after the final export:
+//   node migration/cutover/freeze-firestore.mjs freeze
 // Every write through client SDKs — including the legacy server account — is denied.
 // Firebase Admin SDK reads used by migration/export.mjs are not subject to rules and keep working.
-// Rollback: redeploy the archived rules (migration/archive/firebase/firestore.rules) with the old application.
+// Rollback: `node migration/cutover/freeze-firestore.mjs restore` redeploys the exact pre-freeze live ruleset.
 service cloud.firestore {
   match /databases/{database}/documents {
     match /{document=**} {
