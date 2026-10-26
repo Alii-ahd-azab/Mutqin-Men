@@ -156,10 +156,133 @@ async function main() {
     const memberRest = await a.client.from('group_rest_days').insert({ cycle_id: program.cycle.id, rest_date: '2027-12-30', reason: 'x', created_by: A.id });
     record('member cannot add rest days', !!memberRest.error);
 
-    // ---- Edge Functions ----
+    // ---- Edge Functions (called exactly like the browser: functions.invoke with the user's session) ----
     for (const f of ['admin-users', 'admin-actions', 'peer-tests']) {
       const r = await fetch(`${url}/functions/v1/${f}`, { method: 'OPTIONS' });
       record(`Edge Function ${f} deployed`, r.status === 200, `HTTP ${r.status}`);
+    }
+    const invoke = async (client: SupabaseClient, name: string, body: Record<string, unknown>) => {
+      const { data, error } = await client.functions.invoke(name, { body });
+      let status = 200;
+      let message = data?.error as string | undefined;
+      const ctx = (error as { context?: unknown } | null)?.context;
+      if (ctx instanceof Response) {
+        status = ctx.status;
+        message = (await ctx.json().catch(() => ({})))?.error;
+      } else if (error) status = 0;
+      return { data, status, message };
+    };
+
+    // admin-users: full account lifecycle by the admin, refused for a member
+    const memberCreate = await invoke(a.client, 'admin-users', { action: 'create', name: 'x', phone: '000000000009', password: 'abcdef12', role: 'member', batch_id: batchId });
+    record('admin-users refuses a member caller', memberCreate.status === 403, `${memberCreate.status} ${memberCreate.message}`);
+    const fPassword = password();
+    const fCreate = await invoke(e.client, 'admin-users', { action: 'create', name: 'SMOKE F', phone: '000000000005', password: fPassword, role: 'member', batch_id: batchId });
+    if (fCreate.data?.user?.id) created.push({ key: 'F', id: fCreate.data.user.id, phone: '000000000005', password: fPassword, role: 'member' });
+    record('admin-users creates a member (Auth + profile + membership)', fCreate.status === 201 || !!fCreate.data?.user?.id, `${fCreate.status} ${fCreate.message ?? ''}`);
+    const F = created.find((c) => c.key === 'F');
+    if (F) {
+      const fLogin = await signIn(F);
+      record('new member can sign in', !fLogin.error, fLogin.error?.message);
+      const dupPhone = await invoke(e.client, 'admin-users', { action: 'create', name: 'dup', phone: '000000000005', password: 'abcdef12', role: 'member', batch_id: batchId });
+      record('admin-users rejects a duplicate phone', dupPhone.status === 409 || dupPhone.status === 400, `${dupPhone.status} ${dupPhone.message}`);
+      const newPw = password();
+      const upd = await invoke(e.client, 'admin-users', { action: 'update', user_id: F.id, name: 'SMOKE F2', phone: '000000000006', password: newPw, batch_id: batchId });
+      F.phone = '000000000006';
+      F.password = newPw;
+      const relogin = await signIn(F);
+      record('admin-users updates name, phone (login identity) and password', upd.status === 200 && !relogin.error && upd.data?.user?.name === 'SMOKE F2', `${upd.status} ${upd.message ?? relogin.error?.message ?? ''}`);
+      const deact = await invoke(e.client, 'admin-users', { action: 'update', user_id: F.id, is_active: false, batch_id: batchId });
+      const react = await invoke(e.client, 'admin-users', { action: 'update', user_id: F.id, is_active: true, batch_id: batchId });
+      record('admin-users deactivates and reactivates', deact.data?.user?.is_active === false && react.data?.user?.is_active === true);
+      const toAdmin = await invoke(e.client, 'admin-users', { action: 'update', user_id: F.id, role: 'admin', batch_id: batchId });
+      const toMember = await invoke(e.client, 'admin-users', { action: 'update', user_id: F.id, role: 'member', batch_id: batchId });
+      const membership = await service.from('batch_memberships').select('membership_role').eq('user_id', F.id);
+      record('admin-users switches member ↔ admin', toAdmin.data?.user?.role === 'admin' && toMember.data?.user?.role === 'member' && membership.data?.[0]?.membership_role === 'member', `${toAdmin.message ?? ''} ${toMember.message ?? ''}`);
+      const memberDelete = await invoke(a.client, 'admin-users', { action: 'delete', user_id: F.id });
+      record('admin-users refuses deletion by a member', memberDelete.status === 403);
+      const delF = await invoke(e.client, 'admin-users', { action: 'delete', user_id: F.id });
+      const gone = await service.from('profiles').select('id').eq('id', F.id);
+      const authGone = await service.auth.admin.getUserById(F.id);
+      record('admin-users deletes the member completely (profile and login)', delF.status === 200 && (gone.data || []).length === 0 && !!authGone.error, `${delF.status} ${delF.message ?? ''}`);
+    }
+
+    // admin-actions: authorized path reaches start_next_cycle, whose stale-cycle guard rejects before any change
+    const memberReset = await invoke(a.client, 'admin-actions', { action: 'factory-reset', batch_id: batchId, cycle_id: program.cycle.id });
+    record('admin-actions refuses a member caller', memberReset.status === 403, `${memberReset.status} ${memberReset.message}`);
+    const staleReset = await invoke(e.client, 'admin-actions', { action: 'factory-reset', batch_id: batchId, cycle_id: '00000000-0000-4000-8000-000000000000' });
+    const cycleAfter = await service.from('cycles').select('id, status').eq('id', program.cycle.id).single();
+    record('admin-actions runs start_next_cycle (stale-cycle guard: nothing reset)', staleReset.status === 400 && /تغيّرت الدورة/.test(staleReset.message || '') && cycleAfter.data?.status === 'active', `${staleReset.status} ${staleReset.message}`);
+    const unknown = await invoke(e.client, 'admin-actions', { action: 'nope' });
+    record('admin-actions rejects unknown actions', unknown.status === 400);
+
+    // peer-tests administration on a HIDDEN smoke test (the real active test is never touched)
+    const realPublished = (await service.from('peer_tests').select('id, status, updated_at').eq('cycle_id', program.cycle.id).eq('status', 'published')).data || [];
+    const memberSave = await invoke(a.client, 'peer-tests', { action: 'admin-save', title: 'x', range_start: 1, range_end: 8, questions_count: 1, lines_per_question: 1, audience: 'all', is_active: false });
+    record('peer-tests admin actions refuse a member', memberSave.status === 403);
+    const save = await invoke(e.client, 'peer-tests', { action: 'admin-save', title: 'SMOKE TEST', range_start: 1, range_end: 8, questions_count: 2, lines_per_question: 5, has_max_errors: true, max_errors_allowed: 3, test_type: 'recommended', audience: 'selected', selected_member_ids: [A.id, B.id], is_active: false });
+    const smokeTestId = save.data?.test?.id as string | undefined;
+    record('peer-tests admin-save (hidden test, selected audience)', save.status === 200 && !!smokeTestId && save.data.test.is_active === false && save.data.test.selected_member_ids?.length === 2, `${save.status} ${save.message ?? ''}`);
+    if (smokeTestId) {
+      const preview = await invoke(e.client, 'peer-tests', { action: 'admin-preview', test_id: smokeTestId });
+      record('peer-tests admin-preview', preview.status === 200 && preview.data?.questions?.length === 2);
+      const impact = await invoke(e.client, 'peer-tests', { action: 'admin-impact', test_id: smokeTestId });
+      record('peer-tests admin-impact', impact.status === 200 && typeof impact.data?.blocked_count === 'number');
+      const finish = await invoke(e.client, 'peer-tests', { action: 'admin-finish', test_id: smokeTestId });
+      record('peer-tests admin-finish', finish.status === 200 && finish.data?.test?.is_finished === true);
+      const reshow = await invoke(e.client, 'peer-tests', { action: 'admin-status', test_id: smokeTestId, is_active: true });
+      record('finished test cannot be re-activated', reshow.status === 400);
+      await service.from('peer_tests').delete().eq('id', smokeTestId);
+    }
+    const realAfter = (await service.from('peer_tests').select('id, status, updated_at').eq('cycle_id', program.cycle.id).eq('status', 'published')).data || [];
+    record('real active test untouched', JSON.stringify(realAfter) === JSON.stringify(realPublished));
+
+    // peer testing end to end on the real active test, with smoke examiner A and smoke candidate B
+    const live = program.tests.find((t) => t.is_active && !t.is_finished);
+    if (live) {
+      const b = await signIn(B);
+      for (let q = 1; q <= live.range_end; q++) {
+        const r = await b.client.from('tasmia_submissions').insert({ cycle_id: program.cycle.id, user_id: B.id, listener_id: A.id, quarter_number: q });
+        if (r.error) {
+          record(`candidate recites quarter ${q}`, false, r.error.message);
+          break;
+        }
+      }
+      const blocked = await b.client.from('tasmia_submissions').insert({ cycle_id: program.cycle.id, user_id: B.id, listener_id: A.id, quarter_number: live.range_end + 1 });
+      record('mandatory test blocks the next quarter until passed', !!blocked.error && /الاختبار الإلزامي/.test(blocked.error.message), blocked.error?.message);
+      const cand = await invoke(a.client, 'peer-tests', { action: 'candidates', test_id: live.id });
+      const bStatus = cand.data?.candidates?.find((c: { id: string }) => c.id === B.id);
+      record('peer-tests candidates (examiner view)', cand.status === 200 && bStatus?.is_eligible === true, JSON.stringify(bStatus?.ineligibility_reasons ?? cand.message));
+      const gen = await invoke(a.client, 'peer-tests', { action: 'generate', test_id: live.id, candidate_id: B.id });
+      record('peer-tests generate questions', gen.status === 200 && gen.data?.questions?.length === live.questions_count, `${gen.status} ${gen.message ?? ''}`);
+      if (gen.data?.questions) {
+        const answers = gen.data.questions.map((q: any) => ({ start_surah: q.start_surah, start_ayah: q.start_ayah, end_surah: q.end_surah, end_ayah: q.end_ayah, errors_count: 0 }));
+        const selfTest = await invoke(b.client, 'peer-tests', { action: 'submit', test_id: live.id, candidate_id: B.id, questions_results: answers });
+        record('member cannot test themselves', selfTest.status === 400);
+        const sub = await invoke(a.client, 'peer-tests', { action: 'submit', test_id: live.id, candidate_id: B.id, questions_results: answers, notes: 'SMOKE' });
+        record('peer-tests submit attempt (pass computed in SQL)', sub.status === 200 && sub.data?.attempt?.passed === true, `${sub.status} ${sub.message ?? ''}`);
+        const again = await invoke(a.client, 'peer-tests', { action: 'submit', test_id: live.id, candidate_id: B.id, questions_results: answers });
+        record('repeat submission refused', again.status === 400 || again.status === 429);
+        const geo = await service.from('peer_test_attempt_questions').select('actual_lines, legacy_incomplete').eq('attempt_id', sub.data?.attempt?.id ?? '00000000-0000-4000-8000-000000000000');
+        record('attempt questions stored with full geometry', (geo.data || []).length === live.questions_count && geo.data!.every((g) => g.actual_lines > 0 && !g.legacy_incomplete));
+        const unblocked = await b.client.from('tasmia_submissions').insert({ cycle_id: program.cycle.id, user_id: B.id, listener_id: A.id, quarter_number: live.range_end + 1 });
+        record('after passing, the next quarter is allowed', !unblocked.error || !/الاختبار الإلزامي/.test(unblocked.error.message), unblocked.error?.message);
+        const peerView = await loadProgram(b.client, batchId);
+        record('candidate sees own attempt only', peerView.testAttempts.length >= 1 && peerView.testAttempts.every((t) => t.candidate_id === B.id || t.examiner_id === B.id));
+      }
+    }
+
+    // personal tests through the Edge Function (generation) and the owner RPC (save)
+    const meta = await invoke(a.client, 'peer-tests', { action: 'personal-meta' });
+    record('personal-test metadata', meta.status === 200 && meta.data?.surahs?.length === 114 && meta.data?.quartersList?.length === 240);
+    const pgen = await invoke(a.client, 'peer-tests', { action: 'personal-generate', range_type: 'juz', start_juz: 30, end_juz: 30, questions_count: 2, lines_per_question: 3, difficulty: 'any' });
+    record('personal-test generation', pgen.status === 200 && pgen.data?.questions?.length === 2 && !!pgen.data?.setup);
+    if (pgen.data?.setup) {
+      const questions = pgen.data.questions.map((q: any, i: number) => ({ ...q, errors_count: i }));
+      const saved = await a.client.rpc('men_save_personal_test', { p_test: { ...pgen.data.setup, questions } });
+      const row = saved.data ? (await a.client.from('personal_tests').select('grade, range_label').eq('id', saved.data).single()).data : null;
+      record('generated personal test saved (grade computed in SQL)', !saved.error && Number(row?.grade) === 93 && /الجزء 30/.test(row?.range_label || ''), saved.error?.message);
+      if (saved.data) await a.client.from('personal_tests').delete().eq('id', saved.data);
     }
 
     await a.client.auth.signOut();
@@ -178,7 +301,7 @@ async function main() {
     record('cleanup restored every count', JSON.stringify(after) === JSON.stringify(before) && authAfter === authBefore, JSON.stringify({ before, after, authBefore, authAfter }));
   }
   console.log(JSON.stringify(results, null, 1));
-  if (results.some((r) => !r.ok && !r.check.startsWith('Edge Function'))) process.exitCode = 1;
+  if (results.some((r) => !r.ok)) process.exitCode = 1;
 }
 
 main().catch((err) => {
