@@ -1,15 +1,17 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo, TestDefinition } from '../types';
+import { AdminAccountUpdate, Batch, User, GroupSettings, NewAccountPayload, RestDay, RecitationLog, RevisionLog, CycleInfo } from '../types';
 import { getQuarterInfo } from '../data/quranData';
 import {
   calculateMemberRequiredQuarter,
   getCurrentWeekRange,
   getHijriDate,
   getActiveCycleDates,
-  calculateMemberRevisionStatus,
   formatArabicDateWithDayName,
   getPreLaunchMessage,
   calculateListenersLeaderboard,
+  joinedOnDateFromTimestamp,
+  computeMemberDelayStatus,
+  SEVERE_DELAY_THRESHOLD,
 } from '../lib/calculations';
 import { api } from '../api/client';
 import {
@@ -33,36 +35,47 @@ import {
   AlertOctagon,
   PauseCircle,
   PlayCircle,
-  Key,
   Trash2,
   Plus,
   RefreshCw,
   Award,
   Headphones,
+  Layers,
+  Crown,
+  Pencil,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { AdminMemberModal } from './AdminMemberModal';
 import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
 import { DailyThoughtEditor } from './DailyThoughtEditor';
-import { AdminTestsTab } from './AdminTestsTab';
+import { AdminAccountsManager } from './AdminAccountsManager';
+import { AdminPeerTestsTab } from './AdminPeerTestsTab';
+import { BatchAdminActions } from './BatchAdminActions';
+import { ACTION_TONE, ACTION_ICON, CONFIRM_TONE } from './actionButtonStyles';
+import { EditMemberModal } from './EditMemberModal';
+import { MoveMemberModal } from './MoveMemberModal';
+
+// Men: last day of the migrated program's missing revisions (one-off repair, safe to repeat).
+const BACKFILL_UNTIL = '2026-10-16';
 
 interface AdminDashboardProps {
   currentUser: User;
+  batch: Batch;
+  // Active cycle of the batch (Men settings keep their legacy id)
+  cycleId: string;
+  accessibleBatches: Batch[];
   cycleInfo: CycleInfo;
   settings: GroupSettings;
   users: User[];
   restDays: RestDay[];
   recitations: RecitationLog[];
   revisions: RevisionLog[];
-  onAddMember: (payload: {
-    name: string;
-    phone: string;
-    password: string;
-    role: 'member' | 'admin';
-  }) => Promise<void>;
-  onUpdateMember: (
-    id: string,
-    payload: { role?: 'member' | 'admin'; is_active?: boolean; password?: string; name?: string; phone?: string }
-  ) => Promise<void>;
+  onAddMember: (payload: NewAccountPayload) => Promise<void>;
+  onUpdateMember: (id: string, payload: AdminAccountUpdate) => Promise<void>;
+  // Moves a member to another batch (server determines his current batch)
+  onMoveMember: (id: string, destinationBatchId: string) => Promise<string>;
+  // Reload the batch data after admin permissions change
+  onAccountsChanged: () => void;
   onAddRestDay: (payload: { date: string; note: string }) => Promise<void>;
   onDeleteRestDay: (id: string) => Promise<void>;
   onPause: () => Promise<void>;
@@ -73,14 +86,18 @@ interface AdminDashboardProps {
   onUpdateDailyThought: (payload: { daily_thought: string }) => Promise<void>;
   onDeleteDailyThought: () => Promise<void>;
   onFactoryReset: () => Promise<void>;
+  // Men: record a finished past pause period / add missing revision records (return the message)
+  onAddPausePeriod: (from: string, to: string) => Promise<string>;
+  onBackfillRevisions: (until: string) => Promise<string>;
   onRefresh: () => void;
   loading: boolean;
-  tests?: TestDefinition[];
-  activeTest?: TestDefinition | null;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   currentUser,
+  batch,
+  cycleId,
+  accessibleBatches,
   cycleInfo,
   settings,
   users,
@@ -89,6 +106,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   revisions,
   onAddMember,
   onUpdateMember,
+  onMoveMember,
+  onAccountsChanged,
   onAddRestDay,
   onDeleteRestDay,
   onPause,
@@ -97,13 +116,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onUpdateDailyThought,
   onDeleteDailyThought,
   onFactoryReset,
+  onAddPausePeriod,
+  onBackfillRevisions,
   onRefresh,
   loading,
-  tests = [],
-  activeTest = null,
 }) => {
-  const [activeTab, setActiveTab] = useState<'today' | 'members' | 'stats' | 'settings'>('today');
-  const [settingsSubTab, setSettingsSubTab] = useState<'general' | 'tests'>('general');
+  const [activeTab, setActiveTab] = useState<'today' | 'members' | 'stats' | 'peer' | 'settings'>('today');
   const [membersSubTab, setMembersSubTab] = useState<'active' | 'excluded'>('active');
   const [memberToDeleteCompletely, setMemberToDeleteCompletely] = useState<User | null>(null);
   const [deleteConfirmationText, setDeleteConfirmationText] = useState('');
@@ -115,7 +133,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   const [isExcluding, setIsExcluding] = useState(false);
 
   const [memberToReactivate, setMemberToReactivate] = useState<User | null>(null);
+
+  // Edit member (name / phone / password) — applied by the admin-users Edge Function
+  const [memberToEdit, setMemberToEdit] = useState<User | null>(null);
+
+  // Move member to another batch — applied by the admin-users Edge Function
+  const [memberToMove, setMemberToMove] = useState<User | null>(null);
+  const canMoveMembers = accessibleBatches.length > 1;
   const [isReactivating, setIsReactivating] = useState(false);
+
+  // Men: past pause period and revision backfill
+  const [ppFrom, setPpFrom] = useState('');
+  const [ppTo, setPpTo] = useState('');
+  const [ppMsg, setPpMsg] = useState('');
+  const [bfConfirm, setBfConfirm] = useState(false);
+  const [bfMsg, setBfMsg] = useState('');
 
   const [showPauseModal, setShowPauseModal] = useState(false);
   const [isPausing, setIsPausing] = useState(false);
@@ -142,15 +174,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   // Settings: Start Date
   const [startDateInput, setStartDateInput] = useState(settings.start_date || '');
   const [settingsMsg, setSettingsMsg] = useState('');
-  const [ppFrom, setPpFrom] = useState('');
-  const [ppTo, setPpTo] = useState('');
-  const [ppMsg, setPpMsg] = useState('');
-  const [bfConfirm, setBfConfirm] = useState(false);
-  const [bfMsg, setBfMsg] = useState('');
 
-  // Password reset inline state
-  const [editingPasswordUserId, setEditingPasswordUserId] = useState<string | null>(null);
-  const [newPasswordInput, setNewPasswordInput] = useState('');
+  // Keep the start-date field in sync with the selected batch's cycle.
+  useEffect(() => {
+    setStartDateInput(settings.start_date || '');
+  }, [settings.start_date, batch.id]);
+
+  const isMasterAdmin = !!currentUser.is_master_admin;
 
   // Active program cycle calendar dates (excluding rest days and pauses)
   const activeCycleDates = useMemo(() => {
@@ -190,27 +220,25 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         (r) => r.member_id === m.id && r.date === cycleInfo.today_date
       );
 
-      const quarterStatus = calculateMemberRequiredQuarter(
-        m.id,
-        cycleInfo.quarter_of_day,
-        recitations
-      );
-
-      const revStatus = calculateMemberRevisionStatus(
-        m.id,
+      // Single shared definition of delay / «مؤهل للإقصاء» (also used server-side)
+      const delay = computeMemberDelayStatus({
+        memberId: m.id,
+        quarterOfDay: cycleInfo.quarter_of_day,
         activeCycleDates,
+        recitations,
         revisions,
-        cycleInfo.today_date
-      );
+        todayDate: cycleInfo.today_date,
+        joinedOnDate: joinedOnDateFromTimestamp(m.batch_joined_at),
+      });
 
-      const missedQuartersCount = quarterStatus.pastMissedQuartersCount;
-      const missedRevisionDaysCount = revStatus.pastMissedRevisionDaysCount;
-      const isSeverelyBehindRecitation = missedQuartersCount > 3;
-      const isSeverelyBehindRevision = missedRevisionDaysCount > 3;
-      const isSeverelyBehind = isSeverelyBehindRecitation || isSeverelyBehindRevision;
-      const severeReasons: ('recitation' | 'revision')[] = [];
-      if (isSeverelyBehindRecitation) severeReasons.push('recitation');
-      if (isSeverelyBehindRevision) severeReasons.push('revision');
+      const {
+        missedQuartersCount,
+        missedRevisionDaysCount,
+        isSeverelyBehindRecitation,
+        isSeverelyBehindRevision,
+        isSeverelyBehind,
+        severeReasons,
+      } = delay;
 
       const totalRecitations = recitations.filter(
         (r) => r.member_id === m.id || r.reciter_id === m.id
@@ -230,11 +258,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         recitationNotes: todayRecs.map((r) => r.notes).filter(Boolean).join(' | '),
         hasReviewed: !!todayRev,
         revisionNotes: todayRev?.notes,
-        requiredQuarter: quarterStatus.requiredQuarter,
-        isBehind: quarterStatus.isBehind,
-        isAllCaughtUp: quarterStatus.allCompletedUpToToday,
+        requiredQuarter: delay.requiredQuarter,
+        isBehind: delay.isBehind,
+        isAllCaughtUp: delay.allCompletedUpToToday,
         missedQuartersCount,
-        missedQuarters: quarterStatus.pastMissedQuarters,
+        missedQuarters: delay.missedQuarters,
         missedRevisionDaysCount,
         isSeverelyBehindRecitation,
         isSeverelyBehindRevision,
@@ -432,29 +460,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     }
   };
 
-  // Reset password
-  const handleSavePassword = async (userId: string) => {
-    if (!newPasswordInput.trim()) return;
-    await onUpdateMember(userId, { password: newPasswordInput.trim() });
-    setEditingPasswordUserId(null);
-    setNewPasswordInput('');
-  };
-
   return (
     <div className="space-y-6 pb-12">
-      {/* Top Bar Header (المستطيل الأخضر في أول الصفحة دائماً) */}
-      <div className="bg-gradient-to-l from-emerald-800 via-emerald-700 to-emerald-900 text-white rounded-3xl p-6 sm:p-7 shadow-md border border-emerald-600/30">
+      {/* Top Bar Header (المستطيل الملوّن في أول الصفحة دائماً) */}
+      <div className="bg-gradient-to-l from-emerald-900 via-emerald-800 to-emerald-900 text-white rounded-3xl p-6 sm:p-7 shadow-md border border-emerald-400/20">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2 flex-wrap">
-              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/40 text-emerald-200 text-xs font-semibold border border-emerald-500/30">
-                <Shield className="w-3.5 h-3.5 text-amber-300" />
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-950/40 text-emerald-100 text-xs font-semibold border border-emerald-400/30">
+                <Shield className="w-3.5 h-3.5 text-emerald-300" />
                 <span>لوحة تحكم المشرف</span>
               </span>
 
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 text-white text-xs font-bold border border-white/20">
+                <Layers className="w-3.5 h-3.5 text-emerald-200" />
+                <span>{batch.name}</span>
+              </span>
+
               {!cycleInfo.has_started ? (
-                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-amber-400/20 text-amber-200 border border-amber-400/40 text-xs font-semibold">
-                  <Clock className="w-3.5 h-3.5 text-amber-300" />
+                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full bg-emerald-400/20 text-emerald-200 border border-emerald-400/40 text-xs font-semibold">
+                  <Clock className="w-3.5 h-3.5 text-emerald-300" />
                   <span>لم تبدأ بعد (بانتظار الانطلاق)</span>
                 </span>
               ) : cycleInfo.is_paused ? (
@@ -472,7 +497,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
             {cycleInfo.has_started ? (
               <>
-                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-amber-100 tracking-tight">
+                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-emerald-100 tracking-tight">
                   اليوم رقم {cycleInfo.cycle_day}
                 </h2>
                 <p className="text-emerald-100/90 text-xs sm:text-sm">
@@ -482,7 +507,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </>
             ) : (
               <>
-                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-amber-100 tracking-tight">
+                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-emerald-100 tracking-tight">
                   لم تبدأ بعد
                 </h2>
                 <p className="text-emerald-100/90 text-xs sm:text-sm">
@@ -523,12 +548,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
 
       {/* Main Tabs Navigation */}
-      <div className="flex bg-stone-100 p-1.5 rounded-2xl gap-1 text-xs font-bold border border-stone-200">
+      <div className="grid grid-cols-2 sm:grid-cols-5 bg-emerald-50/60 p-1.5 rounded-2xl gap-1 text-xs font-bold border border-emerald-100">
         <button
           onClick={() => setActiveTab('today')}
           className={`flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition ${
             activeTab === 'today'
-              ? 'bg-white text-emerald-900 shadow-sm border border-stone-200'
+              ? 'bg-white text-emerald-950 shadow-sm border border-emerald-200'
               : 'text-stone-600 hover:text-stone-900'
           }`}
         >
@@ -540,7 +565,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           onClick={() => setActiveTab('members')}
           className={`flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition ${
             activeTab === 'members'
-              ? 'bg-white text-emerald-900 shadow-sm border border-stone-200'
+              ? 'bg-white text-emerald-950 shadow-sm border border-emerald-200'
               : 'text-stone-600 hover:text-stone-900'
           }`}
         >
@@ -552,7 +577,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           onClick={() => setActiveTab('stats')}
           className={`flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition ${
             activeTab === 'stats'
-              ? 'bg-white text-emerald-900 shadow-sm border border-stone-200'
+              ? 'bg-white text-emerald-950 shadow-sm border border-emerald-200'
               : 'text-stone-600 hover:text-stone-900'
           }`}
         >
@@ -561,10 +586,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         </button>
 
         <button
+          onClick={() => setActiveTab('peer')}
+          className={`flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition ${
+            activeTab === 'peer'
+              ? 'bg-white text-emerald-950 shadow-sm border border-emerald-200'
+              : 'text-stone-600 hover:text-stone-900'
+          }`}
+        >
+          <Award className="w-4 h-4 text-amber-600" />
+          <span>اختبار الزملاء</span>
+        </button>
+
+        <button
           onClick={() => setActiveTab('settings')}
           className={`flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition ${
             activeTab === 'settings'
-              ? 'bg-white text-emerald-900 shadow-sm border border-stone-200'
+              ? 'bg-white text-emerald-950 shadow-sm border border-emerald-200'
               : 'text-stone-600 hover:text-stone-900'
           }`}
         >
@@ -649,7 +686,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               <div>
                 <div className="flex items-center gap-1.5">
                   <span className="text-xs text-stone-500 font-medium">مؤهلون للإقصاء</span>
-                  <span className="text-[10px] text-rose-700 font-bold bg-rose-100/80 px-1.5 py-0.2 rounded-sm">&gt; 3 فائت</span>
+                  <span className="text-[10px] text-rose-700 font-bold bg-rose-100/80 px-1.5 py-0.2 rounded-sm">{SEVERE_DELAY_THRESHOLD}+ فائت</span>
                 </div>
                 <div className={`text-2xl font-bold mt-0.5 ${
                   severelyBehindMembersCount > 0 ? 'text-rose-700' : 'text-stone-800'
@@ -753,7 +790,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   {filteredTodayMembers.length === 0 ? (
                     <tr>
                       <td colSpan={5} className="py-10 text-center text-stone-400 text-xs">
-                        لا يوجد أعضاء مطابقين لمعايير التصفية الحالية
+                        {activeMemberUsers.length === 0
+                          ? 'لا يوجد أعضاء في هذه الدفعة حتى الآن'
+                          : 'لا يوجد أعضاء مطابقين لمعايير التصفية الحالية'}
                       </td>
                     </tr>
                   ) : (
@@ -891,7 +930,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <span>إدارة أعضاء المقرأة</span>
               </h3>
               <p className="text-xs text-stone-500 mt-0.5">
-                إدارة حسابات الحفاظ، وإقصاء الأعضاء مؤقتًا، وإعادة تفعيلهم أو حذفهم نهائيًا
+                إدارة حسابات الحفاظ في «{batch.name}»، وإقصاء الأعضاء مؤقتًا، وإعادة تفعيلهم أو حذفهم نهائيًا
               </p>
             </div>
 
@@ -950,6 +989,13 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             </div>
           )}
 
+          {membersSubTab === 'active' && activeMemberUsers.length === 0 && (
+            <div className="rounded-2xl bg-emerald-50/60 border border-emerald-100 p-4 text-xs text-emerald-900 flex items-center gap-2.5">
+              <Users className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>لا يوجد أعضاء في هذه الدفعة حتى الآن. أضف أول عضو من زر «إضافة عضو جديد».</span>
+            </div>
+          )}
+
           {/* SUB-TAB 1: الأعضاء النشطون */}
           {membersSubTab === 'active' && (
             <div className="bg-white rounded-2xl border border-stone-200 shadow-2xs overflow-hidden">
@@ -966,7 +1012,6 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </thead>
                   <tbody className="divide-y divide-stone-100 text-stone-800">
                     {activeUsers.map((u) => {
-                      const isEditingPw = editingPasswordUserId === u.id;
                       const memberStatus = membersTodayStatus.find((s) => s.user.id === u.id);
                       return (
                         <tr key={u.id} className="hover:bg-stone-50/50 transition">
@@ -985,13 +1030,22 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               </div>
                             )}
                           </td>
-                          <td className="py-3 px-4 font-mono text-stone-600">{u.phone}</td>
+                          <td className="py-3 px-4 font-mono text-stone-600">
+  {u.role === 'admin' && !(isMasterAdmin && !u.is_master_admin) ? '—' : u.phone}
+</td>
                           <td className="py-3 px-4">
                             {u.role === 'admin' ? (
-                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md font-bold text-[10px] bg-amber-50 text-amber-900 border border-amber-200">
-                                <Shield className="w-3 h-3 text-amber-600" />
-                                مشرف
-                              </span>
+                              u.is_master_admin ? (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md font-bold text-[10px] bg-amber-50 text-amber-900 border border-amber-200">
+                                  <Crown className="w-3 h-3 text-amber-600" />
+                                  مشرف عام
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md font-bold text-[10px] bg-amber-50 text-amber-800 border border-amber-200">
+                                  <Shield className="w-3 h-3 text-amber-600" />
+                                  مشرف الدفعة
+                                </span>
+                              )
                             ) : (
                               <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-md font-medium text-[10px] bg-stone-100 text-stone-700">
                                 عضو حافظ
@@ -1000,10 +1054,17 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </td>
                           <td className="py-3 px-4">
                             <div className="space-y-1">
-                              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700">
-                                <UserCheck className="w-3.5 h-3.5" />
-                                نشط
-                              </span>
+                              {u.is_active ? (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700">
+                                  <UserCheck className="w-3.5 h-3.5" />
+                                  نشط
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-700">
+                                  <UserX className="w-3.5 h-3.5" />
+                                  مُقصى (غير نشط)
+                                </span>
+                              )}
                               {u.role === 'member' && memberStatus && (
                                 <div className="text-[10px] space-y-0.5">
                                   <div className={memberStatus.isSeverelyBehindRecitation ? 'text-rose-700 font-bold' : memberStatus.missedQuartersCount > 0 ? 'text-amber-700 font-medium' : 'text-stone-400'}>
@@ -1021,54 +1082,57 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                           </td>
                           <td className="py-3 px-4">
                             <div className="flex items-center gap-2">
+                              {/* Edit member data */}
+                              {u.role === 'member' && (
+                                <button
+                                  onClick={() => setMemberToEdit(u)}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${ACTION_TONE.edit} flex items-center gap-1 transition cursor-pointer`}
+                                  title="تعديل الاسم ورقم الهاتف وكلمة المرور"
+                                >
+                                  <Pencil className={`w-3.5 h-3.5 ${ACTION_ICON.edit}`} />
+                                  <span>تعديل</span>
+                                </button>
+                              )}
+
+                              {/* Move member to another batch */}
+                              {u.role === 'member' && canMoveMembers && (
+                                <button
+                                  onClick={() => setMemberToMove(u)}
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${ACTION_TONE.move} flex items-center gap-1 transition cursor-pointer whitespace-nowrap`}
+                                  title="نقل العضو إلى دفعة أخرى مع الاحتفاظ بسجله"
+                                >
+                                  <ArrowLeftRight className={`w-3.5 h-3.5 ${ACTION_ICON.move}`} />
+                                  <span>نقل إلى دفعة أخرى</span>
+                                </button>
+                              )}
+
                               {/* Exclude member button (for non-admin members) */}
                               {u.id !== currentUser.id && u.role === 'member' && (
                                 <button
                                   onClick={() => setMemberToExclude(u)}
-                                  className="px-2.5 py-1 rounded-lg text-[11px] font-bold bg-amber-50 hover:bg-amber-100 text-amber-800 border border-amber-200 flex items-center gap-1 transition cursor-pointer"
+                                  className={`px-2.5 py-1 rounded-lg text-[11px] font-bold ${ACTION_TONE.exclude} flex items-center gap-1 transition cursor-pointer`}
                                   title="إقصاء العضو مؤقتًا من المجموعة ونقله لقائمة الأعضاء المُقصَين"
                                 >
-                                  <UserMinus className="w-3.5 h-3.5 text-amber-700" />
+                                  <UserMinus className={`w-3.5 h-3.5 ${ACTION_ICON.exclude}`} />
                                   <span>إقصاء</span>
                                 </button>
                               )}
 
-                              {/* Reset password */}
-                              {isEditingPw ? (
-                                <div className="flex items-center gap-1">
-                                  <input
-                                    type="text"
-                                    placeholder="كلمة مرور جديدة..."
-                                    value={newPasswordInput}
-                                    onChange={(e) => setNewPasswordInput(e.target.value)}
-                                    className="w-28 px-2 py-1 text-[11px] border border-stone-300 rounded-lg outline-hidden"
+                              {/* Batch-admin management — master admins only (server re-checks) */}
+                              {isMasterAdmin &&
+                                u.role === 'admin' &&
+                                !u.is_master_admin &&
+                                u.id !== currentUser.id && (
+                                  <BatchAdminActions
+                                    account={u}
+                                    batches={accessibleBatches}
+                                    onChanged={(message) => {
+                                      onAccountsChanged();
+                                      setActionFeedbackMsg(message);
+                                      setTimeout(() => setActionFeedbackMsg(''), 4000);
+                                    }}
                                   />
-                                  <button
-                                    onClick={() => handleSavePassword(u.id)}
-                                    className="px-2 py-1 rounded-lg bg-emerald-700 text-white text-[10px] font-bold"
-                                  >
-                                    حفظ
-                                  </button>
-                                  <button
-                                    onClick={() => setEditingPasswordUserId(null)}
-                                    className="px-1.5 py-1 rounded-lg bg-stone-200 text-stone-600 text-[10px]"
-                                  >
-                                    إلغاء
-                                  </button>
-                                </div>
-                              ) : (
-                                <button
-                                  onClick={() => {
-                                    setEditingPasswordUserId(u.id);
-                                    setNewPasswordInput('');
-                                  }}
-                                  className="px-2 py-1 rounded-lg text-[11px] bg-stone-100 hover:bg-stone-200 text-stone-600 flex items-center gap-1 transition"
-                                  title="تغيير كلمة المرور"
-                                >
-                                  <Key className="w-3 h-3" />
-                                  <span>كلمة المرور</span>
-                                </button>
-                              )}
+                                )}
                             </div>
                           </td>
                         </tr>
@@ -1151,13 +1215,35 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                               </td>
                               <td className="py-3 px-4">
                                 <div className="flex items-center gap-2">
+                                  {/* Edit member data */}
+                                  <button
+                                    onClick={() => setMemberToEdit(u)}
+                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold ${ACTION_TONE.edit} flex items-center gap-1.5 transition shadow-2xs cursor-pointer`}
+                                    title="تعديل الاسم ورقم الهاتف وكلمة المرور"
+                                  >
+                                    <Pencil className={`w-3.5 h-3.5 ${ACTION_ICON.edit}`} />
+                                    <span>تعديل</span>
+                                  </button>
+
+                                  {/* Move member to another batch */}
+                                  {canMoveMembers && (
+                                    <button
+                                      onClick={() => setMemberToMove(u)}
+                                      className={`px-3 py-1.5 rounded-xl text-xs font-bold ${ACTION_TONE.move} flex items-center gap-1.5 transition shadow-2xs cursor-pointer whitespace-nowrap`}
+                                      title="نقل العضو إلى دفعة أخرى مع الاحتفاظ بسجله"
+                                    >
+                                      <ArrowLeftRight className={`w-3.5 h-3.5 ${ACTION_ICON.move}`} />
+                                      <span>نقل إلى دفعة أخرى</span>
+                                    </button>
+                                  )}
+
                                   {/* Reactivate Button */}
                                   <button
                                     onClick={() => setMemberToReactivate(u)}
-                                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-200 flex items-center gap-1.5 transition shadow-2xs cursor-pointer"
+                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold ${ACTION_TONE.reactivate} flex items-center gap-1.5 transition shadow-2xs cursor-pointer`}
                                     title="إعادة تفعيل العضو وإعادته للمقرأة"
                                   >
-                                    <RotateCcw className="w-3.5 h-3.5 text-emerald-700" />
+                                    <RotateCcw className={`w-3.5 h-3.5 ${ACTION_ICON.reactivate}`} />
                                     <span>إعادة التفعيل</span>
                                   </button>
 
@@ -1167,10 +1253,10 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                       setMemberToDeleteCompletely(u);
                                       setDeleteConfirmationText('');
                                     }}
-                                    className="px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-50 hover:bg-rose-100 text-rose-700 border border-rose-200 flex items-center gap-1.5 transition shadow-2xs"
+                                    className={`px-3 py-1.5 rounded-xl text-xs font-bold ${ACTION_TONE.delete} flex items-center gap-1.5 transition shadow-2xs`}
                                     title="حذف نهائي للعضو وسجلاته بلا رجعة"
                                   >
-                                    <Trash2 className="w-3.5 h-3.5 text-rose-600" />
+                                    <Trash2 className={`w-3.5 h-3.5 ${ACTION_ICON.delete}`} />
                                     <span>حذف نهائي</span>
                                   </button>
                                 </div>
@@ -1193,6 +1279,12 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* =================================================================== */}
       {activeTab === 'stats' && (
         <div className="space-y-4">
+          {activeMemberUsers.length === 0 && (
+            <div className="rounded-2xl bg-emerald-50/60 border border-emerald-100 p-4 text-xs text-emerald-900 flex items-center gap-2.5">
+              <Users className="w-4 h-4 text-emerald-600 shrink-0" />
+              <span>لا يوجد أعضاء في هذه الدفعة حتى الآن، وستظهر الإحصائيات بمجرد إضافة الأعضاء وبدء التسميع.</span>
+            </div>
+          )}
           {/* Sub tabs: Weekly vs Lifetime */}
           <div className="flex border-b border-stone-200 bg-stone-50/70 p-1 rounded-2xl gap-1 text-xs font-bold">
             <button
@@ -1458,53 +1550,29 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       {/* =================================================================== */}
       {/* TAB 4: الإعدادات والإيقاف (SETTINGS & PAUSE) */}
       {/* =================================================================== */}
+      {/* =================================================================== */}
+      {/* TAB: اختبار الزملاء (PEER TESTING) */}
+      {/* =================================================================== */}
+      {activeTab === 'peer' && (
+        <AdminPeerTestsTab
+          batch={batch}
+          cycleId={cycleId}
+          members={users.filter((u) => u.role === 'member' && u.is_active)}
+          onChanged={onRefresh}
+        />
+      )}
+
       {activeTab === 'settings' && (
         <div className="space-y-6">
-          {/* Settings Sub Tabs (عامة / الاختبارات) */}
-          <div className="flex bg-stone-100 p-1 rounded-2xl gap-1 text-xs font-bold border border-stone-200 max-w-sm">
-            <button
-              onClick={() => setSettingsSubTab('general')}
-              className={`flex-1 py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 transition ${
-                settingsSubTab === 'general'
-                  ? 'bg-white text-emerald-900 shadow-xs border border-stone-200'
-                  : 'text-stone-600 hover:text-stone-900'
-              }`}
-            >
-              <Settings className="w-3.5 h-3.5 text-emerald-700" />
-              <span>إعدادات الدورة والإيقاف</span>
-            </button>
-
-            <button
-              onClick={() => setSettingsSubTab('tests')}
-              className={`flex-1 py-2 px-3 rounded-xl flex items-center justify-center gap-1.5 transition ${
-                settingsSubTab === 'tests'
-                  ? 'bg-white text-emerald-900 shadow-xs border border-stone-200'
-                  : 'text-stone-600 hover:text-stone-900'
-              }`}
-            >
-              <Award className="w-3.5 h-3.5 text-emerald-700" />
-              <span>الاختبارات {activeTest ? '(نشط)' : ''}</span>
-            </button>
-          </div>
-
-          {settingsSubTab === 'tests' ? (
-            <AdminTestsTab
-              tests={tests}
-              activeTest={activeTest}
-              members={users.filter((u) => u.role === 'member' && u.is_active)}
-              onRefresh={onRefresh}
-            />
-          ) : (
-            <div className="space-y-6">
-              {/* Section: خاطرة اليوم (Daily Thought Editor) */}
-              <DailyThoughtEditor
-                currentThought={settings.daily_thought}
-                updatedAt={settings.daily_thought_updated_at}
-                updatedBy={settings.daily_thought_updated_by}
-                onSave={(htmlContent) => onUpdateDailyThought({ daily_thought: htmlContent })}
-                onDelete={onDeleteDailyThought}
-                loading={loading}
-              />
+          {/* Section: خاطرة اليوم (Daily Thought Editor) */}
+          <DailyThoughtEditor
+            currentThought={settings.daily_thought}
+            updatedAt={settings.daily_thought_updated_at}
+            updatedBy={settings.daily_thought_updated_by}
+            onSave={(htmlContent) => onUpdateDailyThought({ daily_thought: htmlContent })}
+            onDelete={onDeleteDailyThought}
+            loading={loading}
+          />
 
           {/* Section 1: Pause / Resume the entire program */}
           <div className="bg-white rounded-3xl border border-stone-200 p-6 shadow-2xs space-y-4">
@@ -1540,36 +1608,37 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 • إجمالي أيام الإيقاف المؤقت المحسوبة سابقًا: <strong>{cycleInfo.paused_days_count} يومًا</strong>.
               </p>
 
-              <div className="pt-2 space-y-2 border-t border-stone-200">
-                <p className="text-xs font-bold text-stone-800">تسجيل المراجعات الناقصة حتى الجمعة 16 أكتوبر 2026</p>
-                <p className="text-[11px] text-stone-500">يضيف مراجعة لكل عضو نشط في كل يوم ناقص من بداية البرنامج حتى 2026-10-16 (بسبب خلل الحفظ). لا يعدّل ولا يحذف أي سجل موجود، وتكرار الضغط آمن.</p>
-                {!bfConfirm ? (
-                  <button onClick={() => setBfConfirm(true)} className="px-4 py-2 rounded-lg bg-amber-700 text-white text-xs font-bold cursor-pointer">
-                    تسجيل المراجعات الناقصة
-                  </button>
-                ) : (
-                  <div className="flex flex-wrap items-center gap-2">
-                    <span className="text-xs text-rose-700 font-bold">تأكيد: سيتم تسجيل المراجعات لجميع الأعضاء النشطين.</span>
-                    <button
-                      onClick={async () => {
-                        try {
-                          const r = await api.adminBackfillRevisions('2026-10-16');
-                          setBfMsg(r.message);
-                          onRefresh();
-                        } catch (e: any) {
-                          setBfMsg(e?.message || 'تعذر الحفظ');
-                        }
-                        setBfConfirm(false);
-                      }}
-                      className="px-4 py-2 rounded-lg bg-rose-700 text-white text-xs font-bold cursor-pointer"
-                    >
-                      نعم، سجّل
+              {/* Men: one-off repair of the migrated program (revisions lost before 2026-10-16) */}
+              {settings.start_date <= BACKFILL_UNTIL && (
+                <div className="pt-2 space-y-2 border-t border-stone-200">
+                  <p className="text-xs font-bold text-stone-800">تسجيل المراجعات الناقصة حتى الجمعة 16 أكتوبر 2026</p>
+                  <p className="text-[11px] text-stone-500">يضيف مراجعة لكل عضو نشط في كل يوم ناقص من بداية البرنامج حتى {BACKFILL_UNTIL} (بسبب خلل الحفظ). لا يعدّل ولا يحذف أي سجل موجود، وتكرار الضغط آمن.</p>
+                  {!bfConfirm ? (
+                    <button onClick={() => setBfConfirm(true)} className="px-4 py-2 rounded-lg bg-amber-700 text-white text-xs font-bold cursor-pointer">
+                      تسجيل المراجعات الناقصة
                     </button>
-                    <button onClick={() => setBfConfirm(false)} className="px-4 py-2 rounded-lg border border-stone-300 text-xs cursor-pointer">إلغاء</button>
-                  </div>
-                )}
-                {bfMsg && <p className="text-[11px] text-emerald-700">{bfMsg}</p>}
-              </div>
+                  ) : (
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-rose-700 font-bold">تأكيد: سيتم تسجيل المراجعات لجميع الأعضاء النشطين.</span>
+                      <button
+                        onClick={async () => {
+                          try {
+                            setBfMsg(await onBackfillRevisions(BACKFILL_UNTIL));
+                          } catch (e: any) {
+                            setBfMsg(e?.message || 'تعذر الحفظ');
+                          }
+                          setBfConfirm(false);
+                        }}
+                        className="px-4 py-2 rounded-lg bg-rose-700 text-white text-xs font-bold cursor-pointer"
+                      >
+                        نعم، سجّل
+                      </button>
+                      <button onClick={() => setBfConfirm(false)} className="px-4 py-2 rounded-lg border border-stone-300 text-xs cursor-pointer">إلغاء</button>
+                    </div>
+                  )}
+                  {bfMsg && <p className="text-[11px] text-emerald-700">{bfMsg}</p>}
+                </div>
+              )}
 
               <div className="pt-2 space-y-2 border-t border-stone-200">
                 <p className="text-xs font-bold text-stone-800">تسجيل فترة إيقاف سابقة (لتصحيح الأيام المتأخرة الخاطئة)</p>
@@ -1581,11 +1650,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     disabled={!ppFrom || !ppTo || ppTo < ppFrom}
                     onClick={async () => {
                       try {
-                        const r = await api.adminAddPausePeriod(ppFrom, ppTo);
-                        setPpMsg(r.message);
+                        setPpMsg(await onAddPausePeriod(ppFrom, ppTo));
                         setPpFrom('');
                         setPpTo('');
-                        onRefresh();
                       } catch (e: any) {
                         setPpMsg(e?.message || 'تعذر الحفظ');
                       }
@@ -1727,14 +1794,26 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
             {settingsMsg && <p className="text-xs text-emerald-700 font-medium">{settingsMsg}</p>}
           </div>
 
+          {/* Section: Admin accounts & batch permissions (master admin only) */}
+          {isMasterAdmin && (
+            <AdminAccountsManager
+              batches={accessibleBatches}
+              currentUserId={currentUser.id}
+              onChanged={onAccountsChanged}
+            />
+          )}
+
           {/* Section 4: Factory Reset */}
           <div className="bg-rose-50/50 rounded-3xl border border-rose-200 p-6 shadow-2xs space-y-3">
-            <h3 className="font-bold text-base text-rose-950 flex items-center gap-2">
+            <h3 className="font-bold text-base text-emerald-950 flex items-center gap-2">
               <RotateCcw className="w-5 h-5 text-rose-700" />
               <span>إعادة ضبط المصنع وبدء دورة ختمة جديدة</span>
             </h3>
             <p className="text-xs text-rose-800 leading-relaxed">
-              إعادة عداد الخطة إلى اليوم رقم 1، وتصفير أيام الإيقاف والاستدراك، ومسح جميع سجلات التسميع والمراجعة وجميع محاولات الاختبارات. يُستخدم عند إتمام الختمة (اليوم 240) أو إعادة تأسيس المقرأة مع بقاء تعريفات الاختبارات وحسابات الأعضاء.
+              إعادة عداد الخطة إلى اليوم رقم 1، وتصفير أيام الإيقاف والاستدراك، ومسح جميع سجلات التسميع والمراجعة. يُستخدم عند إتمام الختمة (اليوم 240) أو إعادة تأسيس المقرأة.
+            </p>
+            <p className="text-xs text-rose-900 font-bold">
+              يُطبَّق هذا الإجراء على «{batch.name}» فقط، ولا يؤثر على أي دفعة أخرى.
             </p>
 
             <button
@@ -1747,9 +1826,34 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
           </div>
         </div>
       )}
-    </div>
-  )}
 
+      {/* Edit Member Modal */}
+      <EditMemberModal
+        member={memberToEdit}
+        allowRoleSwitch={!!currentUser.is_master_admin}
+        onClose={() => setMemberToEdit(null)}
+        onSubmit={async (payload) => {
+          if (!memberToEdit) return;
+          const newName = payload.name ?? memberToEdit.name;
+          await onUpdateMember(memberToEdit.id, payload);
+          setActionFeedbackMsg(`تم تحديث بيانات العضو "${newName}" بنجاح.`);
+          setTimeout(() => setActionFeedbackMsg(''), 4000);
+        }}
+      />
+
+      {/* Move Member Modal */}
+      <MoveMemberModal
+        member={memberToMove}
+        currentBatch={batch}
+        batches={accessibleBatches}
+        onClose={() => setMemberToMove(null)}
+        onSubmit={async (destinationBatchId) => {
+          if (!memberToMove) return;
+          const message = await onMoveMember(memberToMove.id, destinationBatchId);
+          setActionFeedbackMsg(message);
+          setTimeout(() => setActionFeedbackMsg(''), 5000);
+        }}
+      />
 
       {/* Admin Member Modal */}
       <AdminMemberModal
@@ -1757,6 +1861,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         onClose={() => setIsMemberModalOpen(false)}
         onSubmit={onAddMember}
         loading={loading}
+        batches={accessibleBatches}
+        defaultBatchId={batch.id}
+        canCreateAdmins={isMasterAdmin}
       />
 
       {/* Factory Reset Confirmation Modal */}
@@ -1768,13 +1875,16 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <AlertCircle className="w-6 h-6 text-rose-700" />
               </div>
               <div>
-                <h3 className="font-bold text-base text-rose-950">تأكيد إعادة الضبط الشامل</h3>
+                <h3 className="font-bold text-base text-emerald-950">تأكيد إعادة الضبط الشامل</h3>
                 <p className="text-xs text-stone-500">هذا الإجراء نهائي ولا يمكن التراجع عنه</p>
               </div>
             </div>
 
             <p className="text-xs text-stone-600 leading-relaxed">
-              سيتم مسح جميع سجلات التسميع والمراجعة السابقة وجميع محاولات الاختبارات لجميع الأعضاء، وتعيين بداية الدورة لتاريخ اليوم، والعودة إلى اليوم رقم 1 ورقم الدورة 1 (مع الإبقاء على تعريفات الاختبارات وحسابات الأعضاء).
+              سيتم مسح جميع سجلات التسميع والمراجعة السابقة لجميع الأعضاء، وتعيين بداية الدورة لتاريخ اليوم، والعودة إلى اليوم رقم 1 ورقم الدورة 1.
+            </p>
+            <p className="text-xs font-bold text-rose-800 bg-rose-50 border border-rose-200 rounded-xl px-3 py-2">
+              الدفعة المتأثرة: «{batch.name}» فقط
             </p>
 
             <div>
@@ -1827,7 +1937,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                 <AlertCircle className="w-6 h-6 text-rose-700" />
               </div>
               <div>
-                <h3 className="font-bold text-base text-rose-950">تأكيد الحذف النهائي للعضو</h3>
+                <h3 className="font-bold text-base text-emerald-950">تأكيد الحذف النهائي للعضو</h3>
                 <p className="text-xs text-stone-500 font-semibold">
                   {memberToDeleteCompletely.name} ({memberToDeleteCompletely.phone})
                 </p>
@@ -1874,7 +1984,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   isDeletingMember
                 }
                 onClick={handleConfirmDeleteMemberCompletely}
-                className="px-5 py-2 text-xs font-bold text-white bg-rose-700 hover:bg-rose-800 disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-xs transition flex items-center gap-1.5"
+                className={`px-5 py-2 text-xs font-bold text-white ${CONFIRM_TONE.delete} disabled:opacity-50 disabled:cursor-not-allowed rounded-xl shadow-xs transition flex items-center gap-1.5`}
               >
                 <Trash2 className="w-3.5 h-3.5" />
                 <span>{isDeletingMember ? 'جاري الحذف...' : 'تأكيد الحذف النهائي الآن'}</span>
@@ -1919,7 +2029,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   </div>
                   {s.isSeverelyBehind && (
                     <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-rose-200/80 text-rose-900">
-                      تأخر شديد (&gt; 3)
+                      تأخر شديد ({SEVERE_DELAY_THRESHOLD}+)
                     </span>
                   )}
                 </div>
@@ -1965,7 +2075,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     setIsExcluding(false);
                   }
                 }}
-                className="px-5 py-2 text-xs font-bold text-white bg-amber-700 hover:bg-amber-800 disabled:opacity-50 rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer"
+                className={`px-5 py-2 text-xs font-bold text-white ${CONFIRM_TONE.exclude} disabled:opacity-50 rounded-xl shadow-xs transition flex items-center gap-1.5 cursor-pointer`}
               >
                 <UserMinus className="w-3.5 h-3.5" />
                 <span>{isExcluding ? 'جاري الإقصاء...' : 'تأكيد إقصاء العضو'}</span>

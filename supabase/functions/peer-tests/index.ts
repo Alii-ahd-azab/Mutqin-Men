@@ -11,82 +11,251 @@ import {
   errorResponse,
   type ActiveCaller,
 } from '../_shared/auth.ts';
-import { loadBatchIds, loadProgram, type ProgramState } from '../_shared/men/menData.ts';
-import { mapTests, mapAttempts, type TestRow, type AttemptRow } from '../_shared/men/menRows.ts';
-import { generateTestQuestions } from '../_shared/men/testGenerator.ts';
-import { isInTestAudience } from '../_shared/men/testGenerator.ts';
-import type { TestDefinition, User } from '../_shared/men/types.ts';
 import {
-  RuleError,
-  computeCandidateStatus,
-  blockedMembers,
-  validateTestInput,
-  verifyAttemptQuestions,
-  parsePersonalSetup,
-  generatePersonalQuestions,
-  personalMeta,
-} from '../_shared/men/peerRules.ts';
+  calculateCycleInfo,
+  calculateMemberRevisionStatus,
+  getActiveCycleDates,
+  joinedOnDateFromTimestamp,
+} from '../_shared/logic/calculations.ts';
+import { computeMemberDelayStatus, type MemberDelayStatus } from '../_shared/logic/memberDelayStatus.ts';
+import { loadProgram, type ProgramState } from '../_shared/men/menData.ts';
+import { estimateRangeLines, generateTestQuestions, type TestQuestion } from '../_shared/peer-tests/testGenerator.ts';
+import {
+  evaluateCandidate,
+  isInAudience,
+  isPeerTestLive,
+  nextTasmiaQuarter,
+  type CandidateEvaluation,
+  type PassedAttempt,
+  type PeerTestRow,
+} from '../_shared/peer-tests/eligibility.ts';
+import { RuleError, parsePersonalSetup, generatePersonalQuestions, personalMeta } from '../_shared/peer-tests/personalTests.ts';
 
 /*
  * PEER TESTING (الاختبارات المتبادلة) + personal self-test generation.
  *
- * Members (examiners) and admins call this function; it re-checks every Men rule server-side and
- * writes only through service-role-only database functions. Reads elsewhere use RLS.
+ * Same flow as Mutqin for Sisters: members (examiners) and admins call this function; it re-checks
+ * every rule server-side and writes only through service-role-only database functions; pass/fail
+ * is computed in SQL from the stored questions. Men rules on top: selected-audience tests, the
+ * two prerequisite flags, partial ranges, and the Men program calendar (date-based reviews,
+ * undated paused days) through the shared Men program loader.
  */
 
-// The halaqah runs on Makkah time; a browser may send its local date (accepted within one day).
-function programToday(clientDate: unknown): string {
-  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
-  if (typeof clientDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(clientDate)) {
-    const diff = Math.abs(Date.parse(clientDate + 'T00:00:00Z') - Date.parse(today + 'T00:00:00Z'));
-    if (diff <= 86400000) return clientDate;
-  }
-  return today;
+type CycleRow = {
+  id: string;
+  batch_id: string;
+  cycle_number: number;
+  starts_on: string;
+  status: string;
+};
+
+type BatchMember = {
+  id: string;
+  name: string;
+};
+
+type BatchProgress = {
+  today: string;
+  quarterOfDay: number;
+  members: BatchMember[];
+  delayById: Map<string, MemberDelayStatus>;
+  completedById: Map<string, Set<number>>;
+  program: ProgramState;
+  activeDates: string[];
+};
+
+// The halaqah runs on Makkah time.
+function programToday(): string {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Riyadh',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(new Date());
 }
 
-/** The caller's batch: a member's own batch, or (admins) the first batch they manage. */
-async function callerBatchId(admin: SupabaseClient, caller: ActiveCaller): Promise<string> {
-  if (caller.role === 'member') {
-    if (!caller.memberBatchId) throw new HttpError('حسابك غير مرتبط بدفعة', 403);
-    return caller.memberBatchId;
-  }
-  const ids = (await loadBatchIds(admin)).filter((id) => canManageBatch(caller, id));
-  if (!ids.length) throw new HttpError('لا تملك صلاحية إدارة أي دفعة', 403);
-  return ids[0];
+function toInt(value: unknown): number | null {
+  if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
+  const n = Number(value);
+  return Number.isFinite(n) && Number.isInteger(n) ? n : null;
 }
 
-function findTest(state: ProgramState, testId: unknown): TestDefinition {
-  const test = isUuid(testId) ? state.tests.find((t) => t.id === testId) : undefined;
+async function loadTest(admin: SupabaseClient, testId: unknown): Promise<{ test: PeerTestRow; cycle: CycleRow; selected: Set<string> }> {
+  if (!isUuid(testId)) throw new HttpError('معرف الاختبار غير صالح', 400);
+
+  const { data: test, error } = await admin.from('peer_tests').select('*').eq('id', testId).maybeSingle();
+  if (error) throw new HttpError(error.message, 500);
   if (!test) throw new HttpError('الاختبار غير موجود', 404);
-  return test;
+
+  const [cycleRes, selectedRes] = await Promise.all([
+    admin.from('cycles').select('id, batch_id, cycle_number, starts_on, status').eq('id', test.cycle_id).single(),
+    admin.from('peer_test_selected_members').select('user_id').eq('test_id', test.id),
+  ]);
+  if (cycleRes.error || !cycleRes.data) throw new HttpError('دورة الاختبار غير موجودة', 404);
+  if (selectedRes.error) throw new HttpError(selectedRes.error.message, 500);
+
+  return {
+    test: test as PeerTestRow,
+    cycle: cycleRes.data as CycleRow,
+    selected: new Set((selectedRes.data || []).map((r) => r.user_id as string)),
+  };
 }
 
-function requireManager(caller: ActiveCaller, batchId: string) {
-  if (caller.role !== 'admin' || !canManageBatch(caller, batchId)) {
-    throw new HttpError('هذا الإجراء مخصص للمشرف فقط', 403);
+async function loadActiveCycle(admin: SupabaseClient, batchId: string): Promise<CycleRow> {
+  const { data, error } = await admin
+    .from('cycles')
+    .select('id, batch_id, cycle_number, starts_on, status')
+    .eq('batch_id', batchId)
+    .eq('status', 'active')
+    .maybeSingle();
+  if (error) throw new HttpError(error.message, 500);
+  if (!data) throw new HttpError('لا توجد دورة نشطة لهذه الدفعة', 400);
+  return data as CycleRow;
+}
+
+/*
+ * Progress of every active member of the cycle's batch, computed with the SAME shared code as the
+ * dashboards (Men program loader + computeMemberDelayStatus).
+ */
+async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promise<BatchProgress> {
+  const program = await loadProgram(admin, cycle.batch_id);
+  if (program.cycle.id !== cycle.id) throw new HttpError('دورة هذا الاختبار غير نشطة', 400);
+
+  const today = programToday();
+  const cycleInfo = calculateCycleInfo(program.settings, program.restDays, today);
+  const activeDates = getActiveCycleDates(program.settings.start_date, today, program.restDays, program.settings);
+
+  const members: BatchMember[] = [];
+  const delayById = new Map<string, MemberDelayStatus>();
+  const completedById = new Map<string, Set<number>>();
+  for (const u of program.users) {
+    if (u.role !== 'member' || !u.is_active || !u.batch_joined_at) continue;
+    members.push({ id: u.id, name: u.name });
+    delayById.set(
+      u.id,
+      computeMemberDelayStatus({
+        memberId: u.id,
+        quarterOfDay: cycleInfo.quarter_of_day,
+        activeCycleDates: activeDates,
+        recitations: program.recitationLogs,
+        revisions: program.revisionLogs,
+        todayDate: today,
+        joinedOnDate: joinedOnDateFromTimestamp(u.batch_joined_at),
+      })
+    );
+    completedById.set(u.id, new Set());
   }
+  for (const r of program.recitationLogs) {
+    completedById.get(r.member_id)?.add(r.quarter_number);
+  }
+
+  return { today, quarterOfDay: cycleInfo.quarter_of_day, members, delayById, completedById, program, activeDates };
 }
 
-// Examiners: active members in the test's audience (admins may also view candidates/questions).
-function requireParticipant(caller: ActiveCaller, user: User | undefined, test: TestDefinition) {
-  if (caller.role === 'admin') return;
-  if (!user || user.role !== 'member' || !user.is_active || !isInTestAudience(test, user.id)) {
+async function passedAttemptsByCandidate(admin: SupabaseClient, testId: string): Promise<Map<string, PassedAttempt[]>> {
+  const { data, error } = await admin
+    .from('peer_test_attempts')
+    .select('candidate_id, covers_full_range, effective_range_end')
+    .eq('test_id', testId)
+    .eq('status', 'passed');
+  if (error) throw new HttpError(error.message, 500);
+  const byCandidate = new Map<string, PassedAttempt[]>();
+  for (const row of data || []) {
+    const list = byCandidate.get(row.candidate_id) || [];
+    list.push({ covers_full_range: row.covers_full_range, effective_range_end: row.effective_range_end });
+    byCandidate.set(row.candidate_id, list);
+  }
+  return byCandidate;
+}
+
+function evaluate(
+  test: PeerTestRow,
+  selected: Set<string>,
+  progress: BatchProgress,
+  passed: Map<string, PassedAttempt[]>,
+  memberId: string
+): CandidateEvaluation {
+  const revision = test.require_revision_completed
+    ? calculateMemberRevisionStatus(
+        memberId,
+        progress.activeDates,
+        progress.program.revisionLogs,
+        progress.today,
+        joinedOnDateFromTimestamp(progress.program.users.find((u) => u.id === memberId)?.batch_joined_at)
+      )
+    : undefined;
+  return evaluateCandidate({
+    test,
+    completedQuarters: progress.completedById.get(memberId) || new Set(),
+    passedAttempts: passed.get(memberId) || [],
+    delay: progress.delayById.get(memberId)!,
+    inAudience: isInAudience(test, selected, memberId),
+    revision,
+  });
+}
+
+// Examiner rule: an active member of the test's batch and (Men) of its audience. Elimination
+// status is intentionally NOT checked for examiners.
+function requireExaminer(caller: ActiveCaller, cycle: CycleRow, test: PeerTestRow, selected: Set<string>) {
+  if (caller.role !== 'member' || caller.memberBatchId !== cycle.batch_id) {
+    throw new HttpError('الاختبارات المتبادلة متاحة لأعضاء هذه الدفعة فقط', 403);
+  }
+  if (cycle.status !== 'active' || !isPeerTestLive(test)) {
+    throw new HttpError('الاختبار غير متاح حاليًا', 400);
+  }
+  if (!isInAudience(test, selected, caller.id)) {
     throw new HttpError('لست ضمن قائمة الأعضاء المخولين بالمشاركة في هذا الاختبار', 403);
   }
 }
 
-// Arabic messages raised by our SQL functions are safe to show.
-function rpcError(error: { code?: string; message: string; hint?: string | null }, label: string): never {
-  console.error(`peer-tests ${label} failed`, { code: error.code, message: error.message });
-  if (error.hint === 'duplicate_attempt') throw new HttpError(error.message, 429);
-  if (error.code === '23514' || error.code === 'P0002' || error.code === 'P0001') throw new HttpError(error.message, 400);
-  throw new HttpError('تعذر تنفيذ العملية. حاول مرة أخرى.', 500);
+function requireManager(caller: ActiveCaller, batchId: string) {
+  if (caller.role !== 'admin' || !canManageBatch(caller, batchId)) {
+    throw new HttpError('لا تملك صلاحية إدارة اختبارات هذه الدفعة', 403);
+  }
 }
 
-async function loadSelected(admin: SupabaseClient, testId: string) {
-  const { data, error } = await admin.from('peer_test_selected_members').select('test_id, user_id, position').eq('test_id', testId);
-  if (error) throw new HttpError(error.message, 500);
-  return data || [];
+function questionPayload(questions: TestQuestion[]) {
+  return questions.map((q) => ({
+    question_number: q.question_number,
+    start_surah: q.start_surah,
+    start_surah_name: q.start_surah_name,
+    start_ayah: q.start_ayah,
+    end_surah: q.end_surah,
+    end_surah_name: q.end_surah_name,
+    end_ayah: q.end_ayah,
+    start_page: q.start_page,
+    start_line: q.start_line,
+    end_page: q.end_page,
+    end_line: q.end_line,
+    actual_lines: q.actual_lines,
+    difficulty_level: q.difficulty_level,
+  }));
+}
+
+function generateOrFail(
+  test: Pick<PeerTestRow, 'range_start' | 'range_end' | 'questions_count' | 'lines_per_question' | 'difficulty'>,
+  rangeEnd: number = test.range_end
+) {
+  const questions = generateTestQuestions(
+    test.range_start,
+    rangeEnd,
+    test.questions_count,
+    test.lines_per_question,
+    test.difficulty || 'any'
+  );
+  if (questions.length < test.questions_count) {
+    throw new HttpError('النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول', 422);
+  }
+  return questions;
+}
+
+// Arabic messages raised by our SQL functions are safe to show.
+function rpcError(error: { code?: string; message: string; details?: string | null }, label: string): never {
+  console.error(`peer-tests ${label} failed`, { code: error.code, message: error.message, details: error.details });
+  if (error.code === '23514' || error.code === 'P0002' || error.code === 'P0001') {
+    throw new HttpError(error.message, 400);
+  }
+  throw new HttpError('تعذر تنفيذ العملية. حاول مرة أخرى.', 500);
 }
 
 Deno.serve(async (req) => {
@@ -102,9 +271,11 @@ Deno.serve(async (req) => {
     const caller = await getActiveCaller(req, admin);
     const body = await req.json();
     const action = body?.action;
-    const today = programToday(body?.client_date);
 
-    // ============ PERSONAL SELF-TESTS (no stored data here; saving is an RLS-checked RPC) ============
+    /*
+     * ============ PERSONAL SELF-TESTS (Men) ============
+     * Nothing is stored here; saving is an owner-checked RPC.
+     */
     if (action === 'personal-meta') {
       return json(personalMeta());
     }
@@ -112,157 +283,280 @@ Deno.serve(async (req) => {
       return json(generatePersonalQuestions(parsePersonalSetup(body)));
     }
 
-    const batchId = await callerBatchId(admin, caller);
-    const state = await loadProgram(admin, batchId);
-    const me = state.users.find((u) => u.id === caller.id);
+    /*
+     * ============ MEMBER (EXAMINER) ACTIONS ============
+     */
 
-    // ============ MEMBER (EXAMINER) ACTIONS ============
-
+    // Candidates list with eligibility and Arabic reasons.
     if (action === 'candidates') {
-      const test = findTest(state, body.test_id);
-      requireParticipant(caller, me, test);
-      const candidates = state.users
-        .filter((u) => u.role === 'member' && u.is_active && u.id !== caller.id && isInTestAudience(test, u.id))
-        .map((m) => {
-          const s = computeCandidateStatus(state, test, m, today);
-          return {
-            id: m.id,
-            name: m.name,
-            phone: m.phone,
-            is_eligible: s.is_eligible,
-            ineligibility_reasons: s.reasons,
-            has_passed: s.has_passed,
-            attempts_count: s.attempts_count,
-            effective_range_end: s.effective_range_end,
-            covers_full_range: s.covers_full_range,
-          };
-        });
-      return json({ test, candidates });
+      const { test, cycle, selected } = await loadTest(admin, body.test_id);
+      requireExaminer(caller, cycle, test, selected);
+
+      const [progress, passed] = await Promise.all([loadBatchProgress(admin, cycle), passedAttemptsByCandidate(admin, test.id)]);
+
+      const candidates = progress.members
+        .filter((m) => m.id !== caller.id && isInAudience(test, selected, m.id))
+        .map((m) => ({ id: m.id, name: m.name, ...evaluate(test, selected, progress, passed, m.id) }))
+        .sort((a, b) => Number(b.is_eligible) - Number(a.is_eligible) || a.name.localeCompare(b.name, 'ar'));
+
+      return json({ candidates });
     }
 
-    if (action === 'generate') {
-      const test = findTest(state, body.test_id);
-      requireParticipant(caller, me, test);
-      let effectiveRangeEnd = test.range_end;
-      if (body.candidate_id) {
-        const candidate = state.users.find((u) => u.id === body.candidate_id && u.is_active);
-        if (!candidate) throw new HttpError('العضو المختبَر غير موجود', 404);
-        const s = computeCandidateStatus(state, test, candidate, today);
-        if (!s.is_eligible) throw new HttpError(`العضو غير مؤهل للاختبار: ${s.reasons.join('، ')}`, 400);
-        effectiveRangeEnd = s.effective_range_end;
+    // Start a session: re-check both people, generate and store questions.
+    if (action === 'start') {
+      const { test, cycle, selected } = await loadTest(admin, body.test_id);
+      requireExaminer(caller, cycle, test, selected);
+
+      const candidateId = body.candidate_id;
+      if (!isUuid(candidateId) || candidateId === caller.id) {
+        throw new HttpError('يرجى اختيار زميل آخر لاختباره', 400);
       }
-      const questions = generateTestQuestions(test.range_start, effectiveRangeEnd, test.questions_count, test.lines_per_question, test.difficulty || 'any');
-      if (questions.length < test.questions_count) throw new HttpError('النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول', 422);
-      return json({ test_id: test.id, effective_range_end: effectiveRangeEnd, questions });
+
+      const [progress, passed] = await Promise.all([loadBatchProgress(admin, cycle), passedAttemptsByCandidate(admin, test.id)]);
+      const candidate = progress.members.find((m) => m.id === candidateId);
+      if (!candidate) {
+        throw new HttpError('العضو المُختبَر يجب أن يكون عضوًا نشطًا في هذه الدفعة', 400);
+      }
+
+      const evaluation = evaluate(test, selected, progress, passed, candidate.id);
+      if (!evaluation.is_eligible) {
+        throw new HttpError(`العضو غير مستوفٍ لشروط الاختبار: ${evaluation.reasons.join('، ')}`, 400);
+      }
+
+      const questions = generateOrFail(test, evaluation.effective_range_end);
+
+      const { data: attemptId, error } = await admin.rpc('peer_test_start_attempt', {
+        p_test_id: test.id,
+        p_candidate_id: candidate.id,
+        p_examiner_id: caller.id,
+        p_questions: questionPayload(questions),
+        p_effective_range_end: evaluation.effective_range_end,
+      });
+      if (error || !attemptId) rpcError(error || { message: 'no attempt id' }, 'start');
+
+      return json({
+        attempt_id: attemptId,
+        candidate: { id: candidate.id, name: candidate.name },
+        effective_range_end: evaluation.effective_range_end,
+        covers_full_range: evaluation.covers_full_range,
+        questions,
+      });
     }
 
+    // Submit error counts only; pass/fail is computed in SQL.
     if (action === 'submit') {
-      if (!body.test_id || !body.candidate_id) throw new HttpError('يرجى تحديد الاختبار والعضو المُختبَر', 400);
-      const test = findTest(state, body.test_id);
-      if (!test.is_active) throw new HttpError('هذا الاختبار غير مفعّل حالياً', 400);
-      if (!me || me.role !== 'member' || !me.is_active) throw new HttpError('يجب أن يكون المُختبِر عضواً نشطاً في المقرأة', 403);
-      if (!isInTestAudience(test, me.id)) throw new HttpError('أنت لست ضمن قائمة الأعضاء المخولين بإجراء هذا الاختبار', 403);
-      if (me.id === body.candidate_id) throw new HttpError('لا يمكن للعضو اختبار نفسه؛ يجب أن يختبرك زميل في المقرأة', 400);
-      const candidate = state.users.find((u) => u.id === body.candidate_id);
-      if (!candidate || candidate.role !== 'member' || !candidate.is_active) {
-        throw new HttpError('العضو المُختبَر غير موجود أو حسابه غير نشط', 404);
+      if (!isUuid(body.attempt_id)) throw new HttpError('معرف جلسة الاختبار غير صالح', 400);
+
+      const { data: attempt, error: attemptError } = await admin
+        .from('peer_test_attempts')
+        .select('id, test_id, candidate_id, examiner_id, status')
+        .eq('id', body.attempt_id)
+        .maybeSingle();
+      if (attemptError) throw new HttpError(attemptError.message, 500);
+      if (!attempt || attempt.examiner_id !== caller.id) {
+        throw new HttpError('جلسة الاختبار غير موجودة', 404);
       }
-      if (!isInTestAudience(test, candidate.id)) throw new HttpError('العضو المُختبَر ليس ضمن قائمة الأعضاء المشمولين بهذا الاختبار', 400);
 
-      const status = computeCandidateStatus(state, test, candidate, today);
-      if (status.has_passed) throw new HttpError('العضو اجتاز هذا الاختبار بالفعل بنجاح ولا يحتاج لإعادته', 400);
-      if (!status.is_eligible) throw new HttpError(`العضو غير مؤهل لخوض هذا الاختبار حالياً: ${status.reasons.join('، ')}`, 400);
+      const { test, cycle, selected } = await loadTest(admin, attempt.test_id);
+      requireExaminer(caller, cycle, test, selected);
 
-      const questions = verifyAttemptQuestions(test, status.effective_range_end, body.questions_results);
-      const notes = body.notes ? String(body.notes).trim().slice(0, 300) : '';
-      const { data, error } = await admin.rpc('men_peer_test_record_attempt', {
-        p_attempt: {
-          test_id: test.id,
-          candidate_id: candidate.id,
-          candidate_name: candidate.name,
-          examiner_id: me.id,
-          examiner_name: me.name,
-          date: today,
-          notes,
-          effective_range_end: status.effective_range_end,
-          covers_full_range: status.covers_full_range,
-        },
-        p_questions: questions,
+      // The candidate's elimination status is re-checked at submission time.
+      const progress = await loadBatchProgress(admin, cycle);
+      if (!progress.delayById.has(attempt.candidate_id)) {
+        throw new HttpError('العضو المُختبَر لم يعد عضوًا نشطًا في هذه الدفعة', 400);
+      }
+      const evaluation = evaluate(test, selected, progress, new Map(), attempt.candidate_id);
+      if (!evaluation.is_eligible) {
+        throw new HttpError(`العضو غير مستوفٍ لشروط الاختبار: ${evaluation.reasons.join('، ')}`, 400);
+      }
+
+      const errors = Array.isArray(body.errors) ? body.errors.map(toInt) : [];
+      if (errors.some((e: number | null) => e === null)) {
+        throw new HttpError('عدد الأخطاء يجب أن يكون رقمًا صحيحًا', 400);
+      }
+      const questionNotes = Array.isArray(body.question_notes)
+        ? body.question_notes.map((n: unknown) => (n == null ? '' : String(n).slice(0, 300)))
+        : [];
+
+      const { data, error } = await admin.rpc('peer_test_submit_attempt', {
+        p_attempt_id: attempt.id,
+        p_examiner_id: caller.id,
+        p_errors: errors,
+        p_question_notes: questionNotes,
+        p_notes: body.notes ? String(body.notes).slice(0, 300) : null,
       });
       if (error || !data) rpcError(error || { message: 'no result' }, 'submit');
 
-      const row = (data as { attempt: AttemptRow }).attempt;
-      const attempt = mapAttempts([row], questions.map((q) => ({ ...q, attempt_id: row.id, notes: q.notes ?? null })))[0];
+      const result = (data as { attempt: { status: string } }).attempt;
       return json({
-        success: true,
-        message: attempt.passed
-          ? 'تم تسجيل الاختبار بنجاح واجتياز العضو للاختبار!'
-          : 'تم تسجيل الاختبار (لم يجتز العضو بنجاح بسبب تجاوز حد الأخطاء المسموح).',
-        attempt,
+        attempt: result,
+        message:
+          result.status === 'passed'
+            ? 'تم اعتماد النتيجة: اجتاز العضو الاختبار بنجاح'
+            : 'تم اعتماد النتيجة: لم يجتز العضو الاختبار (تجاوز حد الأخطاء المسموح)',
       });
     }
 
-    // ============ ADMIN ACTIONS ============
+    /*
+     * ============ ADMIN ACTIONS (master or batch admin of that batch) ============
+     */
 
     if (action === 'admin-save') {
-      requireManager(caller, batchId);
-      const input = validateTestInput(body, new Set(state.users.map((u) => u.id)));
-      const { selected_member_ids, ...test } = input;
-      const { data, error } = await admin.rpc('men_peer_test_save', {
-        p_cycle_id: state.cycle.id,
-        p_test_id: isUuid(body.id) && state.tests.some((t) => t.id === body.id) ? body.id : null,
-        p_test: test,
-        p_selected: selected_member_ids,
+      if (!isUuid(body.batch_id)) throw new HttpError('معرف الدفعة غير صالح', 400);
+      requireManager(caller, body.batch_id);
+      const cycle = await loadActiveCycle(admin, body.batch_id);
+
+      const rangeStart = toInt(body.range_start);
+      const rangeEnd = toInt(body.range_end);
+      const questionsCount = toInt(body.questions_count);
+      const linesPerQuestion = toInt(body.lines_per_question);
+      if (rangeStart === null || rangeStart < 1 || rangeStart > 240 || rangeEnd === null || rangeEnd < 1 || rangeEnd > 240) {
+        throw new HttpError('بداية ونهاية النطاق يجب أن تكونا بين الربع 1 والربع 240', 400);
+      }
+      if (rangeStart > rangeEnd) throw new HttpError('بداية النطاق يجب أن تسبق نهايته أو تساويها', 400);
+      if (questionsCount === null || questionsCount < 1 || questionsCount > 50) {
+        throw new HttpError('عدد الأسئلة يجب أن يكون بين 1 و 50', 400);
+      }
+      if (linesPerQuestion === null || linesPerQuestion < 1 || linesPerQuestion > 60) {
+        throw new HttpError('عدد الأسطر لكل سؤال يجب أن يكون بين 1 و 60', 400);
+      }
+      if (questionsCount * linesPerQuestion > 0.8 * estimateRangeLines(rangeStart, rangeEnd)) {
+        throw new HttpError('النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول، قلّل العدد أو الأسطر أو وسّع النطاق', 400);
+      }
+
+      let maxErrors: number | null = null;
+      if (body.max_errors !== null && body.max_errors !== undefined && body.max_errors !== '') {
+        maxErrors = toInt(body.max_errors);
+        if (maxErrors === null || maxErrors < 0 || maxErrors > 100) {
+          throw new HttpError('حد الأخطاء يجب أن يكون بين 0 و 100', 400);
+        }
+      }
+
+      const testType = body.test_type === 'recommended' ? 'recommended' : 'mandatory';
+      const difficulty = ['any', 'easy', 'medium', 'hard', 'mixed'].includes(body.difficulty) ? body.difficulty : 'any';
+
+      // Men: audience and prerequisites. Selected members must belong to this batch (checked in SQL too).
+      const audience = body.audience === 'selected' ? 'selected' : 'all';
+      const selectedIds: string[] = Array.isArray(body.selected_member_ids)
+        ? Array.from(new Set(body.selected_member_ids.filter(isUuid) as string[]))
+        : [];
+      if (audience === 'selected' && selectedIds.length === 0) {
+        throw new HttpError('يرجى تحديد عضو واحد على الأقل في قائمة الأعضاء المختارين، أو اختيار (كل الأعضاء)', 400);
+      }
+
+      const parseTime = (v: unknown): string | null => {
+        if (v === null || v === undefined || v === '') return null;
+        const t = Date.parse(String(v));
+        if (Number.isNaN(t)) throw new HttpError('تاريخ العرض غير صالح', 400);
+        return new Date(t).toISOString();
+      };
+
+      let status: 'draft' | 'published' | 'hidden';
+      let visibleFrom: string | null = null;
+      const visibleUntil: string | null = parseTime(body.visible_until);
+      switch (body.visibility) {
+        case 'now':
+          status = 'published';
+          break;
+        case 'schedule':
+          status = 'published';
+          visibleFrom = parseTime(body.visible_from);
+          if (!visibleFrom) throw new HttpError('يرجى تحديد موعد بدء العرض', 400);
+          break;
+        case 'hidden':
+          status = 'hidden';
+          visibleFrom = parseTime(body.visible_from);
+          break;
+        default:
+          status = 'draft';
+          visibleFrom = parseTime(body.visible_from);
+      }
+      if (visibleFrom && visibleUntil && Date.parse(visibleFrom) >= Date.parse(visibleUntil)) {
+        throw new HttpError('موعد انتهاء العرض يجب أن يكون بعد موعد بدئه', 400);
+      }
+
+      // The range must be able to hold the questions.
+      generateOrFail({
+        range_start: rangeStart,
+        range_end: rangeEnd,
+        questions_count: questionsCount,
+        lines_per_question: linesPerQuestion,
+        difficulty,
+      });
+
+      const title = String(body.title || '').trim().slice(0, 120) || `اختبار الأرباع (${rangeStart} - ${rangeEnd})`;
+
+      const { data, error } = await admin.rpc('peer_test_save', {
+        p_test_id: isUuid(body.test_id) ? body.test_id : null,
+        p_cycle_id: cycle.id,
+        p_title: title,
+        p_range_start: rangeStart,
+        p_range_end: rangeEnd,
+        p_questions_count: questionsCount,
+        p_lines_per_question: linesPerQuestion,
+        p_max_errors: maxErrors,
+        p_test_type: testType,
+        p_difficulty: difficulty,
+        p_status: status,
+        p_visible_from: visibleFrom,
+        p_visible_until: visibleUntil,
         p_actor: caller.id,
+        p_audience: audience,
+        p_selected_member_ids: audience === 'selected' ? selectedIds : [],
+        p_require_all_quarters_completed: body.require_all_quarters_completed === true,
+        p_require_revision_completed: body.require_revision_completed === true,
       });
       if (error || !data) rpcError(error || { message: 'no result' }, 'admin-save');
-      const saved = data as { test: TestRow; versioned: boolean };
+
+      const saved = data as { test: PeerTestRow; versioned: boolean };
       return json({
-        success: true,
+        ...saved,
         message: saved.versioned
-          ? 'نظراً لوجود محاولات سابقة، تم حفظ التعديلات كاختبار جديد وأرشفة الاختبار السابق لحفظ سجل النتائج.'
-          : 'تم حفظ الاختبار بنجاح.',
-        test: mapTests([saved.test], await loadSelected(admin, saved.test.id))[0],
+          ? 'لوجود نتائج سابقة، حُفظت التعديلات كاختبار جديد وأُنهي الاختبار السابق مع الاحتفاظ بنتائجه'
+          : 'تم حفظ الاختبار بنجاح',
       });
     }
 
-    if (action === 'admin-status' || action === 'admin-finish') {
-      requireManager(caller, batchId);
-      const test = findTest(state, body.test_id);
-      const statusAction = action === 'admin-finish' ? 'finish' : body.is_active ? 'show' : 'hide';
-      const { data, error } = await admin.rpc('men_peer_test_set_status', { p_test_id: test.id, p_action: statusAction });
-      if (error || !data) rpcError(error || { message: 'no result' }, action);
-      const messages: Record<string, string> = {
-        show: 'تم تفعيل الاختبار بنجاح',
-        hide: 'تم إيقاف الاختبار بنجاح',
-        finish: 'تم إنهاء الاختبار نهائيًا بنجاح',
-      };
-      return json({
-        success: true,
-        message: messages[statusAction],
-        test: mapTests([(data as { test: TestRow }).test], await loadSelected(admin, test.id))[0],
+    if (action === 'admin-status') {
+      const { test, cycle } = await loadTest(admin, body.test_id);
+      requireManager(caller, cycle.batch_id);
+      if (!['show', 'hide', 'finish'].includes(body.status_action)) {
+        throw new HttpError('إجراء غير معروف', 400);
+      }
+      const { data, error } = await admin.rpc('peer_test_set_status', {
+        p_test_id: test.id,
+        p_action: body.status_action,
+        p_actor: caller.id,
       });
+      if (error || !data) rpcError(error || { message: 'no result' }, 'admin-status');
+      const messages: Record<string, string> = {
+        show: 'أصبح الاختبار ظاهرًا الآن',
+        hide: 'تم إخفاء الاختبار',
+        finish: 'تم إنهاء الاختبار نهائيًا',
+      };
+      return json({ ...(data as object), message: messages[body.status_action] });
     }
 
     if (action === 'admin-preview') {
-      requireManager(caller, batchId);
-      const test = findTest(state, body.test_id);
-      const questions = generateTestQuestions(test.range_start, test.range_end, test.questions_count, test.lines_per_question, test.difficulty || 'any');
-      if (questions.length < test.questions_count) throw new HttpError('النطاق لا يتسع لهذا العدد من الأسئلة بهذا الطول', 422);
-      return json({ test_id: test.id, questions });
+      const { test, cycle } = await loadTest(admin, body.test_id);
+      requireManager(caller, cycle.batch_id);
+      return json({ questions: generateOrFail(test) });
     }
 
+    // How many members (of the test's audience) would be blocked right now by this mandatory test.
     if (action === 'admin-impact') {
-      requireManager(caller, batchId);
-      const test = findTest(state, body.test_id);
-      const blocked = blockedMembers(state, test, today);
+      const { test, cycle, selected } = await loadTest(admin, body.test_id);
+      requireManager(caller, cycle.batch_id);
+      const [progress, passed] = await Promise.all([loadBatchProgress(admin, cycle), passedAttemptsByCandidate(admin, test.id)]);
+      const blocked = progress.members.filter(
+        (m) =>
+          isInAudience(test, selected, m.id) &&
+          !(passed.get(m.id) || []).some((a) => a.covers_full_range !== false) &&
+          nextTasmiaQuarter(progress.delayById.get(m.id)!, progress.quarterOfDay) > test.range_end
+      );
       return json({
-        test_id: test.id,
-        test_type: test.test_type,
-        range_start: test.range_start,
-        range_end: test.range_end,
-        blocked_count: blocked.length,
-        blocked_members: blocked,
+        blocked_count: test.test_type === 'mandatory' ? blocked.length : 0,
+        blocked_members: test.test_type === 'mandatory' ? blocked.map((m) => ({ id: m.id, name: m.name })) : [],
       });
     }
 

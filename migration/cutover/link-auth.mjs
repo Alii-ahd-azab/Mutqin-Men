@@ -11,7 +11,7 @@
 //   node migration/cutover/link-auth.mjs verify --project uaublandjewfzmhnbflc   # read-only
 // Idempotent: existing identities with the expected id/email are skipped; any mismatch stops the run.
 import fs from "node:fs";
-import { phoneToAuthEmail } from "../../src/lib/authIdentity.ts";
+import { phoneToAuthEmail } from "../../supabase/functions/_shared/men/authIdentity.ts";
 import { authAdmin, connectOwner, requireApproval, requireProjectArg } from "./production.mjs";
 
 const args = process.argv.slice(2);

@@ -39,12 +39,15 @@ async function counts() {
     return { id: data.user.id, phone, pw };
   }
   const browser = await chromium.launch();
+  let page = null;
   try {
     const M = await account("BROWSER M", "000000000011", "member");
     const X = await account("BROWSER X", "000000000012", "admin");
 
     const ctx = await browser.newContext();
-    const page = await ctx.newPage();
+    page = await ctx.newPage();
+    // E2E_SHOTS: optional directory for screenshots of the main screens (visual review).
+    const shot = async (name) => process.env.E2E_SHOTS && page.screenshot({ path: path.join(process.env.E2E_SHOTS, name + ".png"), fullPage: true });
     const hosts = new Set();
     const consoleErrors = [];
     page.on("request", (r) => { hosts.add(new URL(r.url()).host); });
@@ -70,6 +73,10 @@ async function counts() {
     await login(M);
     await page.getByText("SMOKE BROWSER M").first().waitFor({ timeout: 30000 });
     record("member signs in (imported bcrypt hash) and the dashboard loads", true);
+    const batchName = (await service.from("batches").select("name").eq("id", batchId).single()).data.name;
+    await page.getByText(batchName).first().waitFor({ timeout: 20000 });
+    record("member dashboard shows his batch (Sisters multi-batch)", true);
+    await shot("member");
 
     await page.reload();
     await page.getByText("SMOKE BROWSER M").first().waitFor({ timeout: 30000 });
@@ -77,7 +84,7 @@ async function counts() {
 
     const openBtn = page.locator("#open-revision-modal-btn");
     await openBtn.click({ timeout: 20000 });
-    await page.getByRole("button", { name: /تأكيد إتمام المراجعة/ }).click();
+    await page.getByRole("button", { name: "تأكيد إتمام المراجعة", exact: true }).click();
     await page.waitForTimeout(4000);
     const revs = (await service.from("review_confirmations").select("legacy_date, start_quarter, end_quarter").eq("user_id", M.id)).data || [];
     record("review recorded through the UI is stored in Men Supabase", revs.length === 1, JSON.stringify(revs));
@@ -124,10 +131,34 @@ async function counts() {
     const shown = Number((membersLabel.match(/\((\d+)\)/) || [])[1]);
     record("admin sees every account (30 real + 2 smoke), not cached member data", shown === before.profiles + 2, membersLabel);
 
+    // Sisters admin layer: batch selector, admin accounts, peer-test form with the Men audience fields.
+    await page.getByText("الدفعة الحالية").first().waitFor({ timeout: 20000 });
+    record("admin batch selector is shown", true);
+    await shot("admin-today");
+    await page.getByText(/الإعدادات والإيقاف/).first().click();
+    await page.getByText("المشرفين وصلاحيات الدفعات").first().waitFor({ timeout: 20000 });
+    await page.getByText("SMOKE BROWSER X").first().waitFor({ timeout: 20000 });
+    record("master admin manages admin accounts and batch permissions", true);
+    await shot("admin-settings");
+    await page.getByText("تسجيل فترة إيقاف سابقة").first().waitFor({ timeout: 20000 });
+    record("Men pause-period tool is available", true);
+    await page.getByRole("button", { name: /اختبار الزملاء/ }).first().click();
+    await page.getByText(/اختبارات الدورة الحالية/).first().waitFor({ timeout: 20000 });
+    await page.getByRole("button", { name: "إنشاء اختبار" }).click();
+    await page.getByText("الأعضاء المشمولون بالاختبار").waitFor({ timeout: 20000 });
+    await page.getByRole("button", { name: "أعضاء مختارون" }).click();
+    await page.getByText("SMOKE BROWSER M").first().waitFor({ timeout: 20000 });
+    await page.getByText("إتمام تسميع جميع أرباع النطاق").waitFor({ timeout: 20000 });
+    record("peer-test form offers the Men audience and prerequisites", true);
+    await shot("admin-peer-form");
+    await page.getByRole("button", { name: "إلغاء" }).first().click();
+
     record("all requests go to the app, Men Supabase or fonts only", [...hosts].every((h) => [new URL(URL_APP).host, "uaublandjewfzmhnbflc.supabase.co", "fonts.googleapis.com", "fonts.gstatic.com"].includes(h)), [...hosts].join(", "));
     record("no failed requests", failed.length === 0, failed.join(", "));
     record("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
   } catch (e) {
+    // E2E_SCREENSHOT: optional file path for a screenshot of the page at the failure.
+    if (page && process.env.E2E_SCREENSHOT) await page.screenshot({ path: process.env.E2E_SCREENSHOT, fullPage: true }).catch(() => {});
     record("browser flow", false, e.message.split("\n")[0]);
   } finally {
     await browser.close();

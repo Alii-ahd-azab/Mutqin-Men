@@ -2,14 +2,14 @@
 //
 // Rebuilds the exact in-memory state the legacy Firebase server held (same field normalization as the
 // old firestoreService) from a Firestore export, and compares it field by field with what the new
-// browser data layer (src/lib/menData.ts → supabase-js → PostgREST) returns from Men production.
+// browser data layer (supabase/functions/_shared/men/menData.ts → supabase-js → PostgREST) returns from Men production.
 //
 //   npx tsx --env-file=.env.local migration/cutover/parity.ts BACKUP_DIR --project uaublandjewfzmhnbflc
 // Reads only (secret key, so RLS does not hide rows). Exit code 1 when any difference is found.
 import fs from 'node:fs';
 import path from 'node:path';
 import { createClient } from '@supabase/supabase-js';
-import { loadBatchIds, loadProgram, type ProgramState } from '../../src/lib/menData';
+import { loadBatchIds, loadProgram, type ProgramState } from '../../supabase/functions/_shared/men/menData.ts';
 
 type AppState = ProgramState;
 // @ts-ignore - shared ESM tooling
@@ -97,13 +97,19 @@ export function compareStates(legacy: ReturnType<typeof legacyStateFromExport>, 
     ['restDays', 'rest_days'],
     ['recitationLogs', 'recitations'],
     ['revisionLogs', 'revisions'],
-    ['tests', 'tests'],
-    ['testAttempts', 'test_attempts'],
+    // Peer tests are no longer part of the program state (Phase 2: the UI reads the Sisters rows
+    // directly); their migration was verified at cutover.
   ];
+  // Account fields added in Phase 2 (Sisters account model) have no Firestore counterpart.
+  const PHASE2_FIELDS = ['auth_uid', 'is_master_admin', 'batch_joined_at'];
   const counts: Record<string, { firebase: number; supabase: number }> = {};
   for (const [key, collection] of collections) {
     const expected = (legacy as any)[key].map((x: any) => mapIds(collection, x));
-    const actual = current[key] as any[];
+    const actual = (current[key] as any[]).map((x) => {
+      const copy = { ...x };
+      for (const f of PHASE2_FIELDS) delete copy[f];
+      return copy;
+    });
     counts[key] = { firebase: expected.length, supabase: actual.length };
     const byId = new Map(actual.map((x) => [x.id, x]));
     for (const e of expected) {

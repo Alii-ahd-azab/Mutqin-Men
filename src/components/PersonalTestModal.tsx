@@ -12,7 +12,7 @@ import {
   Bookmark,
 } from 'lucide-react';
 import { api } from '../api/client';
-import { TestQuestion } from '../types';
+import type { PeerTestQuestion as TestQuestion } from '../types';
 
 interface Props {
   isOpen: boolean;

@@ -4,7 +4,7 @@ import fs from "node:fs";
 import { PGlite } from "@electric-sql/pglite";
 import { transform } from "../transform.mjs";
 import { applySchema, load } from "../database.mjs";
-import { phoneToAuthEmail } from "../../src/lib/authIdentity.ts";
+import { phoneToAuthEmail } from "../../supabase/functions/_shared/men/authIdentity.ts";
 
 const migrations = new URL("../../supabase/migrations/", import.meta.url);
 

@@ -102,23 +102,24 @@ test("master admin reads every batch row; may change only the start date of a cy
 });
 
 test("non-master admin manages only batches with an admin membership", async () => {
-  await db.query("update profiles set is_master_admin=false where id=$1", [who.admin]);
+  // Runs in one transaction that is rolled back, so the snapshot is left untouched.
+  await db.query("begin");
   try {
-    await asRole(db, "authenticated", who.admin, async (tx) => {
-      assert.equal(await count(tx, "select 1 from batches"), 1);
-      assert.ok((await count(tx, "select 1 from tasmia_submissions")) > 0);
-    });
+    await db.query("update profiles set is_master_admin=false where id=$1", [who.admin]);
+    const asAdmin = async () => {
+      await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: who.admin, role: "authenticated" })]);
+      await db.query("set local role authenticated");
+    };
+    await asAdmin();
+    assert.equal(await count(db, "select 1 from batches"), 1);
+    assert.ok((await count(db, "select 1 from tasmia_submissions")) > 0);
+    await db.query("reset role");
     await db.query("delete from batch_memberships where user_id=$1", [who.admin]);
-    await asRole(db, "authenticated", who.admin, async (tx) => {
-      assert.equal(await count(tx, "select 1 from tasmia_submissions"), 0);
-      assert.equal(await count(tx, "select 1 from batches"), 0);
-    });
+    await asAdmin();
+    assert.equal(await count(db, "select 1 from tasmia_submissions"), 0);
+    assert.equal(await count(db, "select 1 from batches"), 0);
   } finally {
-    await db.query("update profiles set is_master_admin=true where id=$1", [who.admin]);
-    await db.query(
-      "insert into batch_memberships(id,batch_id,user_id,membership_role) select gen_random_uuid(), b.id, $1, 'admin' from batches b on conflict do nothing",
-      [who.admin],
-    );
+    await db.query("rollback");
   }
 });
 
