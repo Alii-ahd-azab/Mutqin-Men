@@ -486,3 +486,62 @@ test('accounts: Men role switch, batch-admin deletion, master admins are never d
     assert.equal(await n(tx, 'select 1 from tasmia_submissions where cycle_id=$1', [cycle]) > 0, true, 'history kept');
   });
 });
+
+test('review identity: JS program-day matching agrees with SQL men_cycle_day; retroactive rest days create no false overdue', async () => {
+  const { calculateMemberRevisionStatus, getActiveCycleDates } = await import('../src/lib/calculations');
+  const load = async () => {
+    const c = await one("select to_char(starts_on,'YYYY-MM-DD') s, total_quarters, review_window, legacy_paused_days from cycles where id=$1", [cycle]);
+    const pauses = (await db.query("select to_char(paused_on,'YYYY-MM-DD') f, to_char(resumed_on - 1,'YYYY-MM-DD') t, resumed_on is not null and resumed_on > paused_on closed, resumed_on is null open from program_pauses where cycle_id=$1 order by paused_on", [cycle])).rows as any[];
+    const rest = (await db.query("select to_char(rest_date,'YYYY-MM-DD') d from group_rest_days where cycle_id=$1", [cycle])).rows as any[];
+    const open = pauses.find((p) => p.open);
+    const settings: GroupSettings = {
+      id: 'x', start_date: c.s, total_quarters: c.total_quarters, review_window: c.review_window, current_cycle_number: 1,
+      is_paused: !!open, paused_at: open?.f ?? null, total_paused_days: c.legacy_paused_days,
+      pause_periods: pauses.filter((p) => p.closed).map((p) => ({ from: p.f, to: p.t })),
+    };
+    const restDays: RestDay[] = rest.map((r, i) => ({ id: String(i), date: r.d, note: '', added_by_admin_id: '', created_at: '' }));
+    return { settings, restDays };
+  };
+  const reviews = (await db.query("select user_id m, to_char(legacy_date,'YYYY-MM-DD') d from review_confirmations where cycle_id=$1 and legacy_date <= $2::date", [cycle, TODAY])).rows as { m: string; d: string }[];
+  const members = [...new Set(reviews.map((r) => r.m))];
+  const missedByMember = async () => {
+    const { settings, restDays } = await load();
+    const active = getActiveCycleDates(settings.start_date, TODAY, restDays, settings);
+    const logs = reviews.map((r, i) => ({ id: String(i), member_id: r.m, member_name: '', date: r.d, cycle_number: 1, review_start_quarter: 0, review_end_quarter: 0, created_at: '' }));
+    return { active, missed: new Map(members.map((m) => [m, new Set(calculateMemberRevisionStatus(m, active, logs, TODAY).pastMissedDates)])) };
+  };
+
+  // 1. Parity: a review on any date counts for the latest active date on or before it, and SQL gives
+  //    both dates the same program day (so the stored range is exactly that obligation's range).
+  const { active } = await missedByMember();
+  const latestActive = (d: string) => [...active].reverse().find((a) => a <= d);
+  const sqlDay = async (d: string) => (await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, d])).n as number;
+  let offDays = 0;
+  for (const d of [...new Set(reviews.map((r) => r.d))]) {
+    const a = latestActive(d);
+    if (!a) continue;
+    if (a !== d) offDays++;
+    assert.equal(await sqlDay(d), await sqlDay(a), `review on ${d} ↔ active day ${a}`);
+  }
+  assert.ok(offDays >= 0);
+
+  // 2. Retroactive rest days on dates that already have reviews: nobody gains a missed review.
+  const before = (await missedByMember()).missed;
+  await db.query('begin');
+  try {
+    const busy = (await db.query(
+      "select to_char(legacy_date,'YYYY-MM-DD') d from review_confirmations where cycle_id=$1 and legacy_date < $2::date group by 1 order by count(*) desc limit 3",
+      [cycle, TODAY]
+    )).rows.map((r: any) => r.d);
+    for (const d of busy) await db.query('insert into group_rest_days(cycle_id, rest_date) values($1, $2::date) on conflict do nothing', [cycle, d]);
+    const after = (await missedByMember()).missed;
+    for (const m of members) {
+      const gained = [...after.get(m)!].filter((d) => !before.get(m)!.has(d));
+      assert.deepEqual(gained, [], `member ${m} gained overdue reviews after rest days ${busy}`);
+    }
+    // History untouched.
+    assert.equal((await one('select count(*)::int n from review_confirmations where cycle_id=$1', [cycle])).n, reviews.length + (await one('select count(*)::int n from review_confirmations where cycle_id=$1 and legacy_date > $2::date', [cycle, TODAY])).n);
+  } finally {
+    await db.query('rollback');
+  }
+});

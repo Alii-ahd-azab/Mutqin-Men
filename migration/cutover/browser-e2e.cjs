@@ -21,7 +21,10 @@ const email = (p) => `${p}@members.mutqin.local`;
 
 async function counts() {
   const c = async (t) => (await service.from(t).select("*", { count: "exact", head: true })).count;
-  return { profiles: await c("profiles"), tasmia: await c("tasmia_submissions"), reviews: await c("review_confirmations"), attempts: await c("peer_test_attempts") };
+  return {
+    profiles: await c("profiles"), tasmia: await c("tasmia_submissions"), reviews: await c("review_confirmations"), attempts: await c("peer_test_attempts"),
+    batches: await c("batches"), cycles: await c("cycles"), rest_days: await c("group_rest_days"),
+  };
 }
 
 (async () => {
@@ -29,12 +32,13 @@ async function counts() {
   const authBefore = (await service.auth.admin.listUsers({ perPage: 1000 })).data.users.length;
   const batchId = (await service.from("batches").select("id").is("archived_at", null).limit(1).single()).data.id;
   const created = [];
-  async function account(key, phone, role) {
+  let smokeBatchId = null;
+  async function account(key, phone, role, memberBatchId = batchId) {
     const pw = randomBytes(12).toString("base64url");
     const { data, error } = await service.auth.admin.createUser({ email: email(phone), email_confirm: true, password_hash: bcrypt.hashSync(pw, 10) });
     if (error) throw error;
     created.push({ id: data.user.id, role });
-    const r = await service.rpc("create_profile_with_membership", { p_id: data.user.id, p_full_name: `SMOKE ${key}`, p_phone: phone, p_role: role, p_is_master_admin: role === "admin", p_member_batch_id: role === "member" ? batchId : null, p_admin_batch_ids: [], p_actor: null });
+    const r = await service.rpc("create_profile_with_membership", { p_id: data.user.id, p_full_name: `SMOKE ${key}`, p_phone: phone, p_role: role, p_is_master_admin: role === "admin", p_member_batch_id: role === "member" ? memberBatchId : null, p_admin_batch_ids: [], p_actor: null });
     if (r.error) throw r.error;
     return { id: data.user.id, phone, pw };
   }
@@ -82,12 +86,18 @@ async function counts() {
     await page.getByText("SMOKE BROWSER M").first().waitFor({ timeout: 30000 });
     record("session persists across a page reload", true);
 
-    const openBtn = page.locator("#open-revision-modal-btn");
-    await openBtn.click({ timeout: 20000 });
-    await page.getByRole("button", { name: "تأكيد إتمام المراجعة", exact: true }).click();
-    await page.waitForTimeout(4000);
-    const revs = (await service.from("review_confirmations").select("legacy_date, start_quarter, end_quarter").eq("user_id", M.id)).data || [];
-    record("review recorded through the UI is stored in Men Supabase", revs.length === 1, JSON.stringify(revs));
+    // On an active day the member confirms today's review; on a rest/pause day (the real batch may be
+    // paused) there is no new obligation and no "today" card (Sisters rule, no duplicated range).
+    await page.locator("#open-revision-modal-btn, #revision-no-obligation-status, #revision-completed-status").first().waitFor({ timeout: 20000 });
+    if (await page.locator("#open-revision-modal-btn").count()) {
+      await page.locator("#open-revision-modal-btn").click();
+      await page.getByRole("button", { name: "تأكيد إتمام المراجعة", exact: true }).click();
+      await page.waitForTimeout(4000);
+      const revs = (await service.from("review_confirmations").select("legacy_date, start_quarter, end_quarter").eq("user_id", M.id)).data || [];
+      record("review recorded through the UI is stored in Men Supabase", revs.length === 1, JSON.stringify(revs));
+    } else {
+      record("rest/pause day: no new review card for a member with nothing overdue", (await page.locator("#revision-no-obligation-status").count()) === 1);
+    }
     failed.length = 0; // requests cut off by the reload below are expected
     // Controlled UI write: a personal self-test (generation via Edge Function, save via owner RPC)
     await page.locator('button[title="اختبر نفسك (اختبار فردي)"]').click();
@@ -153,6 +163,43 @@ async function counts() {
     await shot("admin-peer-form");
     await page.getByRole("button", { name: "إلغاء" }).first().click();
 
+    // ---- Regression: rest days added after reviews (temporary smoke batch, real data untouched) ----
+    // Batch started 6 days ago (d0..d6 = today). Reviews on d0, d2, d3 and d6; then the admin adds rest
+    // days on d3 (retroactive) and d6 (today). Active days: d0 d1 d2 d4 d5. The review stored on the
+    // rest day d6 holds d5's range, so d5 is done. Genuinely missed: d1 and d4 only.
+    const riyadh = (offset) => new Date(Date.now() + 3 * 3600000 - offset * 86400000).toISOString().slice(0, 10);
+    const sb = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE E2E ${randomBytes(3).toString("hex")}`, p_start_date: riyadh(6), p_actor: null });
+    if (sb.error) throw sb.error;
+    smokeBatchId = sb.data.id;
+    const sCycle = (await service.from("cycles").select("id").eq("batch_id", smokeBatchId).single()).data.id;
+    const R = await account("BROWSER R", "000000000013", "member", smokeBatchId);
+    await service.from("batch_memberships").update({ joined_at: riyadh(6) + "T00:00:00+03:00" }).eq("user_id", R.id);
+    for (const n of [6, 4, 3, 0]) {
+      const r = await service.from("review_confirmations").insert({ cycle_id: sCycle, user_id: R.id, legacy_date: riyadh(n) });
+      if (r.error) throw r.error;
+    }
+    for (const n of [3, 0]) await service.from("group_rest_days").insert({ cycle_id: sCycle, rest_date: riyadh(n), reason: "SMOKE" });
+    const rCtx = await browser.newContext();
+    const rPage = await rCtx.newPage();
+    rPage.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+    await rPage.goto(URL_APP);
+    await rPage.getByText("تسجيل الدخول للمقرأة").waitFor({ timeout: 20000 });
+    await rPage.locator("input").nth(0).fill(R.phone);
+    await rPage.locator("input").nth(1).fill(R.pw);
+    await rPage.locator('button[type="submit"]').click();
+    await rPage.getByText("SMOKE BROWSER R").first().waitFor({ timeout: 30000 });
+    await rPage.getByText(/^\s*1 من \d+\s*$/).first().waitFor({ timeout: 20000 });
+    const counter = (await rPage.getByText(/^\s*1 من \d+\s*$/).first().textContent()).trim();
+    const endOf = async () => Number((await rPage.locator('div:text-is("إلى الربع") + div').first().textContent()).trim());
+    const ranges = [await endOf()];
+    await rPage.locator('button[title="اليوم التالي"]').click();
+    ranges.push(await endOf());
+    if (process.env.E2E_SHOTS) await rPage.screenshot({ path: path.join(process.env.E2E_SHOTS, "rest-day-reviews.png"), fullPage: true });
+    record("after adding rest days: exactly the 2 genuinely missed reviews are overdue (no false overdue)", counter === "1 من 2", counter);
+    record("overdue cards are distinct days with distinct ranges (day 2, day 4)", ranges[0] === 2 && ranges[1] === 4, JSON.stringify(ranges));
+    record("no duplicated 'today' review card on the rest day", (await rPage.getByRole("button", { name: /تأكيد إتمام المراجعة اليومية/ }).count()) === 0);
+    await rCtx.close();
+
     record("all requests go to the app, Men Supabase or fonts only", [...hosts].every((h) => [new URL(URL_APP).host, "uaublandjewfzmhnbflc.supabase.co", "fonts.googleapis.com", "fonts.gstatic.com"].includes(h)), [...hosts].join(", "));
     record("no failed requests", failed.length === 0, failed.join(", "));
     record("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
@@ -166,6 +213,12 @@ async function counts() {
       if (c.role === "admin") await service.rpc("men_set_account_role", { p_user_id: c.id, p_role: "member", p_batch_id: batchId, p_actor: null });
       await service.rpc("men_delete_member_completely", { p_user_id: c.id });
       await service.auth.admin.deleteUser(c.id);
+    }
+    if (smokeBatchId) {
+      await service.from("daily_thoughts").delete().eq("batch_id", smokeBatchId);
+      await service.from("cycles").delete().eq("batch_id", smokeBatchId);
+      const { error } = await service.from("batches").delete().eq("id", smokeBatchId);
+      if (error) console.error("cleanup batch", error.message);
     }
     const after = await counts();
     const authAfter = (await service.auth.admin.listUsers({ perPage: 1000 })).data.users.length;

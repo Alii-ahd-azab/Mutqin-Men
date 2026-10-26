@@ -384,13 +384,41 @@ export function calculateMemberRevisionStatus(
   const memberLogs = revisionLogs.filter((r) => r.member_id === memberId);
   const reviewedDates = new Set(memberLogs.map((r) => r.date));
 
+  /*
+   * A review obligation is identified by its ACTIVE program day (as in Mutqin for
+   * Sisters), not by an arbitrary calendar date. Men reviews are stored by date,
+   * and a review dated on a rest or pause day carries the range of the last active
+   * day before it (the database computes it with men_cycle_day). So each review
+   * satisfies the latest active date on or before its own date: an active date
+   * matches itself; a rest/pause date credits the active day whose range it holds.
+   * Adding a rest day later never turns a completed review into a missed one, and
+   * distinct active days are never merged. Future-dated reviews credit nothing.
+   */
+  const satisfiedDates = new Set<string>();
+  for (const date of reviewedDates) {
+    if (date > todayDateStr) continue;
+    let lo = 0;
+    let hi = activeCycleDates.length - 1;
+    let match = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      if (activeCycleDates[mid] <= date) {
+        match = mid;
+        lo = mid + 1;
+      } else {
+        hi = mid - 1;
+      }
+    }
+    if (match >= 0) satisfiedDates.add(activeCycleDates[match]);
+  }
+
   const missedDates: string[] = [];
   const pastMissedDates: string[] = [];
 
   for (const date of activeCycleDates) {
     // Days before the member joined his current batch are not owed.
     if (joinedOnDate && date < joinedOnDate) continue;
-    if (!reviewedDates.has(date)) {
+    if (!satisfiedDates.has(date)) {
       missedDates.push(date);
       if (date < todayDateStr) {
         pastMissedDates.push(date);
