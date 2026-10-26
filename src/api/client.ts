@@ -82,30 +82,49 @@ async function getCurrentProfile(): Promise<ProfileRow> {
  * One program load is shared by the requests the dashboard makes together (bootstrap, recitations,
  * revisions); every later call starts a fresh load, so data is never stale after a write.
  */
-let inFlight: Promise<ProgramState> | null = null;
-let lastState: ProgramState | null = null;
+// Both caches belong to ONE signed-in account: another account never reuses them.
+let inFlight: { userId: string; promise: Promise<ProgramState> } | null = null;
+let lastState: { userId: string; state: ProgramState } | null = null;
 
-function loadState(): Promise<ProgramState> {
-  if (!inFlight) {
-    inFlight = (async () => {
-      const batches = await loadBatchIds(supabase);
-      if (!batches.length) throw new Error('لا توجد دفعة متاحة لحسابك');
-      return loadProgram(supabase, batches[0]);
-    })()
-      .then((state) => {
-        lastState = state;
-        return state;
-      })
-      .finally(() => {
-        inFlight = null;
-      });
-  }
-  return inFlight;
+function clearStateCache() {
+  inFlight = null;
+  lastState = null;
+}
+
+async function sessionUserId(): Promise<string> {
+  const { data } = await supabase.auth.getSession();
+  const id = data.session?.user.id;
+  if (!id) throw new Error('يجب تسجيل الدخول أولاً');
+  return id;
+}
+
+async function loadState(): Promise<ProgramState> {
+  const userId = await sessionUserId();
+  if (inFlight?.userId === userId) return inFlight.promise;
+  const promise: Promise<ProgramState> = (async () => {
+    const batches = await loadBatchIds(supabase);
+    if (!batches.length) throw new Error('لا توجد دفعة متاحة لحسابك');
+    return loadProgram(supabase, batches[0]);
+  })()
+    .then((state) => {
+      if (inFlight?.promise === promise) lastState = { userId, state };
+      return state;
+    })
+    .finally(() => {
+      if (inFlight?.promise === promise) inFlight = null;
+    });
+  inFlight = { userId, promise };
+  return promise;
 }
 
 async function currentState(): Promise<ProgramState> {
-  return lastState || loadState();
+  const userId = await sessionUserId();
+  return lastState?.userId === userId ? lastState.state : loadState();
 }
+
+supabase.auth.onAuthStateChange((event) => {
+  if (event === 'SIGNED_OUT' || event === 'SIGNED_IN') clearStateCache();
+});
 
 function activeTestFor(state: ProgramState, user: User | undefined): TestDefinition | null {
   const raw = state.tests.find((t) => t.is_active && !t.is_finished) || null;
@@ -157,7 +176,7 @@ export const api = {
   },
 
   async logout(): Promise<void> {
-    lastState = null;
+    clearStateCache();
     lastPersonalTest = null;
     const { error } = await supabase.auth.signOut();
     if (error) throw error;

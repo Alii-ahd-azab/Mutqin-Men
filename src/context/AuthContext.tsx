@@ -72,14 +72,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, []);
 
+  // As in Sisters, login does not toggle the global loading state: LoginView shows its own spinner and
+  // stays mounted, so a wrong-password message remains visible.
   const login = async (phone: string, password: string) => {
-    setLoading(true);
-    try {
-      const res = await api.login(phone, password);
-      setCurrentUser(res.user);
-    } finally {
-      setLoading(false);
-    }
+    const res = await api.login(phone, password);
+    setCurrentUser(res.user);
   };
 
   const logout = async () => {
