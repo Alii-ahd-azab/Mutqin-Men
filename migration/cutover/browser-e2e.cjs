@@ -1,7 +1,7 @@
 // Browser end-to-end test of the built Men SPA (served by `vite preview --port 4173`) against Men Supabase.
 // Temporary smoke accounts only; everything they create is deleted at the end.
 //   npm run build && npx vite preview --port 4173 --strictPort   (separate terminal)
-//   BCRYPTJS_PATH=<bcryptjs dir> PLAYWRIGHT_PATH=<playwright dir> node --env-file=.env.local migration/cutover/browser-e2e.cjs
+//   [APP_URL=https://<deployed site>/] BCRYPTJS_PATH=<bcryptjs dir> PLAYWRIGHT_PATH=<playwright dir> node --env-file=.env.local migration/cutover/browser-e2e.cjs
 const path = require("path");
 const { randomBytes } = require("crypto");
 const MEN = process.cwd();
@@ -10,7 +10,8 @@ const { createClient } = req("@supabase/supabase-js");
 const bcrypt = require(process.env.BCRYPTJS_PATH || "bcryptjs");
 const { chromium } = require(process.env.PLAYWRIGHT_PATH || "playwright");
 
-const URL_APP = "http://localhost:4173/";
+// APP_URL: the deployed site for the final go-live check (default: local `vite preview`).
+const URL_APP = process.env.APP_URL || "http://localhost:4173/";
 const url = process.env.SUPABASE_URL;
 if (!url.includes("uaublandjewfzmhnbflc")) throw new Error("not the Men project");
 const service = createClient(url, process.env.SUPABASE_SECRET_KEY, { auth: { persistSession: false } });
@@ -123,7 +124,7 @@ async function counts() {
     const shown = Number((membersLabel.match(/\((\d+)\)/) || [])[1]);
     record("admin sees every account (30 real + 2 smoke), not cached member data", shown === before.profiles + 2, membersLabel);
 
-    record("all requests go to the app, Men Supabase or fonts only", [...hosts].every((h) => ["localhost:4173", "uaublandjewfzmhnbflc.supabase.co", "fonts.googleapis.com", "fonts.gstatic.com"].includes(h)), [...hosts].join(", "));
+    record("all requests go to the app, Men Supabase or fonts only", [...hosts].every((h) => [new URL(URL_APP).host, "uaublandjewfzmhnbflc.supabase.co", "fonts.googleapis.com", "fonts.gstatic.com"].includes(h)), [...hosts].join(", "));
     record("no failed requests", failed.length === 0, failed.join(", "));
     record("no console errors", consoleErrors.length === 0, consoleErrors.slice(0, 3).join(" | "));
   } catch (e) {

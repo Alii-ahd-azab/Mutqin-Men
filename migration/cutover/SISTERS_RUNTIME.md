@@ -2,6 +2,16 @@
 
 Supersedes the Express/direct-Postgres design in CUTOVER_REPORT.md. Data migration, final reconciliation and the Firebase freeze from that report remain valid.
 
+## Status (26 Oct 2026)
+
+| | |
+|---|---|
+| Supabase backend, Auth, RLS, Edge Functions | **Production-ready** on `uaublandjewfzmhnbflc` |
+| Code | **Merged to `main` and pushed** to the Mutqin-Men GitHub repository (`supabase-cutover` kept until go-live) |
+| Firebase `mutqin-7f0bb` | **Frozen read-only**, kept as historical fallback/reference; unchanged since the final snapshot |
+| Website | **Not live yet**: Vercel deployment of `main` is the only remaining go-live step |
+| Deployed-site smoke test | **Pending** (runs after the Vercel deployment) |
+
 ## Architecture (matches Mutqin for Sisters)
 
 ```
@@ -40,7 +50,9 @@ Men-specific database extensions are kept: Firestore alternate IDs, legacy occur
 ## Verification
 
 * `npm test`: 17 (database: RLS reads/writes per role, guards, SQL calendar = JS calendar on every date, RPCs, Edge-only RPCs; Edge rule unit tests) + 9 RLS role tests. Phase 1 suite: 6/6. `npm run lint`, `npm run build`, Deno type-check of all three functions: pass.
-* Production smoke test (`migration/cutover/smoke.ts`, temporary accounts created and fully removed): 28/28 runtime checks pass, including login with an imported bcrypt hash, session persistence, logout, inactive restrictions, member review and recitation writes stored in Supabase, sequential-quarter rejection, cross-member and privilege denials, personal tests, unauthenticated denial, admin dashboard and rest days. The 3 Edge Function checks fail with HTTP 404: **not deployed yet**.
+* Production API smoke test (`migration/cutover/smoke.ts`, temporary accounts created and fully removed): **62/62 pass**, including every action of the deployed admin-users, admin-actions and peer-tests functions (account lifecycle, factory-reset guard, peer-test administration on a hidden test, end-to-end peer test with mandatory-test checkpoint, personal tests), login with an imported bcrypt hash, session persistence, logout, inactive and unauthenticated restrictions, cross-member and privilege denials.
+* Browser end-to-end test of the production build against Men Supabase (`migration/cutover/browser-e2e.cjs`, served locally by `vite preview`): **15/15 pass** — login and wrong-password message, member and admin dashboards, review and personal test written from the UI, Edge Function from the browser origin, logout, no cross-account data, only Men Supabase requests, no console errors.
+* Edge Functions deployed and ACTIVE (`verify_jwt = false`, callers validated in-function as in Sisters); unauthenticated and forged-token calls get 401.
 
 ## Intentional behavior changes (Sisters behavior adopted)
 
@@ -53,9 +65,6 @@ Men-specific database extensions are kept: Firestore alternate IDs, legacy occur
 
 ## Remaining before go-live
 
-1. **Deploy the Edge Functions** (needs a Supabase access token for the account that owns the Men project; the CLI login on this machine sees only Sisters and Hafith-for-men):
-   `npx supabase functions deploy admin-users admin-actions peer-tests --project-ref uaublandjewfzmhnbflc`
-2. Deploy the SPA (`npm run build` → static `dist/`, SPA fallback to `index.html`) the same way Sisters is hosted, with SUPABASE_URL and SUPABASE_PUBLISHABLE_KEY at build time. No other runtime variables are needed.
-3. Merge `supabase-cutover` to `main`.
+Deploy the `main` branch of the Mutqin-Men GitHub repository to Vercel (as Sisters is hosted: zero-config Vite, build `npm run build`, output `dist/`) with `VITE_SUPABASE_URL` and `VITE_SUPABASE_PUBLISHABLE_KEY` set to the Men values, then run the final deployed-site smoke test (`browser-e2e.cjs` against the deployed URL). No other runtime variables are needed.
 
-Later cleanup (before Phase 2): the Mushaf data still ships in the browser bundle through `TestConditionsCard` (Sisters keeps it server-side); `@supabase/ssr` was added to package.json outside this work and is unused; `data/database.json` remains in Git history.
+Later cleanup (before Phase 2): the Mushaf data still ships in the browser bundle through `TestConditionsCard` (Sisters keeps it server-side); `data/database.json` remains in Git history.
