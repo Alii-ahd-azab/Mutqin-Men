@@ -233,9 +233,13 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       });
     }
 
-    // 2. Today. Men reviews are date-based: on a rest or pause day there is no new
-    //    obligation (it is never counted as missed), but the member may still confirm
-    //    the review of the last active day's range, as before.
+    // 2. Today — only when today is an ACTIVE program day (as in Mutqin for Sisters).
+    //    On a rest or pause day the calendar is frozen on the last active day, whose
+    //    review is either done or already listed above as overdue: a "today" card
+    //    would repeat that same range. Overdue days can still be caught up during a
+    //    pause through the cards above (stored on their own dates).
+    if (!userRevisionStatus.isTodayProgramDay) return items;
+
     const todayReviewBounds = getRangeBounds(cycleInfo.review_start, cycleInfo.review_end);
     items.push({
       date: cycleInfo.today_date,

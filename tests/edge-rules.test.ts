@@ -139,3 +139,94 @@ test('personal test setup and generation return the resolved range for saving', 
   assert.match(r.setup.range_label, /الجزء 30/);
   assert.throws(() => parsePersonalSetup({ range_type: 'surah', start_surah: 5, end_surah: 2, questions_count: 1, lines_per_question: 1 }), RuleError);
 });
+
+// ---------------------------------------------------------------------------------------------
+// Rest days / pauses and review obligations (regression: duplicated range, false overdue)
+// ---------------------------------------------------------------------------------------------
+import { calculateCycleInfo, getActiveCycleDates, calculateMemberRevisionStatus } from '../supabase/functions/_shared/logic/calculations.ts';
+import type { GroupSettings, RestDay, RevisionLog } from '../supabase/functions/_shared/logic/programTypes.ts';
+
+const START = '2026-10-01';
+const program = (restDates: string[] = [], extra: Partial<GroupSettings> = {}) => {
+  const settings: GroupSettings = {
+    id: 'x', start_date: START, total_quarters: 240, review_window: 8, current_cycle_number: 1,
+    is_paused: false, paused_at: null, total_paused_days: 0, ...extra,
+  };
+  const restDays: RestDay[] = restDates.map((d, i) => ({ id: `r${i}`, date: d, note: '', added_by_admin_id: '', created_at: '' }));
+  return { settings, restDays };
+};
+// A review stored the way the database guard stores it: by date, range = program day of that date.
+const review = (p: ReturnType<typeof program>, date: string): RevisionLog => {
+  const day = calculateCycleInfo(p.settings, p.restDays, date).cycle_day;
+  return { id: date, member_id: 'm', member_name: 'm', date, cycle_number: 1, review_start_quarter: Math.max(1, day - 7), review_end_quarter: day, created_at: '' };
+};
+const status = (p: ReturnType<typeof program>, logs: RevisionLog[], today: string) =>
+  calculateMemberRevisionStatus('m', getActiveCycleDates(START, today, p.restDays, p.settings), logs, today);
+const days = (from: number, to: number) => Array.from({ length: to - from + 1 }, (_, i) => `2026-10-${String(from + i).padStart(2, '0')}`);
+
+test('retroactive rest day: completed reviews stay completed, the schedule shifts by one day', () => {
+  const before = program();
+  const logs = days(1, 9).map((d) => review(before, d)); // every day 1..9 reviewed when it happened
+  assert.deepEqual(status(before, logs, '2026-10-10').pastMissedDates, []);
+  assert.equal(calculateCycleInfo(before.settings, before.restDays, '2026-10-10').cycle_day, 10);
+
+  for (const rest of [['2026-10-04'], ['2026-10-04', '2026-10-05'], ['2026-10-02', '2026-10-07'], ['2026-10-09']]) {
+    const after = program(rest);
+    const s = status(after, logs, '2026-10-10');
+    assert.deepEqual(s.pastMissedDates, [], `rest ${rest}`); // no false overdue
+    assert.equal(calculateCycleInfo(after.settings, after.restDays, '2026-10-10').cycle_day, 10 - rest.length, `rest ${rest}`);
+  }
+  assert.equal(logs.length, 9, 'history untouched');
+});
+
+test('rest day today: no new obligation, and the last active day is not repeated', () => {
+  const p = program(['2026-10-10']);
+  const logs = days(1, 9).map((d) => review(p, d));
+  const s = status(p, logs, '2026-10-10');
+  assert.equal(s.isTodayProgramDay, false); // the dashboard shows no "today" card → no duplicated range
+  assert.deepEqual(s.pastMissedDates, []);
+  // The frozen range today is exactly the last active day's range (what used to be duplicated).
+  assert.equal(calculateCycleInfo(p.settings, p.restDays, '2026-10-10').review_end, calculateCycleInfo(p.settings, p.restDays, '2026-10-09').review_end);
+});
+
+test('a review recorded on a rest/pause date satisfies the last active day (the range it holds)', () => {
+  // Day 9 was not confirmed on 10-09; the member confirmed it on the rest day 10-10.
+  const p = program(['2026-10-10']);
+  const logs = [...days(1, 8).map((d) => review(p, d)), review(p, '2026-10-10')];
+  assert.equal(logs[8].review_end_quarter, calculateCycleInfo(p.settings, p.restDays, '2026-10-09').cycle_day);
+  assert.deepEqual(status(p, logs, '2026-10-11').pastMissedDates, []);
+  // Same with a pause: paused from 10-10 (open), review stored on 10-11.
+  const paused = program([], { is_paused: true, paused_at: '2026-10-10' });
+  const pLogs = [...days(1, 8).map((d) => review(paused, d)), review(paused, '2026-10-11')];
+  const ps = status(paused, pLogs, '2026-10-12');
+  assert.equal(ps.isTodayProgramDay, false);
+  assert.deepEqual(ps.pastMissedDates, []);
+  // Closed past pause period 10-04..10-05 with reviews on every calendar day.
+  const closed = program([], { pause_periods: [{ from: '2026-10-04', to: '2026-10-05' }] });
+  assert.deepEqual(status(closed, days(1, 9).map((d) => review(closed, d)), '2026-10-10').pastMissedDates, []);
+});
+
+test('genuinely missing reviews stay overdue; different days are never merged', () => {
+  const p = program(['2026-10-05']);
+  // Day of 10-03 missing; 10-06 missing (10-05 is a rest day, reviews on 10-04 and 10-07).
+  const logs = ['2026-10-01', '2026-10-02', '2026-10-04', '2026-10-07', '2026-10-08'].map((d) => review(p, d));
+  assert.deepEqual(status(p, logs, '2026-10-09').pastMissedDates, ['2026-10-03', '2026-10-06']);
+  // One review never satisfies an EARLIER missed day, only the latest active day on or before it.
+  assert.deepEqual(status(p, [review(p, '2026-10-02')], '2026-10-04').pastMissedDates, ['2026-10-01', '2026-10-03']);
+  // A missed day followed by a rest-day review still counts the earlier missed days.
+  const r = program(['2026-10-04']);
+  assert.deepEqual(status(r, [review(r, '2026-10-01'), review(r, '2026-10-04')], '2026-10-05').pastMissedDates, ['2026-10-02']);
+  // A future-dated review credits nothing.
+  assert.deepEqual(status(p, [review(p, '2026-10-01'), { ...review(p, '2026-10-02'), date: '2026-10-03' }], '2026-10-02').pastMissedDates, []);
+  assert.equal(status(p, [review(p, '2026-10-01'), { ...review(p, '2026-10-02'), date: '2026-10-03' }], '2026-10-02').hasReviewedToday, false);
+});
+
+test('overdue cards are unique dates with distinct ranges', () => {
+  const p = program(['2026-10-04', '2026-10-05']);
+  const s = status(p, [review(p, '2026-10-01')], '2026-10-09');
+  assert.equal(new Set(s.pastMissedDates).size, s.pastMissedDates.length);
+  const ends = s.pastMissedDates.map((d) => calculateCycleInfo(p.settings, p.restDays, d).review_end);
+  assert.equal(new Set(ends).size, ends.length);
+  // Today (active) has its own, later range.
+  assert.ok(calculateCycleInfo(p.settings, p.restDays, '2026-10-09').review_end > Math.max(...ends));
+});
