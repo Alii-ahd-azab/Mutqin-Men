@@ -8,11 +8,12 @@ import { api } from '../api/client';
 interface HeaderProps {
   cycleInfo?: CycleInfo | null;
   allUsers?: User[];
+  batchName?: string;
   onRefresh: () => void;
   onOpenPersonalTest?: () => void;
 }
 
-export const Header: React.FC<HeaderProps> = ({ onOpenPersonalTest }) => {
+export const Header: React.FC<HeaderProps> = ({ batchName, onOpenPersonalTest }) => {
   const { currentUser, logout } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
@@ -82,7 +83,13 @@ export const Header: React.FC<HeaderProps> = ({ onOpenPersonalTest }) => {
                   <ChevronDown className="w-3 h-3 text-stone-400" />
                 </div>
                 <div className="text-stone-500">
-                  {currentUser.role === 'admin' ? 'مشرف المقرأة' : 'عضو حافظ'}
+                  {currentUser.role === 'admin'
+                    ? currentUser.is_master_admin
+                      ? 'المشرف العام'
+                      : 'مشرف المقرأة'
+                    : batchName
+                    ? `عضو حافظ • ${batchName}`
+                    : 'عضو حافظ'}
                 </div>
               </div>
             </button>
@@ -99,6 +106,11 @@ export const Header: React.FC<HeaderProps> = ({ onOpenPersonalTest }) => {
                     }`}>
                       {currentUser.role === 'admin' ? 'حساب المشرف' : 'عضو بالمقرأة'}
                     </span>
+                    {currentUser.role === 'member' && batchName && (
+                      <span className="inline-block text-[10px] px-2 py-0.5 rounded-full font-bold bg-emerald-50 text-emerald-800 border border-emerald-200 mr-1">
+                        {batchName}
+                      </span>
+                    )}
                   </div>
                 </div>
                 <div className="pt-1 space-y-0.5">

@@ -1,4 +1,5 @@
 import React, { useState, useEffect } from 'react';
+import { createPortal } from 'react-dom';
 import { User, CycleInfo, RecitationLog } from '../types';
 import { getQuarterInfo, getQuarterBounds, getRangeBounds } from '../data/quranData';
 import { calculateMemberRequiredQuarter } from '../lib/calculations';
@@ -243,7 +244,7 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
               id="submit-recitation-btn"
               type="submit"
               disabled={loading}
-              className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-emerald-700 hover:bg-emerald-800 shadow-xs transition disabled:opacity-50"
+              className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 shadow-xs transition disabled:opacity-50 cursor-pointer"
             >
               {loading ? 'جاري التسجيل...' : 'تأكيد إتمام التسميع'}
             </button>
@@ -283,15 +284,11 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
 }) => {
   const [notes, setNotes] = useState<string>('');
   const [confirmed, setConfirmed] = useState<boolean>(true);
-  const [submitting, setSubmitting] = useState<boolean>(false);
-  const [submitError, setSubmitError] = useState<string>('');
 
   useEffect(() => {
     if (isOpen) {
       setNotes('');
       setConfirmed(true);
-      setSubmitting(false);
-      setSubmitError('');
     }
   }, [isOpen]);
 
@@ -307,21 +304,13 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!confirmed || submitting) return;
-    setSubmitting(true);
-    setSubmitError('');
+    if (!confirmed) return;
     const payload: { notes?: string; date?: string } = {
       ...(notes.trim() ? { notes: notes.trim() } : {}),
       ...(targetDate ? { date: targetDate } : {}),
     };
-    try {
-      await onSubmit(payload);
-      onClose();
-    } catch (err: any) {
-      setSubmitError(err?.message || 'تعذر حفظ المراجعة. لم يتم الحفظ، أعد المحاولة.');
-    } finally {
-      setSubmitting(false);
-    }
+    await onSubmit(payload);
+    onClose();
   };
 
   return (
@@ -410,12 +399,6 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
             />
           </div>
 
-          {submitError && (
-            <div className="p-3 rounded-xl bg-rose-50 border border-rose-200 text-xs text-rose-800 font-bold">
-              {submitError}
-            </div>
-          )}
-
           <div className="pt-2 flex items-center justify-end gap-2 border-t border-stone-100">
             <button
               type="button"
@@ -427,10 +410,10 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
             <button
               id="submit-revision-btn"
               type="submit"
-              disabled={!confirmed || loading || submitting}
-              className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-emerald-700 hover:bg-emerald-800 shadow-xs transition disabled:opacity-50"
+              disabled={!confirmed || loading}
+              className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 shadow-xs transition disabled:opacity-50 cursor-pointer"
             >
-              {loading || submitting ? 'جاري الحفظ...' : isMissedDay ? 'تأكيد إتمام المراجعة المتأخرة' : 'تأكيد إتمام المراجعة'}
+              {loading ? 'جاري الحفظ...' : isMissedDay ? 'تأكيد إتمام المراجعة المتأخرة' : 'تأكيد إتمام المراجعة'}
             </button>
           </div>
         </form>
@@ -491,8 +474,8 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
       setErrorMsg('يرجى إدخال كلمة المرور الجديدة');
       return;
     }
-    if (newPassword.length < 4) {
-      setErrorMsg('كلمة المرور يجب ألا تقل عن 4 خانات');
+    if (newPassword.length < 6) {
+      setErrorMsg('كلمة المرور يجب أن تكون 6 أحرف أو أكثر');
       return;
     }
     if (newPassword !== confirmPassword) {
@@ -514,8 +497,8 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
     }
   };
 
-  return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-stone-900/60 backdrop-blur-xs flex min-h-full items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
+  return createPortal(
+    <div className="fixed inset-0 z-[9999] overflow-y-auto bg-stone-900/60 backdrop-blur-xs flex min-h-full items-center justify-center p-4 sm:p-6 animate-in fade-in duration-150">
       <div className="bg-white rounded-2xl max-w-sm w-full p-5 sm:p-6 shadow-2xl border border-stone-200 my-auto animate-in zoom-in-95 duration-150 relative max-h-[calc(100vh-2rem)] overflow-y-auto">
         <div className="flex items-center justify-between pb-3.5 border-b border-stone-100">
           <div className="flex items-center gap-2.5">
@@ -595,7 +578,7 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
                 value={newPassword}
                 onChange={(e) => setNewPassword(e.target.value)}
                 required
-                placeholder="أدخل كلمة المرور الجديدة (4 خانات على الأقل)"
+                placeholder="أدخل كلمة المرور الجديدة (6 أحرف على الأقل)"
                 className="w-full h-10 px-3.5 pl-10 text-xs sm:text-sm rounded-xl border border-stone-300 bg-stone-50/70 focus:bg-white focus:border-emerald-600 focus:ring-2 focus:ring-emerald-500/20 outline-hidden transition text-stone-900 placeholder:text-stone-400"
               />
               <button
@@ -639,13 +622,148 @@ export const ChangePasswordModal: React.FC<ChangePasswordModalProps> = ({
               id="submit-change-password-btn"
               type="submit"
               disabled={loading || !!successMsg}
-              className="px-4 py-1.5 text-xs font-bold text-white bg-emerald-700 hover:bg-emerald-800 rounded-xl shadow-xs transition disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
+              className="px-4 py-1.5 text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 rounded-xl shadow-xs transition disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
             >
               {loading ? 'جاري الحفظ...' : 'حفظ'}
             </button>
           </div>
         </form>
       </div>
-    </div>
+    </div>,
+    document.body
+  );
+};
+
+interface CorrectListenerModalProps {
+  recitation: RecitationLog | null;
+  onClose: () => void;
+  onSubmit: (submissionId: string, newListenerId: string) => Promise<void>;
+  members: User[]; // Active peers excluding current user and admins
+}
+
+// The member's one listener correction (within 12 hours of submitting).
+export const CorrectListenerModal: React.FC<CorrectListenerModalProps> = ({
+  recitation,
+  onClose,
+  onSubmit,
+  members,
+}) => {
+  const [listenerId, setListenerId] = useState<string>('');
+  const [errorMsg, setErrorMsg] = useState<string>('');
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (recitation) {
+      setListenerId('');
+      setErrorMsg('');
+      setSaving(false);
+    }
+  }, [recitation]);
+
+  if (!recitation) return null;
+
+  const qInfo = getQuarterInfo(recitation.quarter_number);
+  const candidates = members.filter((m) => m.id !== recitation.listener_id);
+
+  const handleSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErrorMsg('');
+
+    if (!listenerId) {
+      setErrorMsg('يرجى اختيار المستمع الصحيح');
+      return;
+    }
+
+    setSaving(true);
+    try {
+      await onSubmit(recitation.id, listenerId);
+      onClose();
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'تعذر تعديل المستمع');
+      setSaving(false);
+    }
+  };
+
+  return createPortal(
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-stone-900/60 backdrop-blur-xs animate-in fade-in duration-200">
+      <div className="bg-white rounded-2xl max-w-md w-full shadow-2xl border border-stone-200 overflow-hidden text-stone-900">
+        <div className="px-6 py-4 border-b border-stone-100 flex items-center justify-between bg-stone-50">
+          <div>
+            <h2 className="text-base font-bold text-stone-900 flex items-center gap-2">
+              <Users className="w-5 h-5 text-emerald-600" />
+              تعديل المستمع
+            </h2>
+            <p className="text-xs text-stone-500">
+              الربع رقم {recitation.quarter_number} ({qInfo.surahName} - الجزء {qInfo.juz})
+            </p>
+          </div>
+          <button
+            onClick={onClose}
+            className="p-1 text-stone-400 hover:text-stone-700 hover:bg-stone-200 rounded-lg transition"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="p-6 space-y-4 text-sm">
+          {errorMsg && (
+            <div className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
+          <div className="p-3 bg-stone-50 border border-stone-200 rounded-xl text-xs text-stone-700">
+            المستمع المسجّل حاليًا: <strong>{recitation.listener_name || '—'}</strong>
+          </div>
+
+          <div>
+            <label htmlFor="correct-listener-select" className="block text-xs font-bold text-stone-700 mb-1.5">
+              المستمع الصحيح *
+            </label>
+            <select
+              id="correct-listener-select"
+              value={listenerId}
+              onChange={(e) => setListenerId(e.target.value)}
+              required
+              className="w-full px-3.5 py-2.5 rounded-xl border border-stone-200 bg-stone-50 focus:bg-white focus:border-emerald-600 focus:ring-2 focus:ring-emerald-100 transition outline-hidden text-xs"
+            >
+              <option value="" disabled>
+                -- اختر المستمع --
+              </option>
+              {candidates.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name} ({m.phone})
+                </option>
+              ))}
+            </select>
+          </div>
+
+          <p className="text-[11px] text-amber-800 bg-amber-50 border border-amber-200 rounded-xl p-2.5 flex items-start gap-1.5">
+            <Lock className="w-3.5 h-3.5 shrink-0 mt-px" />
+            <span>يمكن تعديل المستمع مرة واحدة فقط خلال 12 ساعة من التسجيل، ولا يمكن التراجع بعد التأكيد.</span>
+          </p>
+
+          <div className="pt-2 flex items-center justify-end gap-2 border-t border-stone-100">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-4 py-2 text-xs font-semibold text-stone-600 hover:bg-stone-100 rounded-xl transition"
+            >
+              إلغاء
+            </button>
+            <button
+              id="submit-correct-listener-btn"
+              type="submit"
+              disabled={saving}
+              className="px-5 py-2 text-xs font-bold rounded-xl text-white bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 shadow-xs transition disabled:opacity-50 cursor-pointer"
+            >
+              {saving ? 'جاري الحفظ...' : 'تأكيد التعديل'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>,
+    document.body
   );
 };

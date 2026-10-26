@@ -1,85 +1,64 @@
-export type UserRole = 'member' | 'admin';
+import type {
+  UserRole,
+  User,
+  GroupSettings,
+  RestDay,
+  RecitationLog,
+  RevisionLog,
+  CycleInfo,
+} from '../supabase/functions/_shared/logic/programTypes.ts';
 
-export interface User {
+// Core program types live in the shared folder so the Edge Functions use the same definitions.
+export type { UserRole, User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo };
+
+export type MembershipRole = 'member' | 'admin';
+
+export interface Batch {
   id: string;
   name: string;
+  created_at: string;
+  archived_at: string | null;
+}
+
+export interface BatchMembership {
+  id: string;
+  batch_id: string;
+  user_id: string;
+  membership_role: MembershipRole;
+  created_at: string;
+}
+
+// Admin account as listed for master-admin permission management
+export interface AdminAccount {
+  user: User;
+  is_master_admin: boolean;
+  batch_ids: string[];
+}
+
+export type AdminType = 'master' | 'batch';
+
+// Changes an admin may request for an existing account.
+// Always applied server-side by the admin-users Edge Function.
+export interface AdminAccountUpdate {
+  name?: string;
+  phone?: string;
+  password?: string;
+  // Men: member <-> admin switch (the server re-assigns batch memberships)
+  role?: UserRole;
+  batch_id?: string; // the member's batch when switching admin -> member
+  is_active?: boolean; // false = exclude, true = reactivate
+  is_master_admin?: boolean; // master admins only
+  batch_ids?: string[]; // batch-admin assignments, master admins only
+}
+
+export interface NewAccountPayload {
+  name: string;
   phone: string;
+  password: string;
   role: UserRole;
-  is_active: boolean;
-  created_at: string;
-}
-
-export interface GroupSettings {
-  id: string;
-  start_date: string; // ISO date YYYY-MM-DD
-  total_quarters: number; // 240
-  review_window: number; // 8
-  current_cycle_number: number;
-  is_paused: boolean;
-  paused_at: string | null; // ISO date YYYY-MM-DD
-  total_paused_days: number;
-  pause_periods?: { from: string; to: string }[]; // فترات إيقاف منتهية (شاملة الطرفين)
-  daily_thought?: string; // HTML formatted thought of the day
-  daily_thought_updated_at?: string; // ISO date string
-  daily_thought_updated_by?: string; // Admin display name
-}
-
-export interface RestDay {
-  id: string;
-  date: string; // YYYY-MM-DD
-  note: string;
-  added_by_admin_id: string;
-  added_by_name?: string;
-  created_at: string;
-}
-
-export interface RecitationLog {
-  id: string;
-  member_id: string;
-  member_name: string;
-  listener_id?: string;
-  listener_name?: string;
-  quarter_number: number;
-  cycle_number: number;
-  date: string; // YYYY-MM-DD
-  notes?: string;
-  created_at: string;
-  // Legacy aliases for backwards compatibility
-  reciter_id?: string;
-  reciter_name?: string;
-}
-
-export interface RevisionLog {
-  id: string;
-  member_id: string;
-  member_name: string;
-  date: string; // YYYY-MM-DD
-  cycle_number: number;
-  review_start_quarter: number;
-  review_end_quarter: number;
-  notes?: string;
-  created_at: string;
-}
-
-export interface CycleInfo {
-  has_started: boolean;
-  days_until_start: number;
-  cycle_day: number; // 1 to 240 (or 0 if not started)
-  quarter_of_day: number; // 1 to 240 (or 0 if not started)
-  review_start: number;
-  review_end: number;
-  review_count: number;
-  is_rest_day: boolean;
-  rest_day_note?: string;
-  is_paused: boolean;
-  paused_at?: string | null;
-  is_completed: boolean;
-  days_elapsed: number;
-  rest_days_count: number;
-  paused_days_count: number;
-  start_date: string;
-  current_cycle_number: number;
-  today_date: string;
+  batch_id?: string; // required when role === 'member'
+  is_master_admin?: boolean; // role === 'admin' only (master admins only)
+  batch_ids?: string[]; // role === 'admin' && !is_master_admin
 }
 
 export interface MemberDailyStatus {
@@ -99,34 +78,99 @@ export interface MemberDailyStatus {
   severe_reasons?: ('recitation' | 'revision')[];
 }
 
-export interface TestPrerequisites {
-  require_all_quarters_completed: boolean; // إتمام آخر ربع مطلوب
-  require_revision_completed: boolean; // إتمام المراجعة
+export interface BatchBootstrap {
+  batch: Batch;
+  cycle_id: string;
+  cycleInfo: CycleInfo;
+  settings: GroupSettings;
+  restDays: RestDay[];
+  users: User[];
+  recitations: RecitationLog[];
+  revisions: RevisionLog[];
+  todayRecitations: RecitationLog[];
+  todayRevisions: RevisionLog[];
+  // Peer tests of the cycle (members only receive live ones via RLS)
+  peerTests: PeerTest[];
+  // Attempts the user may see (members: their own as candidate/examiner)
+  peerTestAttempts: PeerTestAttempt[];
 }
 
-export interface TestDefinition {
+// Men: who takes part in a peer test
+export type PeerTestAudience = 'all' | 'selected';
+
+// ============ PEER TESTING (اختبار الزملاء) ============
+
+export type PeerTestType = 'mandatory' | 'recommended';
+export type PeerTestDifficulty = 'any' | 'easy' | 'medium' | 'hard' | 'mixed';
+export type PeerTestStatus = 'draft' | 'published' | 'hidden' | 'finished';
+export type PeerTestVisibility = 'draft' | 'now' | 'hidden' | 'schedule';
+
+export interface PeerTest {
   id: string;
-  title?: string;
-  range_start: number; // 1 to 240
-  range_end: number; // 1 to 240
-  questions_count: number; // >= 1
-  lines_per_question: number; // >= 1
-  prerequisites: TestPrerequisites;
-  has_max_errors: boolean;
-  max_errors_allowed?: number;
-  test_type: 'mandatory' | 'recommended';
-  is_active: boolean;
-  audience?: 'all' | 'selected';
-  selected_member_ids?: string[];
-  difficulty?: 'any' | 'easy' | 'medium' | 'hard' | 'mixed';
+  cycle_id: string;
+  title: string;
+  range_start: number;
+  range_end: number;
+  questions_count: number;
+  lines_per_question: number;
+  max_errors: number | null;
+  test_type: PeerTestType;
+  difficulty: PeerTestDifficulty;
+  status: PeerTestStatus;
+  visible_from: string | null;
+  visible_until: string | null;
   created_at: string;
-  created_by_admin_id?: string;
-  updated_at?: string;
-  is_finished?: boolean;
-  finished_at?: string;
+  updated_at: string;
+  finished_at: string | null;
+  // Men
+  audience: PeerTestAudience;
+  selected_member_ids: string[];
+  require_all_quarters_completed: boolean;
+  require_revision_completed: boolean;
 }
 
-export interface TestQuestion {
+export type PeerTestAttemptStatus = 'in_progress' | 'passed' | 'failed' | 'cancelled';
+
+export interface PeerTestAttempt {
+  id: string;
+  test_id: string;
+  candidate_id: string;
+  candidate_name_snapshot: string;
+  examiner_id: string | null;
+  examiner_name_snapshot: string;
+  status: PeerTestAttemptStatus;
+  total_errors: number | null;
+  max_errors_snapshot: number | null;
+  notes: string | null;
+  attempt_date: string;
+  created_at: string;
+  completed_at: string | null;
+  // Men: last quarter the questions covered (a partially recited range)
+  effective_range_end: number | null;
+  covers_full_range: boolean | null;
+}
+
+export interface PeerTestAttemptQuestion {
+  attempt_id: string;
+  question_number: number;
+  start_surah: number;
+  start_surah_name: string;
+  start_ayah: number;
+  end_surah: number;
+  end_surah_name: string;
+  end_ayah: number;
+  start_page: number;
+  start_line: number;
+  end_page: number;
+  end_line: number;
+  actual_lines: number;
+  difficulty_level: 'easy' | 'medium' | 'hard' | null;
+  errors_count: number | null;
+  notes: string | null;
+}
+
+// A question as generated by the server for a live session (with ayah text).
+export interface PeerTestQuestion {
   question_number: number;
   start_surah: number;
   start_surah_name: string;
@@ -141,40 +185,45 @@ export interface TestQuestion {
   end_page: number;
   end_line: number;
   target_lines: number;
-  actual_lines?: number;
-  difficulty_level?: 'easy' | 'medium' | 'hard';
-  difficulty_score?: number;
+  actual_lines: number;
+  difficulty_level: 'easy' | 'medium' | 'hard';
+  difficulty_score: number;
 }
 
-export interface TestAttemptQuestionResult {
-  question_number: number;
-  start_surah?: number;
-  start_surah_name: string;
-  start_ayah: number;
-  end_surah?: number;
-  end_surah_name: string;
-  end_ayah: number;
-  errors_count: number;
-  notes?: string;
-}
-
-export interface TestAttempt {
+export interface PeerTestCandidate {
   id: string;
-  test_id: string;
-  candidate_id: string; // العضو المختبَر
-  candidate_name: string;
-  examiner_id: string; // الزميل المختبِر
-  examiner_name: string;
-  total_errors: number;
-  passed: boolean;
-  status: 'passed' | 'failed';
-  date: string; // YYYY-MM-DD
-  questions_results: TestAttemptQuestionResult[];
-  notes?: string;
-  created_at: string;
-  effective_range_end?: number;
-  covers_full_range?: boolean;
+  name: string;
+  is_eligible: boolean;
+  reasons: string[];
+  has_passed: boolean;
+  missing_quarters: number;
+  is_eliminable: boolean;
+  effective_range_end: number;
+  covers_full_range: boolean;
 }
+
+export interface PeerTestSaveInput {
+  batch_id: string;
+  test_id?: string;
+  title: string;
+  range_start: number;
+  range_end: number;
+  questions_count: number;
+  lines_per_question: number;
+  max_errors: number | null;
+  test_type: PeerTestType;
+  difficulty: PeerTestDifficulty;
+  visibility: PeerTestVisibility;
+  visible_from: string | null;
+  visible_until: string | null;
+  // Men
+  audience: PeerTestAudience;
+  selected_member_ids: string[];
+  require_all_quarters_completed: boolean;
+  require_revision_completed: boolean;
+}
+
+// ============ PERSONAL SELF-TESTS (اختبر نفسك) — Men ============
 
 export type PersonalTestRangeType = 'surah' | 'juz' | 'quarter';
 

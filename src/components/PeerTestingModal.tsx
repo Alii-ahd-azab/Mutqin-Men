@@ -1,233 +1,246 @@
-import React, { useState, useEffect } from 'react';
-import { User, TestDefinition, TestQuestion, TestAttempt } from '../types';
+import React, { useEffect, useState } from 'react';
+import { PeerTest, PeerTestAttempt, PeerTestCandidate, PeerTestQuestion, User } from '../types';
 import { api } from '../api/client';
+import { PEER_LEVEL_STYLES } from '../lib/peerTests';
 import { TestConditionsCard } from './TestConditionsCard';
-import {
-  Award,
-  Users,
-  CheckCircle2,
-  XCircle,
-  AlertCircle,
-  HelpCircle,
-  Sparkles,
-  ArrowRight,
-  BookOpen,
-  ChevronDown,
-  ChevronUp,
-  FileText,
-  Clock,
-  ShieldAlert,
-} from 'lucide-react';
+import { Award, Users, Check, CheckCircle2, XCircle, AlertCircle, ChevronDown, ChevronUp, ArrowRight, X } from 'lucide-react';
 
 interface PeerTestingModalProps {
   isOpen: boolean;
   onClose: () => void;
   currentUser: User;
-  activeTest: TestDefinition;
+  test: PeerTest;
   onCompleted: () => void;
 }
 
-export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
-  isOpen,
-  onClose,
-  currentUser,
-  activeTest,
-  onCompleted,
-}) => {
-  const [candidates, setCandidates] = useState<any[]>([]);
+// The examiner (logged-in member) chooses a brother, the server generates the
+// questions, the examiner counts errors, and the server records the result.
+export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({ isOpen, onClose, currentUser, test, onCompleted }) => {
+  const [candidates, setCandidates] = useState<PeerTestCandidate[]>([]);
   const [loadingCandidates, setLoadingCandidates] = useState(true);
-  const [selectedCandidate, setSelectedCandidate] = useState<any | null>(null);
+  const [selected, setSelected] = useState<PeerTestCandidate | null>(null);
 
-  // Active testing session state
-  const [questions, setQuestions] = useState<TestQuestion[]>([]);
+  const [attemptId, setAttemptId] = useState<string | null>(null);
+  const [questions, setQuestions] = useState<PeerTestQuestion[]>([]);
+  // Men: last quarter the questions cover (less than range_end for a partially recited range)
+  const [coveredRangeEnd, setCoveredRangeEnd] = useState<number | null>(null);
   const [loadingQuestions, setLoadingQuestions] = useState(false);
-  const [questionErrors, setQuestionErrors] = useState<number[]>([]);
+  const [errors, setErrors] = useState<number[]>([]);
   const [questionNotes, setQuestionNotes] = useState<string[]>([]);
   const [overallNotes, setOverallNotes] = useState('');
-  const [expandedQuestionIdx, setExpandedQuestionIdx] = useState<number | null>(0);
+  const [expanded, setExpanded] = useState<number | null>(0);
+  // Examiner's own tracking of asked questions (local only, never submitted).
+  // A done question stays done; "revealed" only lifts the dimming while it is open.
+  const [doneQuestions, setDoneQuestions] = useState<boolean[]>([]);
+  const [revealedQuestions, setRevealedQuestions] = useState<boolean[]>([]);
   const [submitting, setSubmitting] = useState(false);
-  const [submitError, setSubmitError] = useState('');
-  const [submittedAttempt, setSubmittedAttempt] = useState<TestAttempt | null>(null);
+  const [errorMsg, setErrorMsg] = useState('');
+  const [result, setResult] = useState<PeerTestAttempt | null>(null);
 
-  useEffect(() => {
-    if (isOpen && activeTest) {
-      loadCandidates();
-      setSelectedCandidate(null);
-      setQuestions([]);
-      setSubmittedAttempt(null);
-      setSubmitError('');
-    }
-  }, [isOpen, activeTest]);
+  const resetSession = () => {
+    setSelected(null);
+    setAttemptId(null);
+    setQuestions([]);
+    setCoveredRangeEnd(null);
+    setErrors([]);
+    setQuestionNotes([]);
+    setOverallNotes('');
+    setExpanded(0);
+    setDoneQuestions([]);
+    setRevealedQuestions([]);
+  };
 
   const loadCandidates = async () => {
     setLoadingCandidates(true);
+    setErrorMsg('');
     try {
-      const res = await api.getEligibleCandidates(activeTest.id);
-      // Filter out current user from candidate list (peer testing: you cannot test yourself)
-      const list = (res.candidates || []).filter((c) => c.id !== currentUser.id);
-      setCandidates(list);
+      const res = await api.peerTestCandidates(test.id);
+      setCandidates(res.candidates.filter((c) => c.id !== currentUser.id));
     } catch (err: any) {
-      console.error(err);
+      setErrorMsg(err?.message || 'تعذر تحميل قائمة الزملاء');
     } finally {
       setLoadingCandidates(false);
     }
   };
 
-  const handleStartTesting = async (candidate: any) => {
-    setSelectedCandidate(candidate);
+  useEffect(() => {
+    if (isOpen) {
+      resetSession();
+      setResult(null);
+      setSubmitting(false);
+      loadCandidates();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isOpen, test.id]);
+
+  if (!isOpen) return null;
+
+  const handleStart = async (candidate: PeerTestCandidate) => {
+    setSelected(candidate);
     setLoadingQuestions(true);
-    setSubmitError('');
+    setErrorMsg('');
     try {
-      const res = await api.generateTestQuestions(activeTest.id, candidate.id);
-      setQuestions(res.questions || []);
-      setQuestionErrors(new Array(res.questions.length).fill(0));
+      const res = await api.peerTestStart(test.id, candidate.id);
+      setAttemptId(res.attempt_id);
+      setQuestions(res.questions);
+      setCoveredRangeEnd(res.covers_full_range ? null : res.effective_range_end);
+      setErrors(new Array(res.questions.length).fill(0));
       setQuestionNotes(new Array(res.questions.length).fill(''));
-      setExpandedQuestionIdx(0);
+      setDoneQuestions(new Array(res.questions.length).fill(false));
+      setRevealedQuestions(new Array(res.questions.length).fill(false));
+      setExpanded(0);
     } catch (err: any) {
-      setSubmitError(err?.message || 'تعذر توليد أسئلة الاختبار');
+      setErrorMsg(err?.message || 'تعذر بدء الاختبار');
+      setSelected(null);
     } finally {
       setLoadingQuestions(false);
     }
   };
 
-  const handleUpdateErrorCount = (qIdx: number, delta: number) => {
-    setQuestionErrors((prev) => {
+  const changeErrors = (idx: number, delta: number) => {
+    setErrors((prev) => {
       const next = [...prev];
-      next[qIdx] = Math.max(0, (next[qIdx] || 0) + delta);
+      next[idx] = Math.min(99, Math.max(0, (next[idx] || 0) + delta));
       return next;
     });
   };
 
-  const totalErrors = questionErrors.reduce((sum, e) => sum + (e || 0), 0);
-  const hasMax = activeTest.has_max_errors && typeof activeTest.max_errors_allowed === 'number';
-  const wouldPass = !hasMax || totalErrors <= (activeTest.max_errors_allowed ?? 0);
+  const setFlag = (setter: React.Dispatch<React.SetStateAction<boolean[]>>, idx: number, value: boolean) => {
+    setter((prev) => {
+      const next = [...prev];
+      next[idx] = value;
+      return next;
+    });
+  };
 
-  const handleSubmitAttempt = async () => {
-    if (!selectedCandidate) return;
+  // First press marks the question done and dims it. There is no undo.
+  const markQuestionDone = (idx: number) => {
+    setFlag(setDoneQuestions, idx, true);
+    setFlag(setRevealedQuestions, idx, false);
+  };
+
+  const doneCount = doneQuestions.filter(Boolean).length;
+  // The examiner must mark every question asked before submitting (UI workflow only).
+  const allQuestionsDone = questions.length > 0 && doneCount === questions.length;
+  const remainingCount = questions.length - doneCount;
+  const showProgress = Boolean(selected) && !result && !loadingQuestions && questions.length > 0;
+
+  const totalErrors = errors.reduce((sum, e) => sum + (e || 0), 0);
+  const hasMax = test.max_errors !== null;
+  const wouldPass = !hasMax || totalErrors <= (test.max_errors ?? 0);
+
+  const handleSubmit = async () => {
+    if (!attemptId || submitting || !allQuestionsDone) return;
     setSubmitting(true);
-    setSubmitError('');
-
+    setErrorMsg('');
     try {
-      const questionsResults = questions.map((q, idx) => ({
-        start_surah: q.start_surah,
-        start_ayah: q.start_ayah,
-        end_surah: q.end_surah,
-        end_ayah: q.end_ayah,
-        errors_count: questionErrors[idx] || 0,
-        notes: questionNotes[idx] ? questionNotes[idx].trim().slice(0, 300) : undefined,
-      }));
-
-      const payload = {
-        test_id: activeTest.id,
-        candidate_id: selectedCandidate.id,
-        questions_results: questionsResults,
-        notes: overallNotes ? overallNotes.trim().slice(0, 300) : undefined,
-      };
-
-      const res = await api.recordTestAttempt(payload);
-      setSubmittedAttempt(res.attempt);
+      const res = await api.peerTestSubmit({
+        attempt_id: attemptId,
+        errors,
+        question_notes: questionNotes.map((n) => n.trim().slice(0, 300)),
+        notes: overallNotes.trim() ? overallNotes.trim().slice(0, 300) : undefined,
+      });
+      setResult(res.attempt);
       onCompleted();
     } catch (err: any) {
-      setSubmitError(err?.message || 'فشل إرسال نتيجة الاختبار');
+      setErrorMsg(err?.message || 'تعذر اعتماد نتيجة الاختبار');
     } finally {
       setSubmitting(false);
     }
   };
 
-  if (!isOpen) return null;
+  const handleClose = () => {
+    if (submitting) return;
+    onClose();
+  };
 
   return (
-    <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto">
-      <div className="bg-white rounded-3xl border border-stone-200 max-w-2xl w-full p-6 sm:p-7 shadow-2xl space-y-6 my-8 animate-in fade-in zoom-in-95 max-h-[90vh] flex flex-col">
-        {/* Modal Header */}
+    <div className="fixed inset-0 z-50 bg-stone-900/60 backdrop-blur-xs flex items-center justify-center p-4 overflow-y-auto animate-in fade-in duration-200">
+      <div className="bg-white rounded-3xl border border-stone-200 max-w-2xl w-full p-6 shadow-2xl space-y-5 my-8 max-h-[90vh] flex flex-col text-stone-900">
+        {/* Header */}
         <div className="flex items-start justify-between gap-4 border-b border-stone-100 pb-4 shrink-0">
-          <div className="space-y-1">
+          <div className="space-y-1 min-w-0">
             <div className="flex items-center gap-2">
-              <span className="p-2 rounded-xl bg-amber-100 text-amber-800">
+              <span className="p-2 rounded-xl bg-amber-50 text-amber-700 shrink-0">
                 <Award className="w-5 h-5" />
               </span>
-              <h3 className="font-bold text-lg text-stone-900">
-                اختبار الزملاء (Peer Testing)
-              </h3>
+              <h3 className="font-bold text-lg text-stone-900">الاختبارات المتبادلة (اختبار الزملاء)</h3>
             </div>
             <p className="text-xs text-stone-500">
-              نطاق الاختبار: <strong>من الربع {activeTest.range_start} إلى الربع {activeTest.range_end}</strong> • {activeTest.questions_count} أسئلة ({activeTest.lines_per_question} أسطر لكل سؤال)
+              نطاق الاختبار: <strong>من الربع {test.range_start} إلى الربع {test.range_end}</strong> • {test.questions_count}{' '}
+              أسئلة ({test.lines_per_question} أسطر لكل سؤال)
             </p>
           </div>
-
-          <button
-            onClick={onClose}
-            className="p-2 text-stone-400 hover:text-stone-700 rounded-xl hover:bg-stone-100 transition"
-          >
-            ✕
-          </button>
+          <div className="flex items-center gap-2 shrink-0">
+            {showProgress && (
+              <span
+                id="peer-test-progress"
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-bold border whitespace-nowrap ${
+                  allQuestionsDone
+                    ? 'bg-emerald-50 text-emerald-800 border-emerald-300'
+                    : 'bg-amber-50 text-amber-800 border-amber-200'
+                }`}
+              >
+                {allQuestionsDone && <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />}
+                <span>
+                  تم سؤال {doneCount} من {questions.length}
+                </span>
+                {!allQuestionsDone && (
+                  <span className="hidden sm:inline font-medium text-amber-700/80">· متبقي {remainingCount}</span>
+                )}
+              </span>
+            )}
+            <button onClick={handleClose} className="p-2 text-stone-400 hover:text-stone-700 rounded-xl hover:bg-stone-100 transition">
+              <X className="w-5 h-5" />
+            </button>
+          </div>
         </div>
 
-        {/* Modal Body */}
-        <div className="overflow-y-auto flex-1 space-y-5 pr-1">
-          {submitError && (
+        {/* Body */}
+        <div className="overflow-y-auto flex-1 space-y-5 pl-1">
+          {errorMsg && (
             <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-800 text-xs font-bold flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-rose-600 shrink-0" />
-              <span>{submitError}</span>
+              <span>{errorMsg}</span>
             </div>
           )}
 
-          {submittedAttempt ? (
-            /* Result Screen */
+          {result ? (
             <div className="py-8 text-center space-y-5">
               <div
                 className={`w-16 h-16 rounded-full mx-auto flex items-center justify-center ${
-                  submittedAttempt.passed
-                    ? 'bg-emerald-100 text-emerald-700'
-                    : 'bg-rose-100 text-rose-700'
+                  result.status === 'passed' ? 'bg-green-100 text-green-700' : 'bg-rose-100 text-rose-700'
                 }`}
               >
-                {submittedAttempt.passed ? (
-                  <CheckCircle2 className="w-10 h-10" />
-                ) : (
-                  <XCircle className="w-10 h-10" />
-                )}
+                {result.status === 'passed' ? <CheckCircle2 className="w-10 h-10" /> : <XCircle className="w-10 h-10" />}
               </div>
-
               <div className="space-y-1">
                 <h4 className="text-xl font-bold text-stone-900">
-                  {submittedAttempt.passed
-                    ? 'تم اجتياز الاختبار بنجاح وبإتقان مبارك!'
-                    : 'تم تسجيل نتيجة الاختبار (لم يجتز العضو)'}
+                  {result.status === 'passed' ? 'اجتاز الاختبار بنجاح وإتقان، بارك الله فيه!' : 'تم تسجيل النتيجة (لم يجتز الاختبار)'}
                 </h4>
                 <p className="text-xs text-stone-500">
-                  العضو المُختبَر: <strong>{submittedAttempt.candidate_name}</strong> • تم الاختبار بواسطة: <strong>{currentUser.name}</strong>
+                  العضو المُختبَر: <strong>{result.candidate_name_snapshot}</strong> • المُختبِر: <strong>{currentUser.name}</strong>
                 </p>
               </div>
-
               <div className="inline-flex items-center gap-4 p-4 rounded-2xl bg-stone-50 border border-stone-200 text-xs">
                 <div>
                   <span className="text-stone-400 block text-[11px]">مجموع الأخطاء</span>
-                  <span className="text-lg font-bold font-mono text-stone-800">
-                    {submittedAttempt.total_errors}
-                  </span>
+                  <span className="text-lg font-bold font-mono text-stone-800">{result.total_errors}</span>
                 </div>
-                {hasMax && (
+                {result.max_errors_snapshot !== null && (
                   <div>
                     <span className="text-stone-400 block text-[11px]">الحد الأقصى المسموح</span>
-                    <span className="text-lg font-bold font-mono text-stone-800">
-                      {activeTest.max_errors_allowed}
-                    </span>
+                    <span className="text-lg font-bold font-mono text-stone-800">{result.max_errors_snapshot}</span>
                   </div>
                 )}
                 <div>
                   <span className="text-stone-400 block text-[11px]">النتيجة الرسمية</span>
-                  <span
-                    className={`font-bold text-xs ${
-                      submittedAttempt.passed ? 'text-emerald-700' : 'text-rose-700'
-                    }`}
-                  >
-                    {submittedAttempt.passed ? 'ناجح ومعتمد' : 'يحتاج استدراك'}
+                  <span className={`font-bold text-xs ${result.status === 'passed' ? 'text-green-700' : 'text-rose-700'}`}>
+                    {result.status === 'passed' ? 'ناجحة ومعتمدة' : 'تحتاج استدراكًا'}
                   </span>
                 </div>
               </div>
-
-              <div className="pt-4">
+              <div className="pt-2">
                 <button
                   onClick={onClose}
                   className="px-6 py-2.5 rounded-xl bg-stone-800 hover:bg-stone-900 text-white font-bold text-xs shadow-xs"
@@ -236,80 +249,65 @@ export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
                 </button>
               </div>
             </div>
-          ) : !selectedCandidate ? (
-            /* STEP 1: Candidate Selection */
+          ) : !selected ? (
+            /* Step 1: choose a brother */
             <div className="space-y-4">
-              <TestConditionsCard test={activeTest} />
+              <TestConditionsCard test={test} />
 
               <div>
                 <h4 className="font-bold text-sm text-stone-900 flex items-center gap-2">
-                  <Users className="w-4 h-4 text-emerald-700" />
+                  <Users className="w-4 h-4 text-amber-600" />
                   <span>اختر الزميل الذي ترغب في اختباره:</span>
                 </h4>
-                <p className="text-xs text-stone-500 mt-0.5">
-                  تظهر قائمة الزملاء المستوفين لشروط الاختبار المسبقة المحددة من قِبَل المشرف.
-                </p>
+                <p className="text-xs text-stone-500 mt-0.5">يظهر أعضاء دفعتك مع بيان استيفاء كل منهم لشروط الاختبار.</p>
               </div>
 
               {loadingCandidates ? (
-                <div className="py-12 text-center text-xs text-stone-400">
-                  جاري فحص استيفاء شروط الزملاء...
-                </div>
+                <div className="py-12 text-center text-xs text-stone-400">جاري فحص استيفاء الزملاء للشروط...</div>
               ) : candidates.length === 0 ? (
                 <div className="p-8 text-center space-y-2 rounded-2xl bg-stone-50 border border-stone-200">
                   <Users className="w-8 h-8 text-stone-300 mx-auto" />
-                  <p className="text-xs text-stone-600 font-bold">
-                    لا يوجد زملاء آخرون مسجلون حاليًا في المقرأة.
-                  </p>
+                  <p className="text-xs text-stone-600 font-bold">لا يوجد زملاء آخرون نشطون في الدفعة حاليًا.</p>
                 </div>
               ) : (
                 <div className="divide-y divide-stone-100 border border-stone-200 rounded-2xl overflow-hidden">
-                  {candidates.map((cand) => (
+                  {candidates.map((c) => (
                     <div
-                      key={cand.id}
+                      key={c.id}
                       className={`p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition ${
-                        cand.is_eligible ? 'bg-white hover:bg-stone-50/80' : 'bg-stone-50/60 opacity-75'
+                        c.is_eligible ? 'bg-white hover:bg-amber-50/40' : 'bg-stone-50/60'
                       }`}
                     >
-                      <div className="space-y-1">
-                        <div className="flex items-center gap-2">
-                          <span className="font-bold text-stone-900 text-sm">{cand.name}</span>
-                          {cand.has_passed && (
-                            <span className="px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 text-[10px] font-bold">
+                      <div className="space-y-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-bold text-stone-900 text-sm">{c.name}</span>
+                          {c.has_passed && (
+                            <span className="px-2 py-0.5 rounded-full bg-green-50 text-green-800 border border-green-200 text-[10px] font-bold">
                               سبق له الاجتياز
                             </span>
                           )}
                         </div>
-
-                        {cand.is_eligible && cand.covers_full_range === false && cand.effective_range_end && (
-                          <p className="text-[11px] text-amber-700 font-medium">
-                            سيُختبر حتى الربع {cand.effective_range_end} فقط
-                          </p>
-                        )}
-
-                        {!cand.is_eligible && cand.ineligibility_reasons?.length > 0 && (
-                          <div className="space-y-0.5">
-                            {cand.ineligibility_reasons.map((r: string, i: number) => (
-                              <p key={i} className="text-[11px] text-amber-700 flex items-center gap-1 font-medium">
-                                <span>• {r}</span>
+                        {!c.is_eligible &&
+                          c.reasons
+                            .filter((r) => !(c.has_passed && r.startsWith('سبق له')))
+                            .map((r, i) => (
+                              <p key={i} className="text-[11px] text-amber-800 font-medium">
+                                • {r}
                               </p>
                             ))}
-                          </div>
-                        )}
                       </div>
-
-                      <div>
-                        {cand.is_eligible ? (
+                      <div className="shrink-0">
+                        {c.is_eligible ? (
                           <button
-                            onClick={() => handleStartTesting(cand)}
-                            className="w-full sm:w-auto px-4 py-2 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs transition shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
+                            onClick={() => handleStart(c)}
+                            className="w-full sm:w-auto px-4 py-2 rounded-xl bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-700 hover:to-amber-600 text-white font-bold text-xs transition shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
                           >
                             <span>بدء اختبار الزميل</span>
                             <ArrowRight className="w-3.5 h-3.5 rotate-180" />
                           </button>
                         ) : (
-                          <span className="text-[11px] text-stone-400 font-medium px-2 py-1 bg-stone-100 rounded-lg inline-block">
-                            غير مستوفٍ للشروط
+                          <span className="text-[11px] text-stone-500 font-medium px-2 py-1 bg-stone-100 rounded-lg inline-block">
+                            {c.has_passed ? 'سبق له الاجتياز' : 'غير مستوفٍ للشروط'}
                           </span>
                         )}
                       </div>
@@ -319,133 +317,139 @@ export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
               )}
             </div>
           ) : (
-            /* STEP 2: Questions & Error Tracking */
+            /* Step 2: questions and error counting */
             <div className="space-y-5">
-              <TestConditionsCard
-                test={activeTest}
-                effectiveRangeEnd={selectedCandidate?.effective_range_end}
-                isPartial={selectedCandidate?.covers_full_range === false}
-                candidateName={selectedCandidate?.name}
-              />
-
-              <div className="p-3.5 rounded-2xl bg-emerald-50/70 border border-emerald-200/80 flex items-center justify-between gap-3 text-xs">
+              <div className="p-3.5 rounded-2xl bg-amber-50/70 border border-amber-100 flex items-center justify-between gap-3 text-xs">
                 <div>
-                  <span className="text-emerald-900/70 block text-[11px]">أنت تختبر الآن زميلك:</span>
-                  <span className="font-bold text-emerald-950 text-sm">{selectedCandidate.name}</span>
+                  <span className="text-amber-900/70 block text-[11px]">أنت تختبر الآن زميلك:</span>
+                  <span className="font-bold text-amber-950 text-sm">{selected.name}</span>
+                  {coveredRangeEnd !== null && (
+                    <span className="block text-[11px] text-amber-800 mt-0.5">
+                      الأسئلة من الأرباع {test.range_start} إلى {coveredRangeEnd} فقط (ما أتمّ تسميعه من النطاق)
+                    </span>
+                  )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => setSelectedCandidate(null)}
-                  className="text-[11px] text-stone-500 hover:text-stone-800 underline font-medium"
-                >
-                  تغيير الزميل
-                </button>
+                {!submitting && (
+                  <button
+                    type="button"
+                    onClick={resetSession}
+                    className="text-[11px] text-stone-500 hover:text-stone-800 underline font-medium"
+                  >
+                    تغيير الزميل
+                  </button>
+                )}
               </div>
 
               {loadingQuestions ? (
-                <div className="py-12 text-center text-xs text-stone-400">
-                  جاري توليد أسئلة الاختبار من مصحف المدينة...
-                </div>
+                <div className="py-12 text-center text-xs text-stone-400">جاري توليد أسئلة الاختبار من مصحف المدينة...</div>
               ) : (
                 <div className="space-y-4">
                   <div className="flex items-center justify-between text-xs">
-                    <span className="font-bold text-stone-700">
-                      الأسئلة المولدة ({questions.length} أسئلة):
-                    </span>
+                    <span className="font-bold text-stone-700">الأسئلة المولّدة ({questions.length} أسئلة):</span>
                     <span className="text-stone-500 text-[11px]">
-                      مجموع الأخطاء المسجلة حتى الآن: <strong className="font-mono text-stone-900">{totalErrors}</strong>
+                      مجموع الأخطاء حتى الآن: <strong className="font-mono text-stone-900">{totalErrors}</strong>
                     </span>
                   </div>
 
                   {questions.map((q, idx) => {
-                    const isExpanded = expandedQuestionIdx === idx;
-                    const errCount = questionErrors[idx] || 0;
-
+                    const isOpen = expanded === idx;
+                    const count = errors[idx] || 0;
+                    const level = PEER_LEVEL_STYLES[q.difficulty_level];
+                    const isDone = Boolean(doneQuestions[idx]);
+                    // Done cards are dimmed unless the examiner has reopened one to look at it again.
+                    const isDimmed = isDone && !(isOpen && revealedQuestions[idx]);
                     return (
                       <div
-                        key={idx}
-                        className="rounded-2xl border border-stone-200 bg-white overflow-hidden shadow-2xs"
+                        key={q.question_number}
+                        // Any click on a done card lifts its dimming; the click itself still goes through.
+                        onClickCapture={() => {
+                          if (isDone && !revealedQuestions[idx]) setFlag(setRevealedQuestions, idx, true);
+                        }}
+                        className={`rounded-2xl border overflow-hidden shadow-2xs transition ${
+                          isDimmed ? 'border-emerald-100 bg-stone-50/60' : isDone ? 'border-emerald-200 bg-white' : 'border-stone-200 bg-white'
+                        }`}
                       >
-                        {/* Question Header */}
                         <div
-                          onClick={() => setExpandedQuestionIdx(isExpanded ? null : idx)}
-                          className="p-3.5 bg-stone-50 hover:bg-stone-100/80 cursor-pointer flex items-center justify-between gap-3 text-xs select-none"
+                          onClick={() => setExpanded(isOpen ? null : idx)}
+                          className={`p-3.5 cursor-pointer flex items-center justify-between gap-3 text-xs select-none ${
+                            isDimmed ? 'bg-stone-50/40 hover:bg-stone-100/60' : 'bg-stone-50 hover:bg-stone-100/80'
+                          }`}
                         >
-                          <div className="flex items-center gap-2.5">
-                            <span className="w-6 h-6 rounded-full bg-emerald-800 text-amber-200 text-xs font-bold flex items-center justify-center shrink-0">
+                          <div className="flex items-center gap-2.5 min-w-0">
+                            <span
+                              className={`w-6 h-6 rounded-full text-white text-xs font-bold flex items-center justify-center shrink-0 ${
+                                isDone ? 'bg-emerald-600' : 'bg-amber-600'
+                              }`}
+                            >
                               {q.question_number}
                             </span>
-                            <div className="space-y-0.5">
+                            <div className={`space-y-0.5 min-w-0 transition-opacity ${isDimmed ? 'opacity-60' : ''}`}>
                               <div className="flex items-center gap-2 flex-wrap">
                                 <span className="font-bold text-stone-900">
                                   السؤال {q.question_number}: {q.start_surah_name} [آية {q.start_ayah}] ⟵ {q.end_surah_name} [آية {q.end_ayah}]
                                 </span>
-                                {q.difficulty_level && (
-                                  <span
-                                    className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${
-                                      q.difficulty_level === 'easy'
-                                        ? 'bg-emerald-100 text-emerald-800'
-                                        : q.difficulty_level === 'hard'
-                                        ? 'bg-rose-100 text-rose-800'
-                                        : 'bg-amber-100 text-amber-800'
-                                    }`}
-                                  >
-                                    {q.difficulty_level === 'easy'
-                                      ? 'سهل'
-                                      : q.difficulty_level === 'hard'
-                                      ? 'صعب'
-                                      : 'متوسط'}
-                                  </span>
+                                {level && (
+                                  <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold ${level.className}`}>{level.label}</span>
                                 )}
-                                {q.actual_lines !== undefined && (
-                                  <span className="text-[10px] text-stone-600 bg-stone-200/70 px-1.5 py-0.5 rounded-md font-mono">
-                                    {q.actual_lines} أسطر
-                                  </span>
-                                )}
+                                <span className="text-[10px] text-stone-600 bg-stone-200/70 px-1.5 py-0.5 rounded-md font-mono">
+                                  {q.actual_lines} أسطر
+                                </span>
                               </div>
                               <span className="text-[11px] text-stone-500 block">
                                 الصفحة {q.start_page} (سطر {q.start_line}) إلى الصفحة {q.end_page} (سطر {q.end_line})
                               </span>
                             </div>
                           </div>
-
-                          <div className="flex items-center gap-3">
+                          <div className="flex items-center gap-2 shrink-0">
+                            {isDone ? (
+                              <span className="inline-flex items-center gap-1 px-2.5 py-0.5 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
+                                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
+                                تم السؤال
+                              </span>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  markQuestionDone(idx);
+                                }}
+                                className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-[11px] font-bold text-white bg-amber-600 hover:bg-amber-700 shadow-xs ring-1 ring-amber-700/20 transition cursor-pointer"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                تم السؤال
+                              </button>
+                            )}
                             <span
                               className={`px-2 py-0.5 rounded-full text-[11px] font-bold ${
-                                errCount === 0
-                                  ? 'bg-emerald-100 text-emerald-800'
-                                  : 'bg-rose-100 text-rose-800'
+                                count === 0 ? 'bg-green-50 text-green-700' : 'bg-rose-50 text-rose-700'
                               }`}
                             >
-                              {errCount} أخطاء
+                              {count} أخطاء
                             </span>
-                            {isExpanded ? (
-                              <ChevronUp className="w-4 h-4 text-stone-400" />
-                            ) : (
-                              <ChevronDown className="w-4 h-4 text-stone-400" />
-                            )}
+                            {isOpen ? <ChevronUp className="w-4 h-4 text-stone-400" /> : <ChevronDown className="w-4 h-4 text-stone-400" />}
                           </div>
                         </div>
 
-                        {/* Question Content */}
-                        {isExpanded && (
-                          <div className="p-4 space-y-4 border-t border-stone-100 bg-white">
-                            <div className="space-y-2 p-3.5 rounded-xl bg-amber-50/50 border border-amber-200/60">
+                        {isOpen && (
+                          <div
+                            className={`p-4 space-y-4 border-t border-stone-100 transition-opacity ${
+                              isDimmed ? 'bg-stone-50/40 opacity-60' : 'bg-white'
+                            }`}
+                          >
+                            <div className="space-y-2 p-3.5 rounded-xl bg-amber-50/50 border border-amber-100">
                               <p className="text-[11px] text-amber-900 font-bold">
                                 اطلب من الزميل التلاوة من بداية هذه الآية حتى نهاية الآية المحددة:
                               </p>
-
                               <div className="space-y-1 text-xs text-stone-800">
                                 <div>
-                                  <span className="text-emerald-800 font-bold ml-1.5">ابدأ من:</span>
+                                  <span className="text-amber-700 font-bold ml-1.5">ابدأ من:</span>
                                   <span className="font-quran text-sm text-stone-900">{q.start_text}</span>
                                   <span className="text-[11px] text-stone-400 mr-2">
                                     ({q.start_surah_name} - الآية {q.start_ayah})
                                   </span>
                                 </div>
-
                                 <div className="pt-1 border-t border-amber-100">
-                                  <span className="text-emerald-800 font-bold ml-1.5">توقف عند نهاية:</span>
+                                  <span className="text-amber-700 font-bold ml-1.5">توقف عند نهاية:</span>
                                   <span className="font-quran text-sm text-stone-900">{q.end_text}</span>
                                   <span className="text-[11px] text-stone-400 mr-2">
                                     ({q.end_surah_name} - الآية {q.end_ayah})
@@ -454,62 +458,53 @@ export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
                               </div>
                             </div>
 
-                            {/* Error Counter for this question */}
                             <div className="flex items-center justify-between gap-4 pt-1">
-                              <span className="text-xs font-bold text-stone-700">
-                                تسجيل أخطاء هذا السؤال:
-                              </span>
-
+                              <span className="text-xs font-bold text-stone-700">تسجيل أخطاء هذا السؤال:</span>
                               <div className="flex items-center gap-2">
                                 <button
                                   type="button"
-                                  onClick={() => handleUpdateErrorCount(idx, -1)}
-                                  disabled={errCount <= 0}
+                                  onClick={() => changeErrors(idx, -1)}
+                                  disabled={count <= 0 || submitting}
                                   className="w-8 h-8 rounded-xl bg-stone-100 hover:bg-stone-200 text-stone-800 font-bold text-sm flex items-center justify-center disabled:opacity-30"
                                 >
                                   -
                                 </button>
-                                <span className="w-8 text-center font-bold font-mono text-base text-stone-900">
-                                  {errCount}
-                                </span>
+                                <span className="w-8 text-center font-bold font-mono text-base text-stone-900">{count}</span>
                                 <button
                                   type="button"
-                                  onClick={() => handleUpdateErrorCount(idx, 1)}
-                                  className="w-8 h-8 rounded-xl bg-rose-100 hover:bg-rose-200 text-rose-800 font-bold text-sm flex items-center justify-center"
+                                  onClick={() => changeErrors(idx, 1)}
+                                  disabled={submitting}
+                                  className="w-8 h-8 rounded-xl bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-sm flex items-center justify-center disabled:opacity-30"
                                 >
                                   +
                                 </button>
                               </div>
                             </div>
 
-                            <div>
-                              <input
-                                type="text"
-                                placeholder="ملاحظة حول أداء الزميل في هذا السؤال (اختياري)..."
-                                value={questionNotes[idx] || ''}
-                                onChange={(e) => {
-                                  const val = e.target.value;
-                                  setQuestionNotes((prev) => {
-                                    const next = [...prev];
-                                    next[idx] = val;
-                                    return next;
-                                  });
-                                }}
-                                className="w-full px-3 py-1.5 text-xs border border-stone-200 rounded-xl bg-stone-50 outline-hidden"
-                              />
-                            </div>
+                            <input
+                              type="text"
+                              placeholder="ملاحظة حول أداء الزميل في هذا السؤال (اختياري)..."
+                              value={questionNotes[idx] || ''}
+                              maxLength={300}
+                              onChange={(e) => {
+                                const value = e.target.value;
+                                setQuestionNotes((prev) => {
+                                  const next = [...prev];
+                                  next[idx] = value;
+                                  return next;
+                                });
+                              }}
+                              className="w-full px-3 py-1.5 text-xs border border-stone-200 rounded-xl bg-stone-50 outline-hidden"
+                            />
                           </div>
                         )}
                       </div>
                     );
                   })}
 
-                  {/* Summary & Overall notes */}
                   <div className="p-4 rounded-2xl bg-stone-50 border border-stone-200 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <span className="text-xs font-bold text-stone-800">
-                        النتيجة الإجمالية المحتسبة:
-                      </span>
+                    <div className="flex items-center justify-between flex-wrap gap-2">
+                      <span className="text-xs font-bold text-stone-800">النتيجة الإجمالية المحتسبة:</span>
                       <div className="flex items-center gap-3">
                         <span className="text-xs font-bold text-stone-600">
                           إجمالي الأخطاء: <strong className="font-mono text-stone-900">{totalErrors}</strong>
@@ -517,9 +512,7 @@ export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
                         {hasMax && (
                           <span
                             className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
-                              wouldPass
-                                ? 'bg-emerald-100 text-emerald-800'
-                                : 'bg-rose-100 text-rose-800'
+                              wouldPass ? 'bg-green-50 text-green-800' : 'bg-rose-50 text-rose-800'
                             }`}
                           >
                             {wouldPass ? 'مستوفٍ للاجتياز' : 'تجاوز حد الأخطاء'}
@@ -527,9 +520,9 @@ export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
                         )}
                       </div>
                     </div>
-
                     <textarea
                       rows={2}
+                      maxLength={300}
                       placeholder="ملاحظات ختامية للزميل حول الاختبار كله (اختياري)..."
                       value={overallNotes}
                       onChange={(e) => setOverallNotes(e.target.value)}
@@ -542,26 +535,41 @@ export const PeerTestingModal: React.FC<PeerTestingModalProps> = ({
           )}
         </div>
 
-        {/* Modal Footer */}
-        {selectedCandidate && !submittedAttempt && (
-          <div className="border-t border-stone-100 pt-4 flex items-center justify-between gap-3 shrink-0">
-            <button
-              type="button"
-              onClick={() => setSelectedCandidate(null)}
-              className="px-4 py-2 text-stone-600 hover:bg-stone-100 rounded-xl text-xs font-bold"
-            >
-              رجوع لاختيار زميل آخر
-            </button>
-
-            <button
-              type="button"
-              onClick={handleSubmitAttempt}
-              disabled={submitting || loadingQuestions}
-              className="px-6 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs shadow-xs transition flex items-center gap-2 cursor-pointer disabled:opacity-50"
-            >
-              <CheckCircle2 className="w-4 h-4 text-amber-300" />
-              <span>{submitting ? 'جاري الإرسال...' : 'إرسال واعتماد نتيجة الاختبار'}</span>
-            </button>
+        {/* Footer */}
+        {selected && !result && (
+          <div className="border-t border-stone-100 pt-4 space-y-3 shrink-0">
+            {showProgress && !allQuestionsDone && (
+              <p
+                id="peer-test-submit-warning"
+                className="p-2.5 rounded-xl bg-amber-50 border border-amber-200 text-[11px] font-bold text-amber-800 flex items-center gap-1.5"
+              >
+                <AlertCircle className="w-3.5 h-3.5 shrink-0 text-amber-600" />
+                <span>يجب إنهاء جميع الأسئلة قبل إرسال النتيجة (متبقي {remainingCount})</span>
+              </p>
+            )}
+            <div className="flex items-center justify-between gap-3">
+              <button
+                type="button"
+                onClick={resetSession}
+                disabled={submitting}
+                className="px-4 py-2 text-stone-600 hover:bg-stone-100 rounded-xl text-xs font-bold disabled:opacity-50"
+              >
+                رجوع لاختيار زميل آخر
+              </button>
+              <button
+                type="button"
+                onClick={handleSubmit}
+                disabled={submitting || loadingQuestions || !attemptId || !allQuestionsDone}
+                className={`px-6 py-2.5 rounded-xl font-bold text-xs transition flex items-center gap-2 ${
+                  allQuestionsDone
+                    ? 'bg-gradient-to-r from-amber-600 to-amber-500 hover:from-amber-700 hover:to-amber-600 text-white shadow-xs cursor-pointer disabled:opacity-50'
+                    : 'bg-stone-200 text-stone-500 border border-stone-300 cursor-not-allowed'
+                }`}
+              >
+                <CheckCircle2 className="w-4 h-4" />
+                <span>{submitting ? 'جاري الإرسال...' : 'إرسال واعتماد نتيجة الاختبار'}</span>
+              </button>
+            </div>
           </div>
         )}
       </div>

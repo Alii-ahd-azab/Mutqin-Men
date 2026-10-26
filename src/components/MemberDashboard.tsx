@@ -1,5 +1,9 @@
 import React, { useState, useMemo } from 'react';
-import { User, CycleInfo, RecitationLog, RevisionLog, GroupSettings, RestDay, TestDefinition, TestAttempt } from '../types';
+import { User, CycleInfo, RecitationLog, RevisionLog, GroupSettings, RestDay, PeerTest, PeerTestAttempt } from '../types';
+import { isPeerTestLive } from '../lib/peerTests';
+import { PeerTestCard } from './PeerTestCard';
+import { PeerTestingModal } from './PeerTestingModal';
+import { PersonalTestModal } from './PersonalTestModal';
 import { getQuarterInfo, getQuarterBounds, getRangeBounds } from '../data/quranData';
 import {
   calculateMemberRequiredQuarter,
@@ -9,6 +13,8 @@ import {
   formatArabicDateWithDayName,
   getPreLaunchMessage,
   calculateCycleInfo,
+  joinedOnDateFromTimestamp,
+  SEVERE_DELAY_THRESHOLD,
 } from '../lib/calculations';
 import {
   BookOpen,
@@ -29,15 +35,11 @@ import {
   Compass,
   Lock,
   Headphones,
-  Award,
 } from 'lucide-react';
 import { RecitationModal, RevisionModal } from './Modals';
 import { MemberHistoryView } from './MemberHistoryView';
 import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
 import { DailyThoughtCard } from './DailyThoughtCard';
-import { PeerTestingModal } from './PeerTestingModal';
-import { PersonalTestModal } from './PersonalTestModal';
-import { TestConditionsCard } from './TestConditionsCard';
 
 interface RevisionDayItem {
   date: string;
@@ -52,23 +54,28 @@ interface RevisionDayItem {
   surahEnd: string;
   bounds: ReturnType<typeof getRangeBounds>;
   cycleInfoForDay: CycleInfo;
+  // Rest / pause day with nothing owed: no new revision obligation today
+  isNoObligationDay?: boolean;
 }
 
 interface MemberDashboardProps {
   currentUser: User;
+  batchName?: string;
   cycleInfo: CycleInfo;
   settings?: GroupSettings;
   restDays?: RestDay[];
   allMembers: User[];
   recitations: RecitationLog[];
   revisions: RevisionLog[];
-  activeTest?: TestDefinition | null;
-  testAttempts?: TestAttempt[];
+  // Live peer test(s) of his batch and his own peer-test attempts
+  peerTests?: PeerTest[];
+  peerTestAttempts?: PeerTestAttempt[];
   onRecordRecitation: (payload: {
     quarter_number: number;
     listener_id: string;
     notes?: string;
   }) => Promise<void>;
+  onCorrectListener: (submissionId: string, newListenerId: string) => Promise<void>;
   onRecordRevision: (payload: { notes?: string; date?: string }) => Promise<void>;
   onRefresh: () => void;
   loading: boolean;
@@ -76,24 +83,25 @@ interface MemberDashboardProps {
 
 export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   currentUser,
+  batchName,
   cycleInfo,
   settings,
   restDays = [],
   allMembers,
   recitations,
   revisions,
-  activeTest = null,
-  testAttempts = [],
+  peerTests = [],
+  peerTestAttempts = [],
   onRecordRecitation,
+  onCorrectListener,
   onRecordRevision,
   onRefresh,
   loading,
 }) => {
   const [isRecitationModalOpen, setIsRecitationModalOpen] = useState(false);
-  const [isRevisionModalOpen, setIsRevisionModalOpen] = useState(false);
-  const [isTestModalOpen, setIsTestModalOpen] = useState(false);
+  const [isPeerTestOpen, setIsPeerTestOpen] = useState(false);
   const [isPersonalTestOpen, setIsPersonalTestOpen] = useState(false);
-  const [showTestConditions, setShowTestConditions] = useState(false);
+  const [isRevisionModalOpen, setIsRevisionModalOpen] = useState(false);
   const [activeRevisionIndex, setActiveRevisionIndex] = useState<number>(0);
   const [selectedRevisionTarget, setSelectedRevisionTarget] = useState<RevisionDayItem | null>(null);
   const [showHistory, setShowHistory] = useState(true);
@@ -126,20 +134,50 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
     );
   }, [cycleInfo.start_date, cycleInfo.today_date, restDays, settings]);
 
+  // When he joined his current batch (from the batch's member list,
+  // since the auth profile does not carry membership data).
+  const joinedOnDate = useMemo(
+    () =>
+      joinedOnDateFromTimestamp(
+        allMembers.find((m) => m.id === currentUser.id)?.batch_joined_at
+      ),
+    [allMembers, currentUser.id]
+  );
+
   // Personal revision status for current user
+  // (revision days before he joined this batch are not owed)
   const userRevisionStatus = useMemo(() => {
     return calculateMemberRevisionStatus(
       currentUser.id,
       activeCycleDates,
       revisions,
-      cycleInfo.today_date
+      cycleInfo.today_date,
+      joinedOnDate
     );
-  }, [currentUser.id, activeCycleDates, revisions, cycleInfo.today_date]);
+  }, [currentUser.id, activeCycleDates, revisions, cycleInfo.today_date, joinedOnDate]);
 
   const pastMissedQuartersCount = userQuarterStatus.pastMissedQuartersCount;
   const pastMissedRevisionDaysCount = userRevisionStatus.pastMissedRevisionDaysCount;
 
   const isAllCaughtUp = userQuarterStatus.allCompletedUpToToday;
+
+  // Peer testing: the batch's live test, his pass, and the mandatory block
+  // (mirrors the database rule that rejects Tasmi'a beyond the range).
+  const liveTest = peerTests.find((t) => isPeerTestLive(t)) || null;
+  const hasPassedLiveTest = Boolean(
+    liveTest &&
+      peerTestAttempts.some(
+        (a) => a.test_id === liveTest.id && a.candidate_id === currentUser.id && a.status === 'passed'
+      )
+  );
+  const nextQuarterToRecite = isAllCaughtUp ? cycleInfo.quarter_of_day + 1 : userQuarterStatus.requiredQuarter;
+  const isBlockedByPeerTest = Boolean(
+    liveTest &&
+      liveTest.test_type === 'mandatory' &&
+      !hasPassedLiveTest &&
+      cycleInfo.has_started &&
+      nextQuarterToRecite > liveTest.range_end
+  );
   const currentRecitationQuarterNum = isAllCaughtUp
     ? cycleInfo.quarter_of_day
     : userQuarterStatus.requiredQuarter;
@@ -152,38 +190,6 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   const reviewEndInfo = getQuarterInfo(cycleInfo.review_end);
   const revisionBounds = getRangeBounds(cycleInfo.review_start, cycleInfo.review_end);
 
-  // Audience & Mandatory test verification (القسم هـ)
-  const isInTestAudience = useMemo(() => {
-    if (!activeTest) return false;
-    const aud = activeTest.audience || 'selected';
-    if (aud === 'all') return true;
-    const selectedIds = Array.isArray(activeTest.selected_member_ids) ? activeTest.selected_member_ids : [];
-    return selectedIds.includes(currentUser.id);
-  }, [activeTest, currentUser.id]);
-
-  const hasPassedActiveTest = useMemo(() => {
-    if (!activeTest) return false;
-    return (testAttempts || []).some(
-      (a) =>
-        a.test_id === activeTest.id &&
-        a.candidate_id === currentUser.id &&
-        a.passed &&
-        a.covers_full_range !== false
-    );
-  }, [activeTest, testAttempts, currentUser.id]);
-
-  const isMandatoryActive = Boolean(
-    activeTest && activeTest.is_active && activeTest.test_type === 'mandatory' && isInTestAudience
-  );
-
-  const hasCompletedMandatoryRange = Boolean(
-    activeTest && userQuarterStatus.requiredQuarter > activeTest.range_end
-  );
-
-  const isBlockedByMandatoryTest = Boolean(
-    isMandatoryActive && !hasPassedActiveTest && hasCompletedMandatoryRange
-  );
-
   // Construct list of active revision days (past missed days in chronological order + today)
   const revisionDays: RevisionDayItem[] = useMemo(() => {
     if (!cycleInfo.has_started) return [];
@@ -194,10 +200,14 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
     for (const dStr of userRevisionStatus.pastMissedDates) {
       const dayCycle = calculateCycleInfo(
         settings || {
+          id: '',
           start_date: cycleInfo.start_date,
           total_quarters: 240,
           review_window: 8,
           current_cycle_number: cycleInfo.current_cycle_number,
+          is_paused: cycleInfo.is_paused,
+          paused_at: cycleInfo.paused_at ?? null,
+          total_paused_days: cycleInfo.paused_days_count,
         },
         restDays,
         dStr
@@ -223,7 +233,9 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       });
     }
 
-    // 2. Today's date
+    // 2. Today. Men reviews are date-based: on a rest or pause day there is no new
+    //    obligation (it is never counted as missed), but the member may still confirm
+    //    the review of the last active day's range, as before.
     const todayReviewBounds = getRangeBounds(cycleInfo.review_start, cycleInfo.review_end);
     items.push({
       date: cycleInfo.today_date,
@@ -246,6 +258,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
     settings,
     restDays,
     userRevisionStatus.pastMissedDates,
+    userRevisionStatus.isTodayProgramDay,
     hasReviewedToday,
     reviewStartInfo.surahName,
     reviewEndInfo.surahName,
@@ -255,11 +268,15 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
     ? 0
     : Math.min(Math.max(0, activeRevisionIndex), revisionDays.length - 1);
 
+  // Nothing in the list happens only on a rest/pause day with no past debt:
+  // the last active day's revision is done and there is no new obligation.
+  const isNoObligationDay = revisionDays.length === 0 && !userRevisionStatus.isTodayProgramDay;
   const currentRevisionItem: RevisionDayItem = revisionDays[clampedRevisionIndex] || {
     date: cycleInfo.today_date,
     isToday: true,
     isMissed: false,
-    isReviewed: hasReviewedToday,
+    isReviewed: isNoObligationDay || hasReviewedToday,
+    isNoObligationDay,
     reviewStart: cycleInfo.review_start,
     reviewEnd: cycleInfo.review_end,
     reviewCount: cycleInfo.review_count,
@@ -293,17 +310,25 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
 
   return (
     <div className="space-y-6 pb-12">
-      {/* Day Overview Top Card (المستطيل الأخضر في أول الصفحة دائماً) */}
-      <div className="bg-gradient-to-l from-emerald-800 via-emerald-700 to-emerald-900 text-white rounded-3xl p-6 sm:p-8 shadow-md border border-emerald-600/30">
+      {/* Day Overview Top Card (المستطيل الملوّن الأنيق في أول الصفحة دائماً) */}
+      <div className="bg-gradient-to-l from-emerald-900 via-emerald-800 to-emerald-900 text-white rounded-3xl p-6 sm:p-8 shadow-md border border-emerald-400/20">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
-            <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-950/40 text-emerald-100 text-xs font-semibold border border-emerald-500/30">
-              <Sparkles className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-              <span>أهلًا بك {currentUser.name.trim().split(/\s+/)[0]}، بارك الله في وقتك مع كتاب الله</span>
+            <div className="flex items-center gap-2 flex-wrap">
+              <div className="inline-flex items-center gap-2 px-3.5 py-1 rounded-full bg-emerald-950/40 text-emerald-100 text-xs font-semibold border border-emerald-400/30">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-300 shrink-0" />
+                <span>أهلًا بك يا {currentUser.name.trim().split(/\s+/)[0]}، بارك الله في وقتك مع كتاب الله</span>
+              </div>
+              {batchName && (
+                <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/10 text-white text-xs font-bold border border-white/20">
+                  <Layers className="w-3.5 h-3.5 text-emerald-200 shrink-0" />
+                  <span>{batchName}</span>
+                </span>
+              )}
             </div>
             {cycleInfo.has_started ? (
               <>
-                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-amber-100 tracking-tight">
+                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-emerald-100 tracking-tight">
                   اليوم رقم {cycleInfo.cycle_day}
                 </h2>
                 <p className="text-emerald-100/90 text-xs sm:text-sm">
@@ -312,7 +337,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               </>
             ) : (
               <>
-                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-amber-100 tracking-tight">
+                <h2 className="text-2xl sm:text-3xl font-bold font-quran text-emerald-100 tracking-tight">
                   البرنامج لم يبدأ بعد
                 </h2>
                 <p className="text-emerald-100/90 text-xs sm:text-sm">
@@ -325,25 +350,25 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
 
         {/* Member Course Stats Ribbon since beginning of cycle */}
         {cycleInfo.has_started && (
-          <div className="mt-5 pt-4 border-t border-emerald-600/40 grid grid-cols-3 gap-2 sm:gap-3 text-center">
-            <div className="bg-emerald-950/40 rounded-2xl p-2.5 sm:p-3 border border-emerald-500/20">
+          <div className="mt-5 pt-4 border-t border-emerald-500/30 grid grid-cols-3 gap-2 sm:gap-3 text-center">
+            <div className="bg-emerald-950/40 rounded-2xl p-2.5 sm:p-3 border border-emerald-400/20">
               <span className="text-[11px] text-emerald-200 block">التسميع المنجز</span>
-              <span className="text-base sm:text-lg font-bold font-mono text-amber-200">
+              <span className="text-base sm:text-lg font-bold font-mono text-emerald-100">
                 {memberCourseStats.totalRecitations} <span className="text-[10px] text-emerald-300 font-sans font-normal">ربع</span>
               </span>
             </div>
-            <div className="bg-emerald-950/40 rounded-2xl p-2.5 sm:p-3 border border-emerald-500/20">
+            <div className="bg-emerald-950/40 rounded-2xl p-2.5 sm:p-3 border border-emerald-400/20">
               <span className="text-[11px] text-emerald-200 block">المراجعة المؤكدة</span>
-              <span className="text-base sm:text-lg font-bold font-mono text-amber-200">
+              <span className="text-base sm:text-lg font-bold font-mono text-emerald-100">
                 {memberCourseStats.totalRevisions} <span className="text-[10px] text-emerald-300 font-sans font-normal">يوم</span>
               </span>
             </div>
-            <div className="bg-emerald-950/40 rounded-2xl p-2.5 sm:p-3 border border-emerald-500/20">
+            <div className="bg-emerald-950/40 rounded-2xl p-2.5 sm:p-3 border border-emerald-400/20">
               <span className="text-[11px] text-emerald-200 flex items-center justify-center gap-1">
-                <Headphones className="w-3 h-3 text-amber-300 shrink-0" />
+                <Headphones className="w-3 h-3 text-emerald-300 shrink-0" />
                 <span>الاستماع للزملاء</span>
               </span>
-              <span className="text-base sm:text-lg font-bold font-mono text-amber-200">
+              <span className="text-base sm:text-lg font-bold font-mono text-emerald-100">
                 {memberCourseStats.totalTimesListened} <span className="text-[10px] text-emerald-300 font-sans font-normal">جلسة</span>
               </span>
             </div>
@@ -358,104 +383,14 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         updatedBy={settings?.daily_thought_updated_by}
       />
 
-      {/* Celebration banner if day >= 240 */}
-      {cycleInfo.is_completed && (
-        <CelebrationBanner currentCycle={cycleInfo.current_cycle_number} isAdmin={false} />
-      )}
-
-      {/* Program Pause Banner */}
-      {cycleInfo.is_paused && <PauseBanner pausedAt={cycleInfo.paused_at} />}
-
-      {/* Rest Day banner */}
-      {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
-
-      {/* Peer Testing Banner (عند وجود اختبار نشط معتمد من المشرف وكان العضو ضمن الجمهور المستهدف) */}
-      {activeTest && activeTest.is_active && currentUser.is_active && isInTestAudience && (
-        <div className="rounded-3xl bg-gradient-to-l from-amber-500/10 via-amber-500/5 to-amber-500/15 border-2 border-amber-500/30 p-5 shadow-xs space-y-3">
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-            <div className="flex items-start gap-3.5">
-              <div className="w-12 h-12 rounded-2xl bg-amber-500/20 text-amber-900 flex items-center justify-center shrink-0 mt-0.5 border border-amber-500/40">
-                <Award className="w-6 h-6 text-amber-800" />
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-bold border ${
-                    activeTest.test_type === 'mandatory'
-                      ? 'bg-rose-100 text-rose-950 border-rose-300'
-                      : 'bg-amber-200/80 text-amber-950 border-amber-300'
-                  }`}>
-                    {activeTest.test_type === 'mandatory' ? 'اختبار إلزامي' : 'اختبار موصى به'}
-                  </span>
-                  <span className="text-xs font-bold text-stone-900">
-                    اختبار الأرباع ({activeTest.range_start} ⟵ {activeTest.range_end})
-                  </span>
-                  {activeTest.difficulty && activeTest.difficulty !== 'any' && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-100/90 text-amber-900 border border-amber-300">
-                      الصعوبة: {
-                        activeTest.difficulty === 'easy' ? 'سهل' :
-                        activeTest.difficulty === 'hard' ? 'صعب' :
-                        activeTest.difficulty === 'medium' ? 'متوسط' : 'متنوع'
-                      }
-                    </span>
-                  )}
-                  {hasPassedActiveTest && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-emerald-100 text-emerald-800 border border-emerald-300">
-                      ✓ اجتزت هذا الاختبار بنجاح
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-stone-600 leading-relaxed max-w-xl">
-                  الاختبار بنظام تقييم الأقران: اختبر أحد زملائك المستوفين للشروط ليقوم النظام بتوليد الأسئلة وحساب الأخطاء وفق أسطر مصحف المدينة.
-                </p>
-              </div>
-            </div>
-
-            <div className="shrink-0 flex items-center gap-3">
-              <button
-                onClick={() => setIsTestModalOpen(true)}
-                className="w-full sm:w-auto px-5 py-2.5 rounded-xl bg-amber-700 hover:bg-amber-800 text-white font-bold text-xs shadow-xs transition flex items-center justify-center gap-2 cursor-pointer"
-              >
-                <Award className="w-4 h-4 text-amber-200" />
-                <span>بدء اختبار زميل</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Collapsible Test Conditions */}
-          <div className="pt-2 border-t border-amber-500/20 flex flex-col gap-2">
-            <button
-              type="button"
-              onClick={() => setShowTestConditions((prev) => !prev)}
-              className="self-start text-[11px] font-bold text-amber-900 hover:text-amber-950 flex items-center gap-1.5 transition cursor-pointer"
-            >
-              <span>{showTestConditions ? 'إخفاء شروط الاختبار' : 'عرض شروط الاختبار'}</span>
-              {showTestConditions ? (
-                <ChevronUp className="w-3.5 h-3.5" />
-              ) : (
-                <ChevronDown className="w-3.5 h-3.5" />
-              )}
-            </button>
-
-            {showTestConditions && (
-              <div className="pt-1 animate-in fade-in duration-200">
-                <TestConditionsCard test={activeTest} />
-              </div>
-            )}
-          </div>
-
-          {/* Mandatory test blocking callout */}
-          {isBlockedByMandatoryTest && (
-            <div className="p-3.5 rounded-2xl bg-rose-50 border border-rose-200 text-rose-950 text-xs flex items-start gap-2.5 animate-in fade-in duration-200">
-              <AlertTriangle className="w-4 h-4 text-rose-700 shrink-0 mt-0.5" />
-              <div>
-                <span className="font-bold block">مطلوب اجتياز الاختبار الإلزامي لمواصلة التسميع</span>
-                <p className="text-[11px] text-rose-800 leading-relaxed mt-0.5">
-                  لقد أتممت أرباع النطاق ({activeTest.range_start} إلى {activeTest.range_end})، ويشترط المشرف اجتياز هذا الاختبار الإلزامي أولاً قبل التمكن من تسجيل تسميع الأرباع التالية. اطلب من أحد زملائك في المقرأة إجراء الاختبار لك ليتم تسجيل نتيجتك.
-                </p>
-              </div>
-            </div>
-          )}
-        </div>
+      {/* Peer Testing (الاختبارات المتبادلة): live test of his batch */}
+      {liveTest && currentUser.is_active && (
+        <PeerTestCard
+          test={liveTest}
+          hasPassed={hasPassedLiveTest}
+          isBlocked={isBlockedByPeerTest}
+          onStart={() => setIsPeerTestOpen(true)}
+        />
       )}
 
       {/* Personal self-test (اختبر نفسك): available to every active member, separate from the program */}
@@ -477,6 +412,17 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         </div>
       )}
 
+      {/* Celebration banner if day >= 240 */}
+      {cycleInfo.is_completed && (
+        <CelebrationBanner currentCycle={cycleInfo.current_cycle_number} isAdmin={false} />
+      )}
+
+      {/* Program Pause Banner */}
+      {cycleInfo.is_paused && <PauseBanner pausedAt={cycleInfo.paused_at} />}
+
+      {/* Rest Day banner */}
+      {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
+
       {/* Exclusion / Suspension Notice Banner */}
       {!currentUser.is_active && (
         <div className="rounded-2xl bg-rose-50 border border-rose-200 p-5 flex items-start gap-3.5 shadow-xs">
@@ -484,7 +430,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             <UserX className="w-5 h-5" />
           </div>
           <div className="space-y-1">
-            <h3 className="font-bold text-sm text-rose-950">
+            <h3 className="font-bold text-sm text-emerald-950">
               حسابك مُعلّق (مُقصَى) حاليًا بقرار من المشرف
             </h3>
             <p className="text-xs text-rose-800 leading-relaxed">
@@ -512,7 +458,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               <h3 className="font-bold text-sm text-amber-950">
                 تنبيه بوجود أوراد متأخرة يلزم استدراكها
               </h3>
-              {(pastMissedQuartersCount >= 3 || pastMissedRevisionDaysCount >= 3) ? (
+              {(pastMissedQuartersCount >= SEVERE_DELAY_THRESHOLD || pastMissedRevisionDaysCount >= SEVERE_DELAY_THRESHOLD) ? (
                 <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-rose-200 text-rose-900 border border-rose-300">
                   تأخر حرج (يلزم الاستدراك لتجنب الإقصاء)
                 </span>
@@ -655,7 +601,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               </div>
 
               {/* Status Badge */}
-              {currentRevisionItem.isReviewed ? (
+              {currentRevisionItem.isNoObligationDay ? (
+                <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-stone-100 text-stone-700 border border-stone-200">
+                  <CheckCircle2 className="w-3.5 h-3.5 text-stone-500" />
+                  لا مراجعة جديدة اليوم
+                </span>
+              ) : currentRevisionItem.isReviewed ? (
                 <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                   تمت المراجعة
@@ -768,7 +719,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   <div className="flex items-baseline gap-1.5 flex-wrap">
                     <span className="font-bold text-rose-700 shrink-0">توقف عند:</span>
                     <span className="font-bold text-stone-900">{currentRevisionItem.bounds.stop.label}</span>
-                    <span className="font-quran text-xs sm:text-sm text-stone-700 font-medium">
+                    <span className="font-quran text-xs sm:text-sm text-rose-700 font-medium">
                       ﴿ {currentRevisionItem.bounds.stop.ayahText}{currentRevisionItem.bounds.stop.isEndNotice ? '' : '...'} ﴾
                     </span>
                   </div>
@@ -794,13 +745,23 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 <UserX className="w-4 h-4" />
                 <span>حسابك مُقصَى حاليًا — لا يمكن تأكيد المراجعة</span>
               </button>
+            ) : currentRevisionItem.isNoObligationDay ? (
+              <div
+                id="revision-no-obligation-status"
+                className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm transition flex items-center justify-center gap-2 bg-stone-50 text-stone-700 border border-stone-200 shadow-2xs text-center"
+              >
+                <CheckCircle2 className="w-4 h-4 text-stone-500 shrink-0" />
+                <span>
+                  {cycleInfo.is_paused ? 'البرنامج متوقف مؤقتًا' : 'اليوم يوم راحة'} — لا توجد مراجعة جديدة، وأنت مواكب لورد آخر يوم نشط
+                </span>
+              </div>
             ) : currentRevisionItem.isReviewed ? (
               <div
                 id="revision-completed-status"
-                className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm transition flex items-center justify-center gap-2 bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-xs"
+                className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm transition flex items-center justify-center gap-2 bg-emerald-50 text-emerald-800 border border-emerald-200 shadow-2xs"
               >
                 <CheckCircle2 className="w-4 h-4 text-emerald-600" />
-                <span>تم تأكيد مراجعة اليوم</span>
+                <span>تم تأكيد مراجعة اليوم بفضل الله</span>
               </div>
             ) : currentRevisionItem.isMissed ? (
               <button
@@ -821,7 +782,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   setSelectedRevisionTarget(currentRevisionItem);
                   setIsRevisionModalOpen(true);
                 }}
-                className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm shadow-xs transition flex items-center justify-center gap-2 bg-emerald-800 hover:bg-emerald-900 text-white cursor-pointer"
+                className="w-full py-3.5 px-4 rounded-2xl font-bold text-sm shadow-xs transition flex items-center justify-center gap-2 bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white cursor-pointer active:scale-98"
               >
                 <CheckCircle2 className="w-4 h-4" />
                 <span>تأكيد إتمام المراجعة اليومية</span>
@@ -831,12 +792,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         </div>
 
         {/* CARD 2: ورد الحفظ والتسميع (يظهر على اليسار في تخطيط RTL) */}
-        <div className="bg-white rounded-3xl border border-stone-200 shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md">
+        <div className="bg-white rounded-3xl border border-stone-200/90 shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md">
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-800 flex items-center justify-center font-bold">
-                  <BookOpen className="w-5 h-5" />
+                <div className="w-10 h-10 rounded-2xl bg-emerald-50 text-emerald-700 flex items-center justify-center font-bold">
+                  <BookOpen className="w-5 h-5 text-emerald-600" />
                 </div>
                 <div>
                   <h3 className="font-bold text-stone-900 text-base">ورد التسميع</h3>
@@ -847,14 +808,14 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                         : 'أتممت جميع الأرباع حتى اليوم'
                       : (cycleInfo.is_rest_day || cycleInfo.is_paused)
                       ? 'يمكنك استدراك الأرباع الفائتة الآن'
-                      : 'سجل إتمامك للربع المطلوب'}
+                      : 'سجّل إتمامك للربع المطلوب'}
                   </p>
                 </div>
               </div>
 
               {/* Status Badge */}
               {isAllCaughtUp ? (
-                <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">
+                <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
                   {(cycleInfo.is_rest_day || cycleInfo.is_paused)
                     ? `مواكب لآخر نشاط (الربع ${cycleInfo.quarter_of_day})`
@@ -876,7 +837,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             </div>
 
             {/* Quarter Info Box */}
-            <div className="p-4 rounded-2xl bg-stone-50 border border-stone-100 space-y-2">
+            <div className="p-4 rounded-2xl bg-stone-50/80 border border-stone-100 space-y-2">
               <div className="flex items-baseline justify-between">
                 <span className="text-xs font-semibold text-stone-500">
                   {isAllCaughtUp
@@ -892,10 +853,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 <span
                   className={`text-sm font-bold ${
                     isAllCaughtUp
-                      ? 'text-emerald-800'
+                      ? 'text-emerald-700'
                       : userQuarterStatus.isBehind
                       ? 'text-amber-800'
-                      : 'text-emerald-800'
+                      : 'text-emerald-700'
                   }`}
                 >
                   الربع رقم {isAllCaughtUp ? cycleInfo.quarter_of_day : userQuarterStatus.requiredQuarter}
@@ -918,7 +879,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   <div className="flex items-baseline gap-1.5 flex-wrap">
                     <span className="font-bold text-emerald-800 shrink-0">ابدأ من:</span>
                     <span className="font-bold text-stone-900">{recitationBounds.start.label}</span>
-                    <span className="font-quran text-xs sm:text-sm text-emerald-900 font-medium">
+                    <span className="font-quran text-xs sm:text-sm text-emerald-800 font-medium">
                       ﴿ {recitationBounds.start.ayahText}... ﴾
                     </span>
                   </div>
@@ -927,7 +888,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   <div className="flex items-baseline gap-1.5 flex-wrap">
                     <span className="font-bold text-rose-700 shrink-0">توقف عند:</span>
                     <span className="font-bold text-stone-900">{recitationBounds.stop.label}</span>
-                    <span className="font-quran text-xs sm:text-sm text-stone-700 font-medium">
+                    <span className="font-quran text-xs sm:text-sm text-rose-700 font-medium">
                       ﴿ {recitationBounds.stop.ayahText}{recitationBounds.stop.isEndNotice ? '' : '...'} ﴾
                     </span>
                   </div>
@@ -941,20 +902,20 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             <button
               id="open-recitation-modal-btn"
               onClick={() => {
-                if (!currentUser.is_active || isBlockedByMandatoryTest) return;
+                if (!currentUser.is_active || isBlockedByPeerTest) return;
                 setIsRecitationModalOpen(true);
               }}
-              disabled={isAllCaughtUp || !currentUser.is_active || isBlockedByMandatoryTest}
+              disabled={isAllCaughtUp || !currentUser.is_active || isBlockedByPeerTest}
               className={`w-full py-3.5 px-4 rounded-2xl font-bold text-sm shadow-sm transition flex items-center justify-center gap-2 ${
                 !currentUser.is_active
                   ? 'bg-rose-50 text-rose-700 border border-rose-200 cursor-not-allowed'
-                  : isBlockedByMandatoryTest
+                  : isBlockedByPeerTest
                   ? 'bg-amber-100 text-amber-900 border border-amber-300 cursor-not-allowed'
                   : isAllCaughtUp
                   ? 'bg-stone-100 text-stone-400 border border-stone-200 cursor-not-allowed'
                   : userQuarterStatus.isBehind
                   ? 'bg-amber-600 hover:bg-amber-700 text-white cursor-pointer'
-                  : 'bg-emerald-700 hover:bg-emerald-800 text-white cursor-pointer'
+                  : 'bg-gradient-to-r from-emerald-600 to-emerald-500 hover:from-emerald-700 hover:to-emerald-600 text-white cursor-pointer active:scale-98'
               }`}
             >
               {!currentUser.is_active ? (
@@ -962,9 +923,9 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   <UserX className="w-4 h-4" />
                   <span>حسابك مُقصَى حاليًا — لا يمكن تسجيل التسميع</span>
                 </>
-              ) : isBlockedByMandatoryTest ? (
+              ) : isBlockedByPeerTest ? (
                 <>
-                  <Award className="w-4 h-4 text-amber-800" />
+                  <AlertTriangle className="w-4 h-4" />
                   <span>مطلوب اجتياز الاختبار الإلزامي أولاً لمواصلة التسميع</span>
                 </>
               ) : (
@@ -976,10 +937,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                         ? `مواكب لجميع الأرباع حتى ربع آخر نشاط (${cycleInfo.quarter_of_day})`
                         : 'أتممت ربع اليوم'
                       : userQuarterStatus.isBehind
-                      ? `تسجيل تسميع الربع ${userQuarterStatus.requiredQuarter} (تعويض سابق)`
+                      ? `استدراك تسميع الربع ${userQuarterStatus.requiredQuarter} (سابق)`
                       : (cycleInfo.is_rest_day || cycleInfo.is_paused)
-                      ? `تسجيل تسميع الربع ${userQuarterStatus.requiredQuarter} (استدراك)`
-                      : `تسجيل تسميع ربع اليوم (الربع ${cycleInfo.quarter_of_day})`}
+                      ? `تسجيل تسميع الربع ${cycleInfo.quarter_of_day} (استدراك)`
+                      : `تسجيل تسميع الربع ${userQuarterStatus.requiredQuarter}`}
                   </span>
                 </>
               )}
@@ -1011,12 +972,26 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               currentUser={currentUser}
               recitations={recitations}
               revisions={revisions}
+              peerMembers={peerMembers}
+              onCorrectListener={onCorrectListener}
             />
           </div>
         )}
       </div>
 
       {/* Modals */}
+      {liveTest && (
+        <PeerTestingModal
+          isOpen={isPeerTestOpen}
+          onClose={() => setIsPeerTestOpen(false)}
+          currentUser={currentUser}
+          test={liveTest}
+          onCompleted={onRefresh}
+        />
+      )}
+
+      <PersonalTestModal isOpen={isPersonalTestOpen} onClose={() => setIsPersonalTestOpen(false)} />
+
       <RecitationModal
         isOpen={isRecitationModalOpen}
         onClose={() => setIsRecitationModalOpen(false)}
@@ -1044,21 +1019,6 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         reviewEnd={selectedRevisionTarget?.reviewEnd}
         reviewCount={selectedRevisionTarget?.reviewCount}
       />
-
-      <PersonalTestModal isOpen={isPersonalTestOpen} onClose={() => setIsPersonalTestOpen(false)} />
-
-      {/* Peer Testing Modal */}
-      {activeTest && (
-        <PeerTestingModal
-          isOpen={isTestModalOpen}
-          onClose={() => setIsTestModalOpen(false)}
-          currentUser={currentUser}
-          activeTest={activeTest}
-          onCompleted={() => {
-            onRefresh();
-          }}
-        />
-      )}
     </div>
   );
 };

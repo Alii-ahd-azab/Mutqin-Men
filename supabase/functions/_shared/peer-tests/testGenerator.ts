@@ -1,7 +1,35 @@
-import mushafLinesData from '../data/mushafLines.json';
-import quranQuartersData from '../data/quranQuarters.json';
-import { TestQuestion, TestDefinition } from '../types';
-import { passageScore, levelCuts, levelOf, DifficultyLevel } from './difficulty';
+// Peer-test and personal-test question generator (same generation logic as Mutqin for Sisters).
+// Runs only inside the Edge Functions: the Mushaf data never ships to the browser.
+import mushafLinesData from '../data/mushafLines.json' with { type: 'json' };
+import quranQuartersData from '../data/quranQuarters.json' with { type: 'json' };
+import { passageScore, levelCuts, levelOf } from './difficulty.ts';
+import type { DifficultyLevel } from './difficulty.ts';
+
+export interface TestQuestion {
+  question_number: number;
+  start_surah: number;
+  start_surah_name: string;
+  start_ayah: number;
+  start_text: string;
+  start_page: number;
+  start_line: number;
+  end_surah: number;
+  end_surah_name: string;
+  end_ayah: number;
+  end_text: string;
+  end_page: number;
+  end_line: number;
+  target_lines: number;
+  actual_lines: number;
+  difficulty_level: DifficultyLevel;
+  difficulty_score: number;
+}
+
+/** Men: who may take part in a test (selected-audience tests list their members). */
+interface TestAudience {
+  audience?: 'all' | 'selected';
+  selected_member_ids?: string[];
+}
 
 export interface MushafAyah {
   surah: number;
@@ -130,7 +158,7 @@ export function estimateRangeLines(rangeStart: number, rangeEnd: number): number
  * If audience is 'selected' (or undefined/empty), only members in selected_member_ids are allowed.
  */
 export function isInTestAudience(
-  test: TestDefinition | null | undefined,
+  test: TestAudience | null | undefined,
   userId: string,
   isAdmin = false
 ): boolean {

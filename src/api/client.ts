@@ -1,39 +1,49 @@
 import {
   User,
-  GroupSettings,
-  RestDay,
+  Batch,
+  AdminAccount,
+  AdminAccountUpdate,
+  NewAccountPayload,
+  BatchBootstrap,
   RecitationLog,
   RevisionLog,
-  CycleInfo,
-  TestDefinition,
-  TestAttempt,
-  TestQuestion,
+  PeerTest,
+  PeerTestAttempt,
+  PeerTestAttemptQuestion,
+  PeerTestCandidate,
+  PeerTestQuestion,
+  PeerTestSaveInput,
 } from '../types';
 import { supabase } from '../lib/supabase';
-import { formatDate, calculateCycleInfo, calculateMemberRequiredQuarter } from '../lib/calculations';
-import { isInTestAudience } from '../lib/testGenerator';
-import { phoneToAuthEmail } from '../lib/authIdentity';
-import { loadBatchIds, loadProgram, type ProgramState } from '../lib/menData';
-import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../lib/menRows';
+import { formatDate, calculateCycleInfo } from '../lib/calculations';
+import { phoneToAuthEmail } from '../lib/authHelpers';
+import { loadActiveCycle, loadProgram } from '../../supabase/functions/_shared/men/menData.ts';
+import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../../supabase/functions/_shared/men/menRows.ts';
 
 /*
- * Mutqin for Men data layer — same architecture as Mutqin for Sisters:
- *   reads          → supabase-js under Row Level Security
+ * Mutqin for Men data layer — same architecture and API as Mutqin for Sisters:
+ *   reads          → supabase-js under Row Level Security, one batch at a time
  *   simple writes  → direct inserts/updates checked by RLS and database guards
  *   multi-step     → RPCs (SECURITY DEFINER functions that check the caller)
  *   privileged     → Edge Functions (admin-users, admin-actions, peer-tests)
- * Method names and result shapes are those the Men UI already uses.
+ * Men rows are mapped by the shared Men loader (date-based reviews, legacy order, undated paused
+ * days), and Men extras (past pause periods, revision backfill, personal tests) are kept.
  */
 
-// ---------------------------------------------------------------------------------------------
-// Plumbing
-// ---------------------------------------------------------------------------------------------
+type BatchRow = {
+  id: string;
+  name: string;
+  created_at: string;
+  archived_at: string | null;
+};
+
+const BATCH_COLUMNS = 'id, name, created_at, archived_at';
 
 type EdgeFunction = 'admin-users' | 'admin-actions' | 'peer-tests';
 
-/* Calls an Edge Function and surfaces the server's Arabic error message (Sisters invokeFunction). */
+/* Calls an Edge Function and surfaces the server's Arabic error message. */
 async function invokeFunction<T>(name: EdgeFunction, body: Record<string, unknown>, fallbackMessage: string): Promise<T> {
-  const { data, error } = await supabase.functions.invoke(name, { body: { ...body, client_date: today() } });
+  const { data, error } = await supabase.functions.invoke(name, { body });
   if (error) {
     let message = fallbackMessage;
     const context = (error as { context?: unknown }).context;
@@ -61,6 +71,26 @@ function dbError(error: { code?: string; message: string }, fallback: string): E
 
 const today = () => formatDate(new Date());
 
+function requireBatchId(batchId: string | undefined | null): string {
+  if (!batchId) throw new Error('يرجى اختيار الدفعة أولاً');
+  return batchId;
+}
+
+const ROWS_PAGE_SIZE = 1000;
+
+/* PostgREST returns at most 1000 rows per request: read in pages until the last (short) page. */
+async function fetchAllRows<T>(
+  fetchPage: (from: number, to: number) => PromiseLike<{ data: unknown[] | null; error: unknown }>
+): Promise<T[]> {
+  const rows: T[] = [];
+  for (let from = 0; ; from += ROWS_PAGE_SIZE) {
+    const { data, error } = await fetchPage(from, from + ROWS_PAGE_SIZE - 1);
+    if (error) throw error;
+    rows.push(...((data || []) as T[]));
+    if (!data || data.length < ROWS_PAGE_SIZE) return rows;
+  }
+}
+
 async function getCurrentAuthUser() {
   const {
     data: { user },
@@ -78,58 +108,80 @@ async function getCurrentProfile(): Promise<ProfileRow> {
   return data as ProfileRow;
 }
 
+async function getBatch(batchId: string): Promise<Batch> {
+  const { data, error } = await supabase.from('batches').select(BATCH_COLUMNS).eq('id', batchId).maybeSingle();
+  if (error) throw error;
+  // RLS hides batches the caller cannot access, so "not found" also means "not authorized".
+  if (!data) throw new Error('لا تملك صلاحية الوصول لهذه الدفعة');
+  return data as BatchRow;
+}
+
 /*
- * One program load is shared by the requests the dashboard makes together (bootstrap, recitations,
- * revisions); every later call starts a fresh load, so data is never stale after a write.
+ * Peer tests of one cycle. RLS returns all of them to the batch's admins and only the LIVE one(s)
+ * of their audience to the batch's members. Men: each test carries its selected members.
  */
-// Both caches belong to ONE signed-in account: another account never reuses them.
-let inFlight: { userId: string; promise: Promise<ProgramState> } | null = null;
-let lastState: { userId: string; state: ProgramState } | null = null;
-
-function clearStateCache() {
-  inFlight = null;
-  lastState = null;
+async function getPeerTestsForCycle(cycleId: string): Promise<PeerTest[]> {
+  const { data, error } = await supabase.from('peer_tests').select('*').eq('cycle_id', cycleId).order('created_at', { ascending: false });
+  if (error) throw error;
+  const tests = (data || []) as Omit<PeerTest, 'selected_member_ids'>[];
+  const selectedByTest = new Map<string, string[]>();
+  if (tests.length) {
+    const rows = await fetchAllRows<{ test_id: string; user_id: string }>((from, to) =>
+      supabase
+        .from('peer_test_selected_members')
+        .select('test_id, user_id')
+        .in('test_id', tests.map((t) => t.id))
+        .order('position', { ascending: true })
+        .range(from, to)
+    );
+    for (const row of rows) {
+      const list = selectedByTest.get(row.test_id) || [];
+      list.push(row.user_id);
+      selectedByTest.set(row.test_id, list);
+    }
+  }
+  return tests.map((t) => ({ ...t, selected_member_ids: selectedByTest.get(t.id) || [] }));
 }
 
-async function sessionUserId(): Promise<string> {
-  const { data } = await supabase.auth.getSession();
-  const id = data.session?.user.id;
-  if (!id) throw new Error('يجب تسجيل الدخول أولاً');
-  return id;
+async function getPeerTestAttemptsForTests(testIds: string[]): Promise<PeerTestAttempt[]> {
+  if (testIds.length === 0) return [];
+  return fetchAllRows<PeerTestAttempt>((from, to) =>
+    supabase
+      .from('peer_test_attempts')
+      .select('*')
+      .in('test_id', testIds)
+      .neq('status', 'cancelled')
+      .order('created_at', { ascending: false })
+      .order('id', { ascending: true })
+      .range(from, to)
+  );
 }
 
-async function loadState(): Promise<ProgramState> {
-  const userId = await sessionUserId();
-  if (inFlight?.userId === userId) return inFlight.promise;
-  const promise: Promise<ProgramState> = (async () => {
-    const batches = await loadBatchIds(supabase);
-    if (!batches.length) throw new Error('لا توجد دفعة متاحة لحسابك');
-    return loadProgram(supabase, batches[0]);
-  })()
-    .then((state) => {
-      if (inFlight?.promise === promise) lastState = { userId, state };
-      return state;
-    })
-    .finally(() => {
-      if (inFlight?.promise === promise) inFlight = null;
-    });
-  inFlight = { userId, promise };
-  return promise;
-}
-
-async function currentState(): Promise<ProgramState> {
-  const userId = await sessionUserId();
-  return lastState?.userId === userId ? lastState.state : loadState();
-}
-
-supabase.auth.onAuthStateChange((event) => {
-  if (event === 'SIGNED_OUT' || event === 'SIGNED_IN') clearStateCache();
-});
-
-function activeTestFor(state: ProgramState, user: User | undefined): TestDefinition | null {
-  const raw = state.tests.find((t) => t.is_active && !t.is_finished) || null;
-  if (!raw || !user) return null;
-  return user.role === 'admin' || isInTestAudience(raw, user.id) ? raw : null;
+/* Loads everything one batch's dashboard needs, in a single pass. */
+async function buildBootstrap(batchId: string): Promise<BatchBootstrap> {
+  const [batch, program] = await Promise.all([getBatch(batchId), loadProgram(supabase, batchId)]);
+  const peerTests = await getPeerTestsForCycle(program.cycle.id);
+  const peerTestAttempts = await getPeerTestAttemptsForTests(peerTests.map((t) => t.id));
+  const todayStr = today();
+  // Newest first, as the dashboards list them.
+  const byNewest = <T extends { created_at: string }>(rows: T[]) =>
+    [...rows].sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
+  const recitations = byNewest(program.recitationLogs);
+  const revisions = byNewest(program.revisionLogs);
+  return {
+    batch,
+    cycle_id: program.cycle.id,
+    cycleInfo: calculateCycleInfo(program.settings, program.restDays, todayStr),
+    settings: program.settings,
+    restDays: program.restDays,
+    users: program.users,
+    recitations,
+    revisions,
+    todayRecitations: recitations.filter((r) => r.date === todayStr),
+    todayRevisions: revisions.filter((r) => r.date === todayStr),
+    peerTests,
+    peerTestAttempts,
+  };
 }
 
 // Server-side HTML sanitization of the former API, applied before storing (defense in depth;
@@ -145,13 +197,10 @@ function sanitizeThought(input: string): string {
 }
 
 // Personal-test generation result kept until the member finishes (the save RPC needs the resolved range).
-let lastPersonalTest: { setup: Record<string, unknown>; questions: TestQuestion[] } | null = null;
+let lastPersonalTest: { setup: Record<string, unknown>; questions: PeerTestQuestion[] } | null = null;
 
-// ---------------------------------------------------------------------------------------------
-// API
-// ---------------------------------------------------------------------------------------------
 export const api = {
-  // Auth
+  // ============ AUTH ============
   async login(phone: string, password: string): Promise<{ user: User }> {
     const { data, error } = await supabase.auth.signInWithPassword({ email: phoneToAuthEmail(phone), password });
     if (error || !data.user) {
@@ -176,7 +225,6 @@ export const api = {
   },
 
   async logout(): Promise<void> {
-    clearStateCache();
     lastPersonalTest = null;
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
@@ -204,55 +252,48 @@ export const api = {
     return { message: 'تم تغيير كلمة المرور بنجاح' };
   },
 
-  // Bootstrap
-  async getBootstrap(_params?: { client_date?: string }): Promise<{
-    cycleInfo: CycleInfo;
-    settings: GroupSettings;
-    restDays: RestDay[];
-    users: User[];
-    todayRecitations: RecitationLog[];
-    todayRevisions: RevisionLog[];
-    tests?: TestDefinition[];
-    activeTest?: TestDefinition | null;
-    testAttempts?: TestAttempt[];
-  }> {
-    const [state, auth] = await Promise.all([loadState(), getCurrentAuthUser()]);
-    const user = state.users.find((u) => u.id === auth.id);
-    const todayStr = today();
-    const activeTest = activeTestFor(state, user);
-    const isAdmin = user?.role === 'admin';
-    return {
-      cycleInfo: calculateCycleInfo(state.settings, state.restDays, todayStr),
-      settings: state.settings,
-      restDays: state.restDays,
-      users: state.users,
-      todayRecitations: state.recitationLogs.filter((r) => r.date === todayStr),
-      todayRevisions: state.revisionLogs.filter((r) => r.date === todayStr),
-      // RLS already limits members to the live test(s) of their audience and their own attempts.
-      tests: isAdmin ? state.tests : activeTest ? [activeTest] : [],
-      activeTest,
-      testAttempts: isAdmin
-        ? state.testAttempts
-        : state.testAttempts.filter((a) => a.candidate_id === auth.id || a.examiner_id === auth.id),
-    };
+  // ============ BATCHES & BOOTSTRAP ============
+
+  /*
+   * Batches the current user may open. RLS decides: master admins get all, batch admins their
+   * assigned ones, members their single batch.
+   */
+  async getAccessibleBatches(): Promise<{ batches: Batch[] }> {
+    const { data, error } = await supabase.from('batches').select(BATCH_COLUMNS).is('archived_at', null).order('created_at', { ascending: true });
+    if (error) throw error;
+    return { batches: (data || []) as BatchRow[] };
   },
 
-  // Recitations
-  async getRecitations(params?: { member_id?: string; reciter_id?: string; date?: string }): Promise<{ recitations: RecitationLog[] }> {
-    let logs = [...(await loadState()).recitationLogs];
-    const member = params?.member_id || params?.reciter_id;
-    if (member) logs = logs.filter((l) => l.member_id === member || l.reciter_id === member);
-    if (params?.date) logs = logs.filter((l) => l.date === params.date);
-    logs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    return { recitations: logs };
+  async getBootstrap(params: { batch_id: string }): Promise<BatchBootstrap> {
+    return buildBootstrap(requireBatchId(params.batch_id));
   },
 
-  async recordRecitation(payload: { quarter_number: number; listener_id: string; notes?: string; date?: string }): Promise<{ message: string }> {
-    const [state, user] = await Promise.all([currentState(), getCurrentAuthUser()]);
+  async getRecitations(params: { batch_id: string; member_id?: string; reciter_id?: string; date?: string }): Promise<{ recitations: RecitationLog[] }> {
+    let recitations = (await buildBootstrap(requireBatchId(params.batch_id))).recitations;
+    const memberId = params.member_id || params.reciter_id;
+    if (memberId) recitations = recitations.filter((r) => r.member_id === memberId);
+    if (params.date) recitations = recitations.filter((r) => r.date === params.date);
+    return { recitations };
+  },
+
+  async getRevisions(params: { batch_id: string; member_id?: string; date?: string }): Promise<{ revisions: RevisionLog[] }> {
+    let revisions = (await buildBootstrap(requireBatchId(params.batch_id))).revisions;
+    if (params.member_id) revisions = revisions.filter((r) => r.member_id === params.member_id);
+    if (params.date) revisions = revisions.filter((r) => r.date === params.date);
+    return { revisions };
+  },
+
+  // ============ RECITATION & REVISION ============
+
+  async recordRecitation(
+    batchId: string,
+    payload: { quarter_number: number; listener_id: string; notes?: string; date?: string }
+  ): Promise<{ message: string }> {
+    const [cycle, user] = await Promise.all([loadActiveCycle(supabase, requireBatchId(batchId)), getCurrentAuthUser()]);
     const notes = payload.notes && String(payload.notes).trim() ? String(payload.notes).trim() : null;
     // Order, listener, mandatory-test and account rules are enforced by the database guard.
     const { error } = await supabase.from('tasmia_submissions').insert({
-      cycle_id: state.cycle.id,
+      cycle_id: cycle.id,
       user_id: user.id,
       listener_id: payload.listener_id || null,
       quarter_number: payload.quarter_number,
@@ -266,26 +307,33 @@ export const api = {
     return { message: `تم تسجيل إتمام تسميع الربع ${payload.quarter_number} بنجاح وتقبل الله منكم!` };
   },
 
-  // Revisions
-  async getRevisions(params?: { member_id?: string; date?: string }): Promise<{ revisions: RevisionLog[] }> {
-    let logs = [...(await loadState()).revisionLogs];
-    if (params?.member_id) logs = logs.filter((l) => l.member_id === params.member_id);
-    if (params?.date) logs = logs.filter((l) => l.date === params.date);
-    logs.sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime());
-    return { revisions: logs };
+  /*
+   * The member's one listener correction (within 12 hours of submitting). All rules are checked
+   * by the database function; only the listener changes.
+   */
+  async correctRecitationListener(
+    submissionId: string,
+    newListenerId: string
+  ): Promise<{ id: string; listener_id: string; listener_name_snapshot: string; listener_changed_at: string }> {
+    const { data, error } = await supabase.rpc('correct_tasmia_listener', {
+      p_submission_id: submissionId,
+      p_new_listener_id: newListenerId,
+    });
+    if (error) throw dbError(error, 'تعذر تعديل المستمع');
+    return data;
   },
 
-  async recordRevision(payload: { notes?: string; date?: string }): Promise<{ message: string; already_recorded?: boolean }> {
-    const [state, user] = await Promise.all([currentState(), getCurrentAuthUser()]);
+  async recordRevision(batchId: string, payload: { notes?: string; date?: string }): Promise<{ message: string; already_recorded?: boolean }> {
+    const [cycle, user] = await Promise.all([loadActiveCycle(supabase, requireBatchId(batchId)), getCurrentAuthUser()]);
     const todayStr = today();
     const date = payload.date && /^\d{4}-\d{2}-\d{2}$/.test(payload.date) ? payload.date : todayStr;
     const notes = payload.notes && String(payload.notes).trim() ? String(payload.notes).trim() : null;
-    // Quarters are computed by the database guard; one review per member per date.
+    // Men: reviews are date-based; the quarters are computed by the database guard.
     let lastErr: unknown;
     for (let attempt = 0; attempt < 3; attempt++) {
       const { data, error } = await supabase
         .from('review_confirmations')
-        .insert({ cycle_id: state.cycle.id, user_id: user.id, notes, legacy_date: date })
+        .insert({ cycle_id: cycle.id, user_id: user.id, notes, legacy_date: date })
         .select('start_quarter, end_quarter')
         .single();
       if (!error) {
@@ -302,35 +350,93 @@ export const api = {
     throw lastErr instanceof Error ? lastErr : new Error('تعذر الاتصال بالخادم');
   },
 
-  // Admin: members (Edge Function admin-users)
-  async adminAddMember(payload: { name: string; phone: string; password: string; role: 'member' | 'admin' }): Promise<{ user: User; message: string }> {
+  // ============ ACCOUNTS (Edge Function admin-users) ============
+
+  async adminAddMember(payload: NewAccountPayload): Promise<{ user: User; message: string }> {
     if (!payload.name?.trim() || !payload.phone?.trim() || !payload.password?.trim()) throw new Error('الاسم ورقم الهاتف وكلمة المرور مطلوبة');
     if (payload.password.trim().length < 6) throw new Error('يجب ألا تقل كلمة المرور عن 6 خانات');
-    const state = await currentState();
-    return invokeFunction('admin-users', { action: 'create', ...payload, batch_id: state.batchId }, 'فشل حفظ بيانات العضو الجديد، يرجى المحاولة ثانية.');
+    if (payload.role === 'member' && !payload.batch_id) throw new Error('يرجى اختيار دفعة العضو');
+    if (payload.role === 'admin' && !payload.is_master_admin && (!payload.batch_ids || payload.batch_ids.length === 0)) {
+      throw new Error('يرجى اختيار دفعة واحدة على الأقل لمشرف الدفعة');
+    }
+    return invokeFunction('admin-users', { action: 'create', ...payload }, 'فشل حفظ بيانات الحساب الجديد، يرجى المحاولة ثانية.');
   },
 
-  async adminUpdateMember(
-    id: string,
-    payload: { name?: string; phone?: string; password?: string; role?: 'member' | 'admin'; is_active?: boolean }
-  ): Promise<{ user: User; message: string }> {
+  /*
+   * ALL account changes (name, phone, password, active/excluded, master flag, batch assignments,
+   * Men member <-> admin switch) go through the Edge Function, which verifies that the caller
+   * manages this account. The browser has no UPDATE access to profiles.
+   */
+  async adminUpdateMember(id: string, payload: AdminAccountUpdate): Promise<{ user: User; message: string }> {
     if (payload.password && payload.password.trim() && payload.password.trim().length < 6) {
       throw new Error('يجب ألا تقل كلمة المرور عن 6 خانات');
     }
-    const state = await currentState();
-    return invokeFunction('admin-users', { action: 'update', user_id: id, ...payload, batch_id: state.batchId }, 'فشل تحديث بيانات العضو، يرجى المحاولة مرة أخرى.');
+    if (payload.batch_ids !== undefined && payload.batch_ids.length === 0) throw new Error('يرجى اختيار دفعة واحدة على الأقل');
+    return invokeFunction('admin-users', { action: 'update', user_id: id, ...payload }, 'فشل تحديث بيانات الحساب، يرجى المحاولة مرة أخرى.');
   },
 
   async adminDeleteMemberCompletely(id: string): Promise<{ success: boolean; message: string }> {
-    return invokeFunction('admin-users', { action: 'delete', user_id: id }, 'فشل حذف العضو وسجلاته، يرجى المحاولة مرة أخرى.');
+    return invokeFunction('admin-users', { action: 'delete', user_id: id }, 'فشل حذف الحساب وسجلاته، يرجى المحاولة مرة أخرى.');
   },
 
-  // Admin: program (direct RLS writes, as in Sisters)
-  async adminAddRestDay(payload: { date: string; note: string }): Promise<{ restDay?: RestDay; message: string }> {
+  /* Master admin only: every admin account with its batch assignments. */
+  async adminListAdmins(): Promise<{ admins: AdminAccount[] }> {
+    const [profilesResult, membershipsResult] = await Promise.all([
+      supabase.from('profiles').select(PROFILE_COLUMNS).eq('role', 'admin').order('created_at', { ascending: true }),
+      supabase.from('batch_memberships').select('user_id, batch_id').eq('membership_role', 'admin'),
+    ]);
+    if (profilesResult.error) throw profilesResult.error;
+    if (membershipsResult.error) throw membershipsResult.error;
+    const batchesByUser = new Map<string, string[]>();
+    for (const row of (membershipsResult.data || []) as { user_id: string; batch_id: string }[]) {
+      const list = batchesByUser.get(row.user_id) || [];
+      list.push(row.batch_id);
+      batchesByUser.set(row.user_id, list);
+    }
+    return {
+      admins: ((profilesResult.data || []) as ProfileRow[]).map((row) => ({
+        user: mapUser(row),
+        is_master_admin: !!row.is_master_admin,
+        batch_ids: batchesByUser.get(row.id) || [],
+      })),
+    };
+  },
+
+  /*
+   * Moves a member to another batch. The server determines his current batch, checks permissions
+   * on both batches and moves only his current membership.
+   */
+  async adminMoveMemberBatch(userId: string, destinationBatchId: string): Promise<{ success: boolean; message: string }> {
+    if (!destinationBatchId) throw new Error('يرجى اختيار الدفعة الجديدة');
+    return invokeFunction(
+      'admin-users',
+      { action: 'move-member-batch', user_id: userId, destination_batch_id: destinationBatchId },
+      'تعذر نقل العضو. حاول مرة أخرى.'
+    );
+  },
+
+  async adminSetAdminBatches(userId: string, batchIds: string[]): Promise<{ message: string }> {
+    if (batchIds.length === 0) throw new Error('يرجى اختيار دفعة واحدة على الأقل');
+    return invokeFunction('admin-users', { action: 'set-admin-batches', user_id: userId, batch_ids: batchIds }, 'تعذر تحديث صلاحيات المشرف.');
+  },
+
+  // ============ BATCH PROGRAM (direct RLS writes, as in Sisters) ============
+
+  async adminCreateBatch(payload: { name: string; start_date: string }): Promise<{ batch: Batch; message: string }> {
+    if (!payload.name.trim()) throw new Error('اسم الدفعة مطلوب');
+    if (!payload.start_date) throw new Error('تاريخ البداية مطلوب');
+    return invokeFunction(
+      'admin-actions',
+      { action: 'create-batch', name: payload.name.trim(), start_date: payload.start_date },
+      'تعذر إنشاء الدفعة. حاول مرة أخرى.'
+    );
+  },
+
+  async adminAddRestDay(batchId: string, payload: { date: string; note: string }): Promise<{ message: string }> {
     if (!payload.date || !/^\d{4}-\d{2}-\d{2}$/.test(payload.date)) throw new Error('يرجى تحديد تاريخ صحيح ليوم الاستدراك والراحة (YYYY-MM-DD)');
-    const [state, profile] = await Promise.all([currentState(), getCurrentProfile()]);
+    const [cycle, profile] = await Promise.all([loadActiveCycle(supabase, requireBatchId(batchId)), getCurrentProfile()]);
     const { error } = await supabase.from('group_rest_days').insert({
-      cycle_id: state.cycle.id,
+      cycle_id: cycle.id,
       rest_date: payload.date,
       reason: payload.note ? String(payload.note).trim() : 'يوم استدراك وراحة للمجموعة',
       created_by: profile.id,
@@ -350,10 +456,10 @@ export const api = {
     return { success: true, message: 'تم حذف يوم الاستدراك والراحة' };
   },
 
-  async adminPause(): Promise<{ message: string }> {
-    const [state, profile] = await Promise.all([loadState(), getCurrentProfile()]);
-    if (state.settings.is_paused) return { message: 'البرنامج متوقف مؤقتًا بالفعل.' };
-    const { error } = await supabase.from('program_pauses').insert({ cycle_id: state.cycle.id, paused_on: today(), created_by: profile.id });
+  async adminPause(batchId: string): Promise<{ message: string }> {
+    const [program, profile] = await Promise.all([loadProgram(supabase, requireBatchId(batchId)), getCurrentProfile()]);
+    if (program.settings.is_paused) return { message: 'البرنامج متوقف مؤقتًا بالفعل.' };
+    const { error } = await supabase.from('program_pauses').insert({ cycle_id: program.cycle.id, paused_on: today(), created_by: profile.id });
     if (error) {
       if (error.code === '23505') return { message: 'البرنامج متوقف مؤقتًا بالفعل.' };
       throw dbError(error, 'فشل حفظ تفعيل الإيقاف المؤقت، يرجى المحاولة ثانية.');
@@ -361,207 +467,144 @@ export const api = {
     return { message: 'تم تفعيل الإيقاف المؤقت للبرنامج وتجميد عداد الدورة لجميع الأعضاء بنجاح.' };
   },
 
-  async adminResume(): Promise<{ message: string }> {
-    const state = await loadState();
-    if (!state.settings.is_paused) return { message: 'البرنامج غير متوقف حاليًا.' };
-    // The resume day is active; resuming on the pause day records no paused period (as before).
-    const { error } = await supabase
+  async adminResume(batchId: string): Promise<{ message: string }> {
+    const cycle = await loadActiveCycle(supabase, requireBatchId(batchId));
+    // The resume day is active; resuming on the pause day records no paused period.
+    const { data, error } = await supabase
       .from('program_pauses')
       .update({ resumed_on: today() })
-      .eq('cycle_id', state.cycle.id)
-      .is('resumed_on', null);
+      .eq('cycle_id', cycle.id)
+      .is('resumed_on', null)
+      .select('id');
     if (error) throw dbError(error, 'فشل حفظ استئناف البرنامج، يرجى المحاولة ثانية.');
+    if (!data?.length) return { message: 'البرنامج غير متوقف حاليًا.' };
     return { message: 'تم استئناف البرنامج بنجاح ومواصلة الدورة.' };
   },
 
-  async adminAddPausePeriod(from: string, to: string): Promise<{ message: string }> {
-    const state = await currentState();
-    const { error } = await supabase.rpc('men_add_past_pause_period', { p_cycle_id: state.cycle.id, p_from: from, p_to: to });
+  /* Men: records a finished pause period in the past (both ends inclusive). */
+  async adminAddPausePeriod(batchId: string, from: string, to: string): Promise<{ message: string }> {
+    const cycle = await loadActiveCycle(supabase, requireBatchId(batchId));
+    const { error } = await supabase.rpc('men_add_past_pause_period', { p_cycle_id: cycle.id, p_from: from, p_to: to });
     if (error) throw dbError(error, 'فشل حفظ فترة الإيقاف. حاول مرة أخرى.');
     return { message: 'تم تسجيل فترة الإيقاف.' };
   },
 
-  async adminBackfillRevisions(until: string): Promise<{ created: number; message: string }> {
-    const state = await currentState();
-    const { data, error } = await supabase.rpc('men_backfill_revisions', { p_cycle_id: state.cycle.id, p_until: until });
+  /* Men: adds the missing revision records of the batch up to a date (idempotent). */
+  async adminBackfillRevisions(batchId: string, until: string): Promise<{ created: number; message: string }> {
+    const cycle = await loadActiveCycle(supabase, requireBatchId(batchId));
+    const { data, error } = await supabase.rpc('men_backfill_revisions', { p_cycle_id: cycle.id, p_until: until });
     if (error) throw dbError(error, 'تعذر حفظ السجلات الناقصة. أعد المحاولة (آمنة ولا تكرر).');
     const created = Number(data) || 0;
     return { created, message: `تمت إضافة ${created} سجل مراجعة ناقص حتى ${until}.` };
   },
 
-  async adminUpdateSettings(payload: { start_date?: string }): Promise<{ settings: GroupSettings; message: string }> {
-    const state = await currentState();
+  async adminUpdateSettings(batchId: string, payload: { start_date?: string }): Promise<{ message: string }> {
+    const cycle = await loadActiveCycle(supabase, requireBatchId(batchId));
     if (payload.start_date && /^\d{4}-\d{2}-\d{2}$/.test(payload.start_date)) {
-      const { data, error } = await supabase.from('cycles').update({ starts_on: payload.start_date }).eq('id', state.cycle.id).select('id');
+      const { data, error } = await supabase.from('cycles').update({ starts_on: payload.start_date }).eq('id', cycle.id).select('id');
       if (error) throw dbError(error, 'فشل حفظ إعدادات المجموعة، يرجى المحاولة ثانية.');
       if (!data?.length) throw new Error('هذا الإجراء مخصص للمشرف فقط');
     }
-    return { settings: (await loadState()).settings, message: 'تم تحديث إعدادات المجموعة بنجاح' };
+    return { message: 'تم تحديث إعدادات المجموعة بنجاح' };
   },
 
-  async adminUpdateDailyThought(payload: { daily_thought: string }): Promise<{ settings: GroupSettings; message: string }> {
-    const [state, profile] = await Promise.all([currentState(), getCurrentProfile()]);
+  async adminUpdateDailyThought(batchId: string, payload: { daily_thought: string }): Promise<{ message: string }> {
+    const id = requireBatchId(batchId);
+    const profile = await getCurrentProfile();
     const clean = sanitizeThought(payload.daily_thought || '');
     const { error } = clean
       ? await supabase.from('daily_thoughts').insert({
-          batch_id: state.batchId,
+          batch_id: id,
           content_html: clean,
           published_by: profile.id,
           published_by_name_snapshot: profile.full_name.trim(),
           is_published: true,
         })
-      : // Saving an empty thought hides it, as the previous empty value did.
-        await supabase.from('daily_thoughts').update({ is_published: false }).eq('batch_id', state.batchId).eq('is_published', true);
+      : // Saving an empty thought hides it.
+        await supabase.from('daily_thoughts').update({ is_published: false }).eq('batch_id', id).eq('is_published', true);
     if (error) throw dbError(error, 'فشل حفظ ونشر خاطرة اليوم، يرجى المحاولة ثانية.');
-    return { settings: (await loadState()).settings, message: 'تم حفظ ونشر خاطرة اليوم بنجاح لجميع الأعضاء' };
+    return { message: 'تم حفظ ونشر خاطرة اليوم بنجاح لجميع الأعضاء' };
   },
 
-  async adminDeleteDailyThought(): Promise<{ settings: GroupSettings; message: string }> {
-    const state = await currentState();
-    const { error } = await supabase.from('daily_thoughts').update({ is_published: false }).eq('batch_id', state.batchId).eq('is_published', true);
+  async adminDeleteDailyThought(batchId: string): Promise<{ message: string }> {
+    const id = requireBatchId(batchId);
+    const { error } = await supabase.from('daily_thoughts').update({ is_published: false }).eq('batch_id', id).eq('is_published', true);
     if (error) throw dbError(error, 'فشل حذف خاطرة اليوم، يرجى المحاولة ثانية.');
-    return { settings: (await loadState()).settings, message: 'تم حذف خاطرة اليوم بالكامل ولن تظهر في لوحة الأعضاء' };
+    return { message: 'تم حذف خاطرة اليوم بالكامل ولن تظهر في لوحة الأعضاء' };
   },
 
-  /* Same as Mutqin for Sisters: archives the current cycle (history kept) and starts a new one on day 1. */
-  async adminFactoryReset(): Promise<{ success: boolean; message: string; cycleInfo: CycleInfo; settings: GroupSettings }> {
-    const state = await loadState();
+  /* Archives the selected batch's active cycle (history kept) and starts the next one. Other batches are never touched. */
+  async adminFactoryReset(batchId: string, cycleId?: string): Promise<{ success: boolean; message: string }> {
     const data = await invokeFunction<{ message?: string }>(
       'admin-actions',
-      { action: 'factory-reset', batch_id: state.batchId, cycle_id: state.cycle.id },
+      { action: 'factory-reset', batch_id: requireBatchId(batchId), cycle_id: cycleId },
       'تعذر بدء دورة جديدة. حاول مرة أخرى.'
     );
-    const next = await loadState();
-    return {
-      success: true,
-      message: data?.message || 'تم بدء دورة جديدة',
-      settings: next.settings,
-      cycleInfo: calculateCycleInfo(next.settings, next.restDays, today()),
-    };
+    return { success: true, message: data?.message || 'تم بدء دورة جديدة' };
   },
 
-  async adminGetStats(): Promise<{
-    total_members: number;
-    completed_recitation_count: number;
-    completed_revision_count: number;
-    pending_recitation_today: any[];
-    pending_revision_today: any[];
-    member_stats: any[];
+  // ============ PEER TESTING ============
+  // Reads use RLS; every write goes through the peer-tests Edge Function, which re-checks all rules.
+
+  async getPeerTests(cycleId: string): Promise<{ tests: PeerTest[] }> {
+    return { tests: await getPeerTestsForCycle(cycleId) };
+  },
+
+  async getPeerTestAttempts(testIds: string[]): Promise<{ attempts: PeerTestAttempt[] }> {
+    return { attempts: await getPeerTestAttemptsForTests(testIds) };
+  },
+
+  async getPeerTestAttemptQuestions(attemptId: string): Promise<{ questions: PeerTestAttemptQuestion[] }> {
+    const { data, error } = await supabase
+      .from('peer_test_attempt_questions')
+      .select('*')
+      .eq('attempt_id', attemptId)
+      .order('question_number', { ascending: true });
+    if (error) throw error;
+    return { questions: (data || []) as PeerTestAttemptQuestion[] };
+  },
+
+  async peerTestCandidates(testId: string): Promise<{ candidates: PeerTestCandidate[] }> {
+    return invokeFunction('peer-tests', { action: 'candidates', test_id: testId }, 'تعذر تحميل قائمة الزملاء.');
+  },
+
+  async peerTestStart(testId: string, candidateId: string): Promise<{
+    attempt_id: string;
+    candidate: { id: string; name: string };
+    effective_range_end: number;
+    covers_full_range: boolean;
+    questions: PeerTestQuestion[];
   }> {
-    const db = await loadState();
-    const todayStr = today();
-    const cycleInfo = calculateCycleInfo(db.settings, db.restDays, todayStr);
-    const members = db.users.filter((u) => u.role === 'member' && u.is_active);
-    const memberStats = members.map((m) => {
-      const todayRecitation = db.recitationLogs.find((r) => (r.member_id === m.id || r.reciter_id === m.id) && r.date === todayStr);
-      const todayRevision = db.revisionLogs.find((r) => r.member_id === m.id && r.date === todayStr);
-      const quarterStatus = calculateMemberRequiredQuarter(m.id, cycleInfo.quarter_of_day, db.recitationLogs);
-      return {
-        id: m.id,
-        name: m.name,
-        phone: m.phone,
-        has_recited_today: !!todayRecitation,
-        recited_quarter: todayRecitation?.quarter_number,
-        listener_name: todayRecitation?.listener_name,
-        has_reviewed_today: !!todayRevision,
-        total_recitations: db.recitationLogs.filter((r) => r.member_id === m.id || r.reciter_id === m.id).length,
-        total_revisions: db.revisionLogs.filter((r) => r.member_id === m.id).length,
-        required_quarter: quarterStatus.requiredQuarter,
-        is_behind: quarterStatus.isBehind,
-        missed_quarters_count: quarterStatus.pastMissedQuartersCount,
-        missed_quarters: quarterStatus.pastMissedQuarters,
-      };
-    });
-    return {
-      total_members: members.length,
-      completed_recitation_count: memberStats.filter((m) => m.has_recited_today).length,
-      completed_revision_count: memberStats.filter((m) => m.has_reviewed_today).length,
-      pending_recitation_today: memberStats.filter((m) => !m.has_recited_today),
-      pending_revision_today: memberStats.filter((m) => !m.has_reviewed_today),
-      member_stats: memberStats,
-    };
+    return invokeFunction('peer-tests', { action: 'start', test_id: testId, candidate_id: candidateId }, 'تعذر بدء الاختبار.');
   },
 
-  async getBackendStatus(): Promise<{ backend: string; connected: boolean }> {
-    const { error } = await supabase.from('batches').select('id').limit(1);
-    return { backend: 'supabase', connected: !error };
+  async peerTestSubmit(payload: {
+    attempt_id: string;
+    errors: number[];
+    question_notes: string[];
+    notes?: string;
+  }): Promise<{ attempt: PeerTestAttempt; message: string }> {
+    return invokeFunction('peer-tests', { action: 'submit', ...payload }, 'تعذر اعتماد نتيجة الاختبار.');
   },
 
-  // Peer testing (reads: RLS; everything else: Edge Function peer-tests)
-  async getTests(): Promise<{ tests: TestDefinition[]; activeTest: TestDefinition | null }> {
-    const [state, auth] = await Promise.all([loadState(), getCurrentAuthUser()]);
-    const user = state.users.find((u) => u.id === auth.id);
-    const activeTest = activeTestFor(state, user);
-    return { tests: user?.role === 'admin' ? state.tests : activeTest ? [activeTest] : [], activeTest };
+  async adminSavePeerTest(payload: PeerTestSaveInput): Promise<{ test: PeerTest; versioned: boolean; message: string }> {
+    return invokeFunction('peer-tests', { action: 'admin-save', ...payload }, 'تعذر حفظ الاختبار.');
   },
 
-  async adminSaveTest(payload: Partial<TestDefinition>): Promise<{ success: boolean; message: string; test: TestDefinition }> {
-    return invokeFunction('peer-tests', { action: 'admin-save', ...payload }, 'فشل حفظ الاختبار، يرجى المحاولة ثانية.');
+  async adminSetPeerTestStatus(testId: string, statusAction: 'show' | 'hide' | 'finish'): Promise<{ test: PeerTest; message: string }> {
+    return invokeFunction('peer-tests', { action: 'admin-status', test_id: testId, status_action: statusAction }, 'تعذر تحديث حالة الاختبار.');
   },
 
-  async adminToggleTestStatus(id: string, is_active: boolean): Promise<{ success: boolean; message: string; test: TestDefinition }> {
-    return invokeFunction('peer-tests', { action: 'admin-status', test_id: id, is_active }, 'فشل تعديل حالة الاختبار، يرجى المحاولة ثانية.');
-  },
-
-  async adminFinishTest(id: string): Promise<{ success: boolean; message: string; test: TestDefinition }> {
-    return invokeFunction('peer-tests', { action: 'admin-finish', test_id: id }, 'فشل إنهاء الاختبار، يرجى المحاولة ثانية.');
-  },
-
-  async adminPreviewTestQuestions(testId: string): Promise<{ test_id: string; questions: TestQuestion[] }> {
+  async adminPreviewPeerTest(testId: string): Promise<{ questions: PeerTestQuestion[] }> {
     return invokeFunction('peer-tests', { action: 'admin-preview', test_id: testId }, 'تعذر توليد عيّنة الأسئلة.');
   },
 
-  async adminGetTestImpact(testId: string): Promise<{
-    test_id: string;
-    test_type: 'mandatory' | 'recommended';
-    range_start: number;
-    range_end: number;
-    blocked_count: number;
-    blocked_members: { id: string; name: string }[];
-  }> {
+  async adminPeerTestImpact(testId: string): Promise<{ blocked_count: number; blocked_members: { id: string; name: string }[] }> {
     return invokeFunction('peer-tests', { action: 'admin-impact', test_id: testId }, 'تعذر حساب أثر الاختبار.');
   },
 
-  async getEligibleCandidates(testId: string): Promise<{
-    test: TestDefinition;
-    candidates: {
-      id: string;
-      name: string;
-      phone: string;
-      is_eligible: boolean;
-      ineligibility_reasons: string[];
-      has_passed: boolean;
-      attempts_count: number;
-      effective_range_end?: number;
-      covers_full_range?: boolean;
-    }[];
-  }> {
-    return invokeFunction('peer-tests', { action: 'candidates', test_id: testId }, 'تعذر تحميل قائمة المرشحين.');
-  },
+  // ============ PERSONAL SELF-TESTS (Men; generation: Edge Function; storage: owner-only RLS + RPC) ============
 
-  async generateTestQuestions(testId: string, candidateId?: string): Promise<{ test_id: string; effective_range_end?: number; questions: TestQuestion[] }> {
-    return invokeFunction('peer-tests', { action: 'generate', test_id: testId, candidate_id: candidateId }, 'تعذر توليد الأسئلة.');
-  },
-
-  async recordTestAttempt(payload: {
-    test_id: string;
-    candidate_id: string;
-    questions_results: { start_surah: number; start_ayah: number; end_surah: number; end_ayah: number; errors_count: number; notes?: string }[];
-    notes?: string;
-  }): Promise<{ success: boolean; message: string; attempt: TestAttempt }> {
-    return invokeFunction('peer-tests', { action: 'submit', ...payload }, 'فشل حفظ نتيجة الاختبار، يرجى المحاولة ثانية.');
-  },
-
-  async getTestAttempts(params?: { test_id?: string; candidate_id?: string; examiner_id?: string }): Promise<{ attempts: TestAttempt[] }> {
-    // RLS returns everything to admins and only their own attempts to members.
-    let attempts = [...(await loadState()).testAttempts];
-    if (params?.test_id) attempts = attempts.filter((a) => a.test_id === params.test_id);
-    if (params?.candidate_id) attempts = attempts.filter((a) => a.candidate_id === params.candidate_id);
-    if (params?.examiner_id) attempts = attempts.filter((a) => a.examiner_id === params.examiner_id);
-    return { attempts };
-  },
-
-  // Personal self-tests (generation: Edge Function; storage: owner-only RLS + RPC)
   async personalTestSurahs(): Promise<{ surahs: { number: number; name: string; ayah_count: number }[] }> {
     const meta = await this.personalTestMeta();
     return { surahs: meta.surahs };
@@ -595,8 +638,8 @@ export const api = {
     questions_count: number;
     lines_per_question: number;
     difficulty: string;
-  }): Promise<{ questions: TestQuestion[]; points_per_error: number; range_label?: string }> {
-    const result = await invokeFunction<{ questions: TestQuestion[]; points_per_error: number; range_label: string; setup: Record<string, unknown> }>(
+  }): Promise<{ questions: PeerTestQuestion[]; points_per_error: number; range_label?: string }> {
+    const result = await invokeFunction<{ questions: PeerTestQuestion[]; points_per_error: number; range_label: string; setup: Record<string, unknown> }>(
       'peer-tests',
       { action: 'personal-generate', ...setup },
       'تعذّر توليد الأسئلة'

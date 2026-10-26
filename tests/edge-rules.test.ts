@@ -1,41 +1,36 @@
-// Men rules used by the peer-tests Edge Function and the shared row mapping (pure; no network).
-// Imports the generated Edge copies, i.e. exactly what is deployed.
+// Rules shared by the web app and the Edge Functions (pure; no network): the Men program mapping,
+// the Sisters delay / elimination status with the Men threshold, peer-test eligibility with the Men
+// rules, question generation and personal self-tests. Imports the very files that are deployed.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  RuleError,
-  computeCandidateStatus,
-  validateTestInput,
-  verifyAttemptQuestions,
-  parsePersonalSetup,
-  generatePersonalQuestions,
-} from '../supabase/functions/_shared/men/peerRules.ts';
-import { generateTestQuestions } from '../supabase/functions/_shared/men/testGenerator.ts';
-import { buildSettings, mapTests } from '../supabase/functions/_shared/men/menRows.ts';
-import type { ProgramState } from '../supabase/functions/_shared/men/menData.ts';
-import type { TestDefinition, User } from '../supabase/functions/_shared/men/types.ts';
+  evaluateCandidate,
+  eliminationReason,
+  isInAudience,
+  isPeerTestLive,
+  nextTasmiaQuarter,
+} from '../supabase/functions/_shared/peer-tests/eligibility.ts';
+import { RuleError, parsePersonalSetup, generatePersonalQuestions } from '../supabase/functions/_shared/peer-tests/personalTests.ts';
+import { generateTestQuestions, estimateRangeLines } from '../supabase/functions/_shared/peer-tests/testGenerator.ts';
+import { computeMemberDelayStatus, SEVERE_DELAY_THRESHOLD, type MemberDelayStatus } from '../supabase/functions/_shared/logic/memberDelayStatus.ts';
+import { buildSettings, mapUser } from '../supabase/functions/_shared/men/menRows.ts';
 
 const cycle = { id: 'c', batch_id: 'b', cycle_number: 1, starts_on: '2026-09-17', status: 'active', total_quarters: 240, review_window: 8, legacy_paused_days: 6, created_at: '2026-09-01T00:00:00Z' };
-const member = (id: string, active = true): User => ({ id, name: id, phone: id, role: 'member', is_active: active, created_at: '2026-09-01T00:00:00.000Z' });
-const baseTest: TestDefinition = {
-  id: 't', title: 'x', range_start: 1, range_end: 8, questions_count: 2, lines_per_question: 5,
-  prerequisites: { require_all_quarters_completed: false, require_revision_completed: false },
-  has_max_errors: true, max_errors_allowed: 3, test_type: 'recommended', is_active: true, audience: 'all',
-  selected_member_ids: [], difficulty: 'any', created_at: '2026-10-01T00:00:00.000Z',
+const test8 = { range_start: 1, range_end: 8, require_all_quarters_completed: false, require_revision_completed: false };
+const okDelay: MemberDelayStatus = {
+  requiredQuarter: 9,
+  isBehind: false,
+  allCompletedUpToToday: true,
+  missedQuarters: [],
+  missedQuartersCount: 0,
+  missedRevisionDaysCount: 0,
+  missedRevisionDates: [],
+  isSeverelyBehindRecitation: false,
+  isSeverelyBehindRevision: false,
+  isSeverelyBehind: false,
+  severeReasons: [],
 };
-function state(recitedQuarters: number[], attempts: ProgramState['testAttempts'] = []): ProgramState {
-  return {
-    batchId: 'b',
-    cycle,
-    users: [member('a'), member('b')],
-    settings: buildSettings(cycle, [], null),
-    restDays: [],
-    recitationLogs: recitedQuarters.map((q) => ({ id: `r${q}`, member_id: 'a', member_name: 'a', quarter_number: q, cycle_number: 1, date: '2026-09-20', created_at: '' })),
-    revisionLogs: [],
-    tests: [baseTest],
-    testAttempts: attempts,
-  };
-}
+const quarters = (...q: number[]) => new Set(q);
 
 test('settings mapping: open pause, closed periods (inclusive), same-day resume ignored, thought', () => {
   const s = buildSettings(cycle, [
@@ -50,50 +45,89 @@ test('settings mapping: open pause, closed periods (inclusive), same-day resume 
   assert.equal(s.total_paused_days, 6);
 });
 
-test('test mapping keeps selected-member order and derives active/finished flags', () => {
-  const [t] = mapTests(
-    [{ ...baseTest, firestore_id: null, max_errors: null, status: 'finished', created_by: null, updated_at: '2026-10-01T00:00:00Z', finished_at: '2026-10-02T00:00:00Z', require_all_quarters_completed: true, require_revision_completed: false } as any],
-    [{ test_id: 't', user_id: 'z', position: 1 }, { test_id: 't', user_id: 'y', position: 0 }]
-  );
-  assert.deepEqual(t.selected_member_ids, ['y', 'z']);
-  assert.equal(t.is_active, false);
-  assert.equal(t.is_finished, true);
-  assert.equal(t.has_max_errors, false);
+test('user mapping carries the Sisters account fields', () => {
+  const u = mapUser({ id: 'u', full_name: ' أحمد ', phone: ' 05 ', role: 'admin', active: true, created_at: '2026-09-01T00:00:00Z', is_master_admin: true, firestore_id: null });
+  assert.deepEqual(u, { id: 'u', name: 'أحمد', phone: '05', role: 'admin', is_active: true, created_at: '2026-09-01T00:00:00.000Z', auth_uid: 'u', is_master_admin: true });
 });
 
-test('candidate eligibility: partial range, full pass, inactive and audience rules', () => {
-  const s = state([1, 2, 3]);
-  const partial = computeCandidateStatus(s, baseTest, member('a'), '2026-10-26');
+test('delay status: Men elimination threshold is more than 3 (4+) missed past items', () => {
+  assert.equal(SEVERE_DELAY_THRESHOLD, 4);
+  const dates = ['2026-09-17', '2026-09-18', '2026-09-19', '2026-09-20', '2026-09-21', '2026-09-22'];
+  const status = (reviewed: string[]) =>
+    computeMemberDelayStatus({
+      memberId: 'a',
+      quarterOfDay: 6,
+      activeCycleDates: dates,
+      recitations: [1, 2, 3, 4, 5, 6].map((q) => ({ member_id: 'a', quarter_number: q })),
+      revisions: reviewed.map((date) => ({ member_id: 'a', date })),
+      todayDate: '2026-09-22',
+    });
+  assert.equal(status(dates.slice(3)).missedRevisionDaysCount, 3);
+  assert.equal(status(dates.slice(3)).isSeverelyBehind, false);
+  assert.equal(status(dates.slice(4)).missedRevisionDaysCount, 4);
+  assert.equal(status(dates.slice(4)).isSeverelyBehind, true);
+  // Days before the member joined his current batch are not owed.
+  const joined = computeMemberDelayStatus({
+    memberId: 'a', quarterOfDay: 6, activeCycleDates: dates, recitations: [], revisions: [], todayDate: '2026-09-22', joinedOnDate: '2026-09-21',
+  });
+  assert.equal(joined.missedRevisionDaysCount, 1); // only 2026-09-21 is owed
+});
+
+test('live window, audience and next quarter', () => {
+  const now = new Date('2026-10-26T12:00:00Z');
+  assert.equal(isPeerTestLive({ status: 'published', visible_from: null, visible_until: null }, now), true);
+  assert.equal(isPeerTestLive({ status: 'published', visible_from: '2026-10-27T00:00:00Z', visible_until: null }, now), false);
+  assert.equal(isPeerTestLive({ status: 'published', visible_from: null, visible_until: '2026-10-26T11:00:00Z' }, now), false);
+  assert.equal(isPeerTestLive({ status: 'hidden', visible_from: null, visible_until: null }, now), false);
+  assert.equal(isInAudience({ audience: 'all' }, new Set(), 'a'), true);
+  assert.equal(isInAudience({ audience: 'selected' }, new Set(['b']), 'a'), false);
+  assert.equal(nextTasmiaQuarter(okDelay, 12), 13);
+  assert.equal(nextTasmiaQuarter({ ...okDelay, allCompletedUpToToday: false, requiredQuarter: 4 }, 12), 4);
+});
+
+test('candidate: Men partial range, full range requirement, passes and audience', () => {
+  const base = { completedQuarters: quarters(1, 2, 3), passedAttempts: [], delay: okDelay, inAudience: true };
+  const partial = evaluateCandidate({ ...base, test: test8 });
   assert.equal(partial.is_eligible, true);
   assert.equal(partial.effective_range_end, 3);
   assert.equal(partial.covers_full_range, false);
-  assert.equal(computeCandidateStatus(state([]), baseTest, member('a'), '2026-10-26').is_eligible, false);
-  assert.equal(computeCandidateStatus(s, baseTest, member('a', false), '2026-10-26').is_eligible, false);
-  assert.equal(computeCandidateStatus(s, { ...baseTest, audience: 'selected', selected_member_ids: ['b'] }, member('a'), '2026-10-26').is_eligible, false);
-  const passed = state([1, 2, 3], [{ id: 'x', test_id: 't', candidate_id: 'a', candidate_name: 'a', examiner_id: 'b', examiner_name: 'b', total_errors: 0, passed: true, status: 'passed', date: '2026-10-20', questions_results: [], created_at: '' }]);
-  const st = computeCandidateStatus(passed, baseTest, member('a'), '2026-10-26');
-  assert.equal(st.has_passed, true);
-  assert.equal(st.is_eligible, false);
+
+  const full = evaluateCandidate({ ...base, test: { ...test8, require_all_quarters_completed: true } });
+  assert.equal(full.is_eligible, false);
+  assert.equal(full.missing_quarters, 5);
+  assert.match(full.reasons[0], /جميع أرباع النطاق/);
+
+  assert.equal(evaluateCandidate({ ...base, completedQuarters: quarters(), test: test8 }).is_eligible, false);
+  assert.match(evaluateCandidate({ ...base, inAudience: false, test: test8 }).reasons.join(), /المشمولين/);
+
+  // A partial pass blocks a retest until more quarters are recited; a full pass blocks for good.
+  const partialPass = [{ covers_full_range: false, effective_range_end: 3 }];
+  assert.equal(evaluateCandidate({ ...base, passedAttempts: partialPass, test: test8 }).is_eligible, false);
+  assert.equal(evaluateCandidate({ ...base, completedQuarters: quarters(1, 2, 3, 4), passedAttempts: partialPass, test: test8 }).is_eligible, true);
+  const fullPass = evaluateCandidate({ ...base, passedAttempts: [{ covers_full_range: null, effective_range_end: null }], test: test8 });
+  assert.equal(fullPass.has_passed, true);
+  assert.equal(fullPass.is_eligible, false);
 });
 
-test('test definition validation (former API rules)', () => {
-  const ok = validateTestInput({ range_start: 1, range_end: 8, questions_count: 2, lines_per_question: 5, audience: 'all', title: '  ' }, new Set());
-  assert.equal(ok.title, 'اختبار الأرباع (1 - 8)');
-  assert.equal(ok.max_errors, null);
-  assert.throws(() => validateTestInput({ range_start: 9, range_end: 8, questions_count: 1, lines_per_question: 1 }, new Set()), RuleError);
-  assert.throws(() => validateTestInput({ range_start: 1, range_end: 1, questions_count: 50, lines_per_question: 60 }, new Set()), /لا يتسع/);
-  assert.throws(() => validateTestInput({ range_start: 1, range_end: 8, questions_count: 1, lines_per_question: 1, audience: 'selected', selected_member_ids: ['ghost'] }, new Set()), /غير موجود/);
+test('candidate: «مؤهل للإقصاء» blocks the candidate (Sisters rule) with a masculine reason; revision prerequisite', () => {
+  const eliminable = { ...okDelay, missedQuartersCount: 4, isSeverelyBehindRecitation: true, isSeverelyBehind: true, severeReasons: ['recitation' as const] };
+  assert.equal(eliminationReason(eliminable), 'مؤهل للإقصاء بسبب تأخر التسميع (4 أرباع فائتة)');
+  const r = evaluateCandidate({ test: test8, completedQuarters: quarters(1, 2), passedAttempts: [], delay: eliminable, inAudience: true });
+  assert.equal(r.is_eligible, false);
+  assert.equal(r.is_eliminable, true);
+
+  const rev = { ...test8, require_revision_completed: true };
+  const base = { test: rev, completedQuarters: quarters(1), passedAttempts: [], delay: okDelay, inAudience: true };
+  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true } }).is_eligible, true);
+  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 1, hasReviewedToday: true } }).is_eligible, false);
+  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: false } }).is_eligible, false);
 });
 
-test('attempt answers are re-validated against the Mushaf with full geometry', () => {
-  const qs = generateTestQuestions(1, 8, 2, 5, 'any');
-  const answers = qs.map((q, i) => ({ start_surah: q.start_surah, start_ayah: q.start_ayah, end_surah: q.end_surah, end_ayah: q.end_ayah, errors_count: i }));
-  const verified = verifyAttemptQuestions(baseTest, 8, answers);
-  assert.equal(verified.length, 2);
-  assert.ok(verified.every((v) => v.actual_lines > 0 && v.start_page > 0 && v.end_line > 0));
-  assert.throws(() => verifyAttemptQuestions(baseTest, 8, answers.slice(0, 1)), /عدد الأسئلة/);
-  assert.throws(() => verifyAttemptQuestions(baseTest, 8, [answers[1], answers[0]]), /تداخل|تسبق/);
-  assert.throws(() => verifyAttemptQuestions(baseTest, 8, [{ ...answers[0], start_surah: 114, start_ayah: 1, end_surah: 114, end_ayah: 6 }, answers[1]]), /خارج نطاق|تداخل/);
+test('question generation stays inside the (effective) range with Mushaf geometry', () => {
+  const qs = generateTestQuestions(1, 3, 2, 5, 'any');
+  assert.equal(qs.length, 2);
+  assert.ok(qs.every((q) => q.actual_lines > 0 && q.start_page > 0 && q.end_line > 0 && q.start_text && q.difficulty_level));
+  assert.ok(estimateRangeLines(1, 8) > estimateRangeLines(1, 3));
 });
 
 test('personal test setup and generation return the resolved range for saving', () => {

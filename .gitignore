@@ -16,4 +16,4 @@ migration/private/
 supabase/.temp/
 
 # Legacy local fallback database (obsolete; contained member data)
-data/
+/data/
