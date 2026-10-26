@@ -9,6 +9,7 @@ import {
   calculateMemberRevisionStatus,
 } from './calculations.ts';
 import type { RevisionLog } from './programTypes.ts';
+import type { RevisionCalendar } from './calculations.ts';
 
 /**
  * Missed PAST items (today excluded) that make a member severely behind.
@@ -40,10 +41,14 @@ export interface MemberDelayInput {
     reciter_id?: string;
     quarter_number: number;
   }[];
-  revisions: Pick<RevisionLog, 'member_id' | 'date'>[];
+  revisions: (Pick<RevisionLog, 'member_id' | 'date'> & Partial<Pick<RevisionLog, 'review_end_quarter'>>)[];
   todayDate: string;
   /** Join date in his current batch: revision days before it are not owed. */
   joinedOnDate?: string;
+  /** Fresh start: first Tasmi'a quarter owed (default 1). */
+  startQuarter?: number;
+  /** Program calendar facts for the review identity (program day = end quarter). */
+  calendar?: RevisionCalendar;
 }
 
 export function computeMemberDelayStatus(
@@ -52,15 +57,17 @@ export function computeMemberDelayStatus(
   const quarterStatus = calculateMemberRequiredQuarter(
     input.memberId,
     input.quarterOfDay,
-    input.recitations
+    input.recitations,
+    input.startQuarter
   );
 
   const revStatus = calculateMemberRevisionStatus(
     input.memberId,
     input.activeCycleDates,
-    input.revisions as RevisionLog[],
+    input.revisions,
     input.todayDate,
-    input.joinedOnDate
+    input.joinedOnDate,
+    input.calendar
   );
 
   const missedQuartersCount = quarterStatus.pastMissedQuartersCount;

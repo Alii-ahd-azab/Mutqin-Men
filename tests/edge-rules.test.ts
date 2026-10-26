@@ -230,3 +230,81 @@ test('overdue cards are unique dates with distinct ranges', () => {
   // Today (active) has its own, later range.
   assert.ok(calculateCycleInfo(p.settings, p.restDays, '2026-10-09').review_end > Math.max(...ends));
 });
+
+// ---------------------------------------------------------------------------------------------
+// Review identity = program day (regression: completed ranges on other dates shown overdue)
+// ---------------------------------------------------------------------------------------------
+// Status with the calendar facts, as the app calls it.
+const statusCal = (p: ReturnType<typeof program>, logs: RevisionLog[], today: string, joined?: string) =>
+  calculateMemberRevisionStatus('m', getActiveCycleDates(START, today, p.restDays, p.settings), logs, today, joined, p.settings);
+const rangeOn = (p: ReturnType<typeof program>, d: string) => {
+  const c = calculateCycleInfo(p.settings, p.restDays, d);
+  return `${c.review_start}→${c.review_end}`;
+};
+// A row stored at confirmation time for obligation date `forDate`, confirmed on `onDate`.
+const confirmed = (p: ReturnType<typeof program>, forDate: string, onDate: string): RevisionLog => ({ ...review(p, forDate), id: `${forDate}@${onDate}`, date: onDate });
+
+test('day A 8→15 and day B 9→16 confirmed later (X, Y) are not overdue; history keeps X and Y', () => {
+  const p = program();
+  const A = '2026-10-15';
+  const B = '2026-10-16';
+  assert.equal(rangeOn(p, A), '8→15');
+  assert.equal(rangeOn(p, B), '9→16');
+  const others = days(1, 14).map((d) => review(p, d));
+  const X = confirmed(p, A, '2026-10-18');
+  const Y = confirmed(p, B, '2026-10-19');
+  const logs = [...others, X, Y, review(p, '2026-10-17'), review(p, '2026-10-18'), review(p, '2026-10-19')].filter(
+    (r, i, all) => all.findIndex((o) => o.date === r.date) === i || r === X || r === Y
+  );
+  const s = statusCal(p, logs, '2026-10-20');
+  assert.ok(!s.pastMissedDates.includes(A) && !s.pastMissedDates.includes(B), JSON.stringify(s.pastMissedDates));
+  assert.equal(X.date, '2026-10-18');
+  assert.equal(Y.date, '2026-10-19');
+  assert.equal(new Set(s.pastMissedDates).size, s.pastMissedDates.length, 'no duplicated card');
+});
+
+test('same day, several days late, on a rest day and during a pause: all count once', () => {
+  const p = program(['2026-10-12'], { pause_periods: [{ from: '2026-10-14', to: '2026-10-15' }] });
+  const active = getActiveCycleDates(START, '2026-10-17', p.restDays, p.settings);
+  const logs = [
+    ...active.filter((d) => !['2026-10-05', '2026-10-09', '2026-10-11', '2026-10-13'].includes(d)).map((d) => review(p, d)),
+    confirmed(p, '2026-10-05', '2026-10-08'), // several days late (10-08 also has its own review)
+    confirmed(p, '2026-10-11', '2026-10-12'), // on a rest day
+    confirmed(p, '2026-10-13', '2026-10-15'), // during a pause
+  ].filter((r, i, all) => all.findIndex((o) => o.id === r.id) === i);
+  const s = statusCal(p, logs, '2026-10-17');
+  assert.deepEqual(s.pastMissedDates, ['2026-10-09']); // only the genuinely missing day
+});
+
+test('calendar edited after the reviews (undated paused days, past pause period): no false overdue either way', () => {
+  // Stored under an older calendar, evaluated under the edited one.
+  const old = program();
+  const logs = days(1, 19).map((d) => review(old, d));
+  // Edit 1: 3 undated paused days recognised later — stored ranges are now HIGHER than the dates' days.
+  assert.deepEqual(statusCal(program([], { total_paused_days: 3 }), logs, '2026-10-20').pastMissedDates, []);
+  // Edit 2: undated paused days removed (e.g. turned into a dated past period) — ranges now LOWER.
+  const was = program([], { total_paused_days: 3 });
+  const logs2 = days(1, 19).map((d) => review(was, d));
+  const now = program([], { total_paused_days: 1 });
+  assert.deepEqual(statusCal(now, logs2, '2026-10-20').pastMissedDates, []);
+  // Retroactive and multiple rest days after the reviews.
+  assert.deepEqual(statusCal(program(['2026-10-04', '2026-10-05', '2026-10-11']), logs, '2026-10-20').pastMissedDates, []);
+});
+
+test('distinct ranges stay distinct and genuine gaps stay overdue on the unconfirmed date', () => {
+  const p = program();
+  // Only 9→16 (day 16) was reviewed, on its own date: day 15 (8→15) stays overdue.
+  const s = statusCal(p, [...days(1, 14).map((d) => review(p, d)), review(p, '2026-10-16')], '2026-10-17');
+  assert.deepEqual(s.pastMissedDates, ['2026-10-15']);
+  // One row cannot serve two days: a late 8→15 confirmed on 10-17 covers day 15 OR its own date,
+  // never both; the open day is the date the member never confirmed.
+  const late = statusCal(p, [...days(1, 14).map((d) => review(p, d)), confirmed(p, '2026-10-15', '2026-10-17')], '2026-10-18');
+  assert.equal(late.pastMissedDates.length, 2); // days 16 and 17 have no row of their own
+  assert.ok(!late.pastMissedDates.includes('2026-10-15'));
+  assert.equal(late.uncreditedReviews.length, 0);
+  // A duplicate confirmation of the same range credits one day only.
+  const dup = statusCal(p, [...days(1, 14).map((d) => review(p, d)), review(p, '2026-10-15'), confirmed(p, '2026-10-15', '2026-10-16')], '2026-10-17');
+  assert.deepEqual(dup.pastMissedDates, []); // 10-16 row sits on its own date: credits day 16
+  const dup2 = statusCal(p, [...days(1, 14).map((d) => review(p, d)), review(p, '2026-10-15'), confirmed(p, '2026-10-15', '2026-10-15')], '2026-10-17');
+  assert.equal(dup2.pastMissedDates.length, 1);
+});

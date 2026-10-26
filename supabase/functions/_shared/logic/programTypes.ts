@@ -17,6 +17,9 @@ export interface User {
   // When this member joined his CURRENT batch (ISO timestamp).
   // Revision debt is counted from this date; Tasmi'a debt is not.
   batch_joined_at?: string;
+  // Fresh start: first Tasmi'a quarter he owes in the batch's ACTIVE cycle (quarters before it are
+  // not owed). Absent = 1.
+  batch_start_quarter?: number;
 }
 
 export interface GroupSettings {

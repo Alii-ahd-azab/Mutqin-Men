@@ -502,13 +502,13 @@ test('review identity: JS program-day matching agrees with SQL men_cycle_day; re
     const restDays: RestDay[] = rest.map((r, i) => ({ id: String(i), date: r.d, note: '', added_by_admin_id: '', created_at: '' }));
     return { settings, restDays };
   };
-  const reviews = (await db.query("select user_id m, to_char(legacy_date,'YYYY-MM-DD') d from review_confirmations where cycle_id=$1 and legacy_date <= $2::date", [cycle, TODAY])).rows as { m: string; d: string }[];
+  const reviews = (await db.query("select user_id m, to_char(legacy_date,'YYYY-MM-DD') d, end_quarter e from review_confirmations where cycle_id=$1 and legacy_date <= $2::date", [cycle, TODAY])).rows as { m: string; d: string; e: number }[];
   const members = [...new Set(reviews.map((r) => r.m))];
   const missedByMember = async () => {
     const { settings, restDays } = await load();
     const active = getActiveCycleDates(settings.start_date, TODAY, restDays, settings);
-    const logs = reviews.map((r, i) => ({ id: String(i), member_id: r.m, member_name: '', date: r.d, cycle_number: 1, review_start_quarter: 0, review_end_quarter: 0, created_at: '' }));
-    return { active, missed: new Map(members.map((m) => [m, new Set(calculateMemberRevisionStatus(m, active, logs, TODAY).pastMissedDates)])) };
+    const logs = reviews.map((r, i) => ({ id: String(i), member_id: r.m, member_name: '', date: r.d, cycle_number: 1, review_start_quarter: 0, review_end_quarter: r.e, created_at: '' }));
+    return { active, missed: new Map(members.map((m) => [m, new Set(calculateMemberRevisionStatus(m, active, logs, TODAY, undefined, settings).pastMissedDates)])) };
   };
 
   // 1. Parity: a review on any date counts for the latest active date on or before it, and SQL gives
@@ -537,11 +537,77 @@ test('review identity: JS program-day matching agrees with SQL men_cycle_day; re
     const after = (await missedByMember()).missed;
     for (const m of members) {
       const gained = [...after.get(m)!].filter((d) => !before.get(m)!.has(d));
-      assert.deepEqual(gained, [], `member ${m} gained overdue reviews after rest days ${busy}`);
+      // Rest days only remove obligations: no member owes MORE reviews (an open day may be shown on
+      // another date once the calendar shifts, but never an extra one).
+      assert.ok(after.get(m)!.size <= before.get(m)!.size, `member ${m}: ${before.get(m)!.size} -> ${after.get(m)!.size} (gained ${gained}) after rest days ${busy}`);
     }
     // History untouched.
     assert.equal((await one('select count(*)::int n from review_confirmations where cycle_id=$1', [cycle])).n, reviews.length + (await one('select count(*)::int n from review_confirmations where cycle_id=$1 and legacy_date > $2::date', [cycle, TODAY])).n);
   } finally {
     await db.query('rollback');
   }
+});
+
+test('fresh-start member: starts at the batch quarter of today, sequential from there, no earlier debt', async () => {
+  const { calculateMemberRequiredQuarter } = await import('../src/lib/calculations');
+  await db.query('begin');
+  try {
+    const before = (await one('select count(*)::int p from profiles')).p;
+    const day = (await one('select app_private.men_cycle_day($1, app_private.men_today()) n', [cycle])).n as number;
+    assert.ok(day > 1, 'the real program is past day 1');
+    const mk = async (phone: string) => {
+      const uid = (await one("insert into auth.users(id, email) values (gen_random_uuid(), $1 || '@members.mutqin.local') returning id", [phone])).id;
+      await db.query("select public.create_profile_with_membership($1, $2, $3, 'member', false, $4, '{}'::uuid[], null)", [uid, 'FRESH ' + phone, phone, batch]);
+      return uid as string;
+    };
+    const fresh = await mk('000000000901');
+    const normal = await mk('000000000902');
+
+    // Only the Edge Function (service role) may set the baseline.
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id.admin, role: 'authenticated' })]);
+    await db.query('set local role authenticated');
+    await fails(db, 'select public.men_set_fresh_start($1, $2)', [fresh, batch], '42501');
+    await db.query('reset role');
+
+    const r = (await one('select public.men_set_fresh_start($1, $2) r', [fresh, batch])).r;
+    assert.equal(r.start_quarter, day);
+    const m = await one('select start_quarter, start_cycle_id from batch_memberships where user_id=$1', [fresh]);
+    assert.deepEqual(m, { start_quarter: day, start_cycle_id: cycle });
+    // A member with records in the cycle cannot be "reset" this way.
+    await fails(db, 'select public.men_set_fresh_start($1, $2)', [id.member, batch], /سجلات/);
+
+    // Database guard: sequential enforcement from the baseline.
+    const as = async (uid: string) => {
+      await db.query('reset role');
+      await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: uid, role: 'authenticated' })]);
+      await db.query('set local role authenticated');
+    };
+    const ins = (uid: string, q: number) => `insert into tasmia_submissions(cycle_id,user_id,listener_id,quarter_number) values('${cycle}','${uid}','${id.peer}',${q})`;
+    await as(fresh);
+    await fails(db, ins(fresh, 1), [], new RegExp(`\(${day}\)`)); // quarter 1 is not owed: required is the start
+    await fails(db, ins(fresh, day - 1), [], new RegExp(`\(${day}\)`));
+    await fails(db, ins(fresh, day + 1), [], new RegExp(`\(${day}\)`)); // cannot skip the start
+    await db.query(ins(fresh, day));
+    await fails(db, ins(fresh, day + 1), [], /أتممت بالفعل/); // next one becomes due tomorrow (never ahead)
+    // A normal new member still starts at quarter 1.
+    await as(normal);
+    await fails(db, ins(normal, day), [], /\(1\)/);
+    await db.query('reset role');
+
+    // Shared calculation from the baseline: no earlier recitation debt, today's quarter done.
+    const recs = (await db.query('select user_id member_id, quarter_number from tasmia_submissions where user_id=$1', [fresh])).rows;
+    const st = calculateMemberRequiredQuarter(fresh, day, recs, day);
+    assert.deepEqual([st.pastMissedQuartersCount, st.allCompletedUpToToday, st.requiredQuarter], [0, true, day]);
+    const st0 = calculateMemberRequiredQuarter(fresh, day, [], day);
+    assert.deepEqual([st0.requiredQuarter, st0.pastMissedQuartersCount, st0.isBehind], [day, 0, false]);
+    assert.equal(calculateMemberRequiredQuarter(normal, day, [], 1).pastMissedQuartersCount, day - 1);
+
+    // Moving the membership elsewhere / a new cycle: the baseline belongs to this cycle only.
+    assert.equal((await one('select count(*)::int n from batch_memberships where start_cycle_id is not null')).n, 1);
+    assert.equal((await one('select count(*)::int p from profiles')).p, before + 2);
+  } finally {
+    await db.query('rollback');
+  }
+  // Nothing persisted: all real accounts and memberships unchanged.
+  assert.equal((await one('select count(*)::int n from batch_memberships where start_quarter is not null')).n, 0);
 });

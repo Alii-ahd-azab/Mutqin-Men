@@ -31,6 +31,7 @@ export const AdminMemberModal: React.FC<AdminMemberModalProps> = ({
   const [batchId, setBatchId] = useState(defaultBatchId);
   const [adminType, setAdminType] = useState<AdminType>('batch');
   const [adminBatchIds, setAdminBatchIds] = useState<string[]>([defaultBatchId]);
+  const [freshStart, setFreshStart] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
 
   // Default the batch fields to the batch currently being managed.
@@ -49,6 +50,7 @@ export const AdminMemberModal: React.FC<AdminMemberModalProps> = ({
     setPassword('');
     setRole('member');
     setAdminType('batch');
+    setFreshStart(false);
     setErrorMsg('');
   };
 
@@ -77,6 +79,7 @@ export const AdminMemberModal: React.FC<AdminMemberModalProps> = ({
 
     if (role === 'member') {
       payload.batch_id = batchId;
+      if (freshStart) payload.fresh_start = true;
     } else {
       payload.is_master_admin = adminType === 'master';
       if (adminType === 'batch') {
@@ -240,6 +243,22 @@ export const AdminMemberModal: React.FC<AdminMemberModalProps> = ({
               <p className="mt-1 text-[10px] text-stone-500">
                 ينتمي العضو لدفعة واحدة فقط، ولا يمكن نقله لاحقًا من هنا.
               </p>
+
+              <label className="mt-3 flex items-start gap-2 p-3 rounded-xl border border-emerald-200 bg-emerald-50/60 cursor-pointer">
+                <input
+                  id="new-member-fresh-start"
+                  type="checkbox"
+                  checked={freshStart}
+                  onChange={(e) => setFreshStart(e.target.checked)}
+                  className="mt-0.5 accent-emerald-700"
+                />
+                <span className="text-xs text-emerald-950">
+                  <span className="font-bold block">يبدأ من وضع الدفعة الحالي بدون متأخرات سابقة</span>
+                  <span className="text-[11px] text-emerald-900/75 leading-relaxed">
+                    يبدأ التسميع من ربع اليوم الحالي للدفعة، ولا تُحسب عليه الأرباع ولا أيام المراجعة السابقة.
+                  </span>
+                </span>
+              </label>
             </div>
           ) : (
             <div className="space-y-3">

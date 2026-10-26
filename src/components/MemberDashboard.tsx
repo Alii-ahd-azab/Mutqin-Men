@@ -117,11 +117,15 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   );
   const hasReviewedToday = Boolean(todayRevision);
 
+  // Fresh-start members owe quarters only from their starting quarter.
+  const startQuarter = allMembers.find((m) => m.id === currentUser.id)?.batch_start_quarter ?? 1;
+
   // Calculate personal required quarter for current user
   const userQuarterStatus = calculateMemberRequiredQuarter(
     currentUser.id,
     cycleInfo.quarter_of_day,
-    recitations
+    recitations,
+    startQuarter
   );
 
   // Active program cycle dates (excluding rest days and pauses)
@@ -152,9 +156,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       activeCycleDates,
       revisions,
       cycleInfo.today_date,
-      joinedOnDate
+      joinedOnDate,
+      settings
     );
-  }, [currentUser.id, activeCycleDates, revisions, cycleInfo.today_date, joinedOnDate]);
+  }, [currentUser.id, activeCycleDates, revisions, cycleInfo.today_date, joinedOnDate, settings]);
 
   const pastMissedQuartersCount = userQuarterStatus.pastMissedQuartersCount;
   const pastMissedRevisionDaysCount = userRevisionStatus.pastMissedRevisionDaysCount;
@@ -176,7 +181,9 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       liveTest.test_type === 'mandatory' &&
       !hasPassedLiveTest &&
       cycleInfo.has_started &&
-      nextQuarterToRecite > liveTest.range_end
+      nextQuarterToRecite > liveTest.range_end &&
+      // tests of quarters before a fresh start never apply (same as the database rule)
+      liveTest.range_start >= startQuarter
   );
   const currentRecitationQuarterNum = isAllCaughtUp
     ? cycleInfo.quarter_of_day
@@ -1002,6 +1009,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         onSubmit={onRecordRecitation}
         currentUser={currentUser}
         members={peerMembers}
+        startQuarter={startQuarter}
         cycleInfo={cycleInfo}
         recitations={recitations}
         loading={loading}

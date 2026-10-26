@@ -140,10 +140,31 @@ Deno.serve(async (req) => {
           400
         );
       }
+      // Men: "fresh start" — the member joins at the batch's current quarter with no earlier debt.
+      let startQuarter: number | undefined;
+      if (role === 'member' && body.fresh_start === true) {
+        const { data: fresh, error: freshError } = await admin.rpc('men_set_fresh_start', {
+          p_user_id: newUserId,
+          p_batch_id: memberBatchId,
+        });
+        if (freshError) {
+          console.error('admin-users fresh start failed', { newUserId, code: freshError.code, message: freshError.message });
+          const { error: rollbackError } = await admin.auth.admin.deleteUser(newUserId);
+          if (rollbackError) console.error('admin-users rollback failed:', newUserId, rollbackError);
+          return json({ error: 'تعذر تعيين بداية العضو من وضع الدفعة الحالي. لم يتم إنشاء الحساب.' }, 400);
+        }
+        startQuarter = (fresh as { start_quarter: number }).start_quarter;
+      }
       return json(
         {
           user: mapUser(await loadProfile(admin, newUserId)),
-          message: role === 'admin' ? 'تمت إضافة المشرف بنجاح' : 'تمت إضافة العضو بنجاح',
+          ...(startQuarter ? { start_quarter: startQuarter } : {}),
+          message:
+            role === 'admin'
+              ? 'تمت إضافة المشرف بنجاح'
+              : startQuarter && startQuarter > 1
+              ? `تمت إضافة العضو بنجاح، ويبدأ من الربع ${startQuarter} دون متأخرات سابقة`
+              : 'تمت إضافة العضو بنجاح',
         },
         201
       );

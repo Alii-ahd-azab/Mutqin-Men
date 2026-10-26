@@ -171,6 +171,13 @@ const MainApp: React.FC = () => {
     await loadBatches(batch.id);
   };
 
+  // Rename a batch (same id: members, cycle and history unchanged); refresh the names shown.
+  const handleRenameBatch = async (batchId: string, name: string) => {
+    await api.adminRenameBatch(batchId, name);
+    const { batches } = await api.getAccessibleBatches();
+    setAccessibleBatches(batches);
+  };
+
   const requireSelectedBatch = (): string => {
     if (!selectedBatchId) throw new Error('يرجى اختيار الدفعة أولاً');
     return selectedBatchId;
@@ -319,6 +326,7 @@ const MainApp: React.FC = () => {
             onSelect={handleSelectBatch}
             canCreate={isMasterAdmin}
             onBatchCreated={handleBatchCreated}
+            onRename={handleRenameBatch}
           />
         )}
 

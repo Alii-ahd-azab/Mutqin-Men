@@ -270,6 +270,98 @@ Deno.serve(async (req) => {
     }
 
     /*
+     * RENAME A BATCH (Men)
+     *
+     * Master admins may rename any batch;
+     * a batch admin only a batch assigned
+     * to him (requireManagedBatch). Only
+     * the display name changes: same id,
+     * members, cycles and history.
+     */
+    if (
+      action ===
+      'rename-batch'
+    ) {
+      const batch =
+        await requireManagedBatch(
+          admin,
+          caller,
+          body.batch_id
+        );
+
+      const name =
+        String(
+          body.name ?? ''
+        ).replace(/\s+/g, ' ').trim();
+
+      if (!name) {
+        return json(
+          {
+            error:
+              'اسم الدفعة مطلوب',
+          },
+          400
+        );
+      }
+
+      if (name.length > 60) {
+        return json(
+          {
+            error:
+              'اسم الدفعة طويل جدًا (60 حرفًا كحد أقصى)',
+          },
+          400
+        );
+      }
+
+      const {
+        data,
+        error,
+      } =
+        await admin
+          .from('batches')
+          .update({ name })
+          .eq('id', batch.id)
+          .select('id, name, created_at, archived_at')
+          .single();
+
+      if (error || !data) {
+        if (
+          error?.code ===
+          '23505'
+        ) {
+          return json(
+            {
+              error:
+                'توجد دفعة بهذا الاسم بالفعل',
+            },
+            409
+          );
+        }
+
+        console.error(
+          'admin-actions rename-batch failed',
+          { batchId: batch.id, code: error?.code, message: error?.message }
+        );
+
+        return json(
+          {
+            error:
+              'تعذر تعديل اسم الدفعة',
+          },
+          400
+        );
+      }
+
+      return json({
+        success: true,
+        batch: data,
+        message:
+          `تم تعديل اسم الدفعة إلى «${name}»`,
+      });
+    }
+
+    /*
      * Unknown action
      */
     return json(
