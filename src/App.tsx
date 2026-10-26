@@ -65,6 +65,22 @@ const MainApp: React.FC = () => {
     }
   }, [currentUser]);
 
+  // As in Sisters: a different account never sees the previous account's data, even briefly.
+  const currentUserId = currentUser?.id ?? null;
+  useEffect(() => {
+    loadSeq.current++; // ignore any response still in flight for the previous account
+    setCycleInfo(null);
+    setSettings(null);
+    setRestDays([]);
+    setAllUsers([]);
+    setRecitations([]);
+    setRevisions([]);
+    setTests([]);
+    setActiveTest(null);
+    setTestAttempts([]);
+    setInitError(null);
+  }, [currentUserId]);
+
   useEffect(() => {
     if (currentUser) {
       loadAppData();

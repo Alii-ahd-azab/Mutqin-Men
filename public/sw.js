@@ -1,6 +1,6 @@
 // Service Worker for "متقن" PWA
 // Purpose: Satisfies PWA installability criteria for Chrome/Android
-// Note: Intentionally does NOT cache any Firestore, API, or dynamic requests to ensure 100% live real-time data.
+// Note: Intentionally does NOT cache any Supabase or other dynamic requests to ensure 100% live data.
 
 self.addEventListener('install', (event) => {
   self.skipWaiting();

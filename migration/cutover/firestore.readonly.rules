@@ -1,0 +1,15 @@
+rules_version = '2';
+// Phase J: Firestore becomes a read-only rollback/reference copy of Mutqin for Men.
+// Deployed at the START of the go-live window (runbook step 1) so no write can land after the final export:
+//   node migration/cutover/freeze-firestore.mjs freeze
+// Every write through client SDKs — including the legacy server account — is denied.
+// Firebase Admin SDK reads used by migration/export.mjs are not subject to rules and keep working.
+// Rollback: `node migration/cutover/freeze-firestore.mjs restore` redeploys the exact pre-freeze live ruleset.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{document=**} {
+      allow read: if request.auth != null && request.auth.token.email == 'herotero13@gmail.com';
+      allow write: if false;
+    }
+  }
+}

@@ -1,0 +1,12 @@
+-- Read-only catalog query for the confirmed Sisters project. No production records.
+select jsonb_build_object(
+ 'columns',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select table_schema,table_name,column_name,data_type,udt_schema,udt_name,is_nullable,column_default from information_schema.columns where table_schema in ('public','private','app_private') order by table_schema,table_name,ordinal_position)x),
+ 'constraints',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select n.nspname as schema,t.relname as table_name,c.conname,c.contype,pg_get_constraintdef(c.oid) as definition from pg_constraint c join pg_class t on t.oid=c.conrelid join pg_namespace n on n.oid=t.relnamespace where n.nspname in ('public','private','app_private'))x),
+ 'indexes',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select * from pg_indexes where schemaname in ('public','private','app_private'))x),
+ 'functions',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select n.nspname as schema,p.proname,pg_get_functiondef(p.oid) as definition,p.proacl from pg_proc p join pg_namespace n on n.oid=p.pronamespace where n.nspname in ('public','private','app_private') and p.prokind='f')x),
+ 'triggers',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select n.nspname as schema,c.relname as table_name,t.tgname,pg_get_triggerdef(t.oid) as definition from pg_trigger t join pg_class c on c.oid=t.tgrelid join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('public','private','app_private') and not t.tgisinternal)x),
+ 'policies',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select * from pg_policies where schemaname in ('public','private','app_private'))x),
+ 'views',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select * from pg_views where schemaname in ('public','private','app_private'))x),
+ 'enums',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select n.nspname as schema,t.typname,e.enumlabel,e.enumsortorder from pg_type t join pg_namespace n on n.oid=t.typnamespace join pg_enum e on e.enumtypid=t.oid where n.nspname in ('public','private','app_private'))x),
+ 'access',(select coalesce(jsonb_agg(to_jsonb(x)),'[]') from (select n.nspname as schema,c.relname,c.relrowsecurity,c.relforcerowsecurity,c.relacl from pg_class c join pg_namespace n on n.oid=c.relnamespace where n.nspname in ('public','private','app_private') and c.relkind in ('r','v','m','p'))x)
+) as schema_catalog;
