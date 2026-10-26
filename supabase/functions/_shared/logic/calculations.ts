@@ -236,7 +236,9 @@ export function calculateCycleInfo(
 export function calculateMemberRequiredQuarter(
   memberId: string,
   groupQuarterOfDay: number,
-  recitationLogs: { member_id?: string; reciter_id?: string; quarter_number: number }[]
+  recitationLogs: { member_id?: string; reciter_id?: string; quarter_number: number }[],
+  /** Fresh start: first quarter owed (quarters before it are never required). */
+  startQuarter: number = 1
 ): {
   requiredQuarter: number;
   isBehind: boolean;
@@ -272,7 +274,8 @@ export function calculateMemberRequiredQuarter(
   const pastMissedQuarters: number[] = [];
   let firstMissingQuarter: number | null = null;
 
-  for (let q = 1; q <= groupQuarterOfDay; q++) {
+  const firstOwed = Math.max(1, startQuarter);
+  for (let q = firstOwed; q <= groupQuarterOfDay; q++) {
     if (!completedQuarters.has(q)) {
       missedQuarters.push(q);
       if (firstMissingQuarter === null) {
@@ -359,6 +362,8 @@ export interface MemberRevisionStatus {
   totalCompletedRevisions: number;
   isBehindRevision: boolean; // 1 or more past missed days
   isSeverelyBehindRevision: boolean; // more than 3 past missed days (4+)
+  /** Review rows of the member that credit no owed day (extra or duplicate confirmations). */
+  uncreditedReviews: { date: string; review_end_quarter?: number }[];
 }
 
 /** The calendar date (YYYY-MM-DD) of a membership's joined_at timestamp. */
@@ -368,35 +373,44 @@ export function joinedOnDateFromTimestamp(joinedAt?: string | null): string | un
   return Number.isNaN(parsed.getTime()) ? undefined : formatDate(parsed);
 }
 
+/** The calendar facts the review identity needs (from GroupSettings). */
+export type RevisionCalendar = Pick<GroupSettings, 'total_paused_days' | 'total_quarters'>;
+
 /**
- * Calculates the revision status for a member:
- * - Counts active cycle dates BEFORE today that have no RevisionLog for this member (actual past delays)
- * - Flags if 1 or more past days are missed (member warning)
- * - Flags if more than 3 past days are missed (severe delay / eligible for admin exclusion)
+ * Calculates the revision status for a member.
+ *
+ * Identity (as in Mutqin for Sisters, where reviews carry program_day): a review obligation is a
+ * PROGRAM DAY, not a calendar date. Each active date has a program day (the database's
+ * men_cycle_day: active dates so far minus the migrated program's undated paused days, clamped to
+ * 1..total_quarters); several dates can share one day (the clamped start) and rest/pause dates add
+ * none. The obligation of day d is shown on the last active date with that day.
+ *
+ * A stored review row satisfies the day in its end_quarter: the database computed it from the
+ * program calendar at confirmation time, so it is the day that was actually reviewed and it never
+ * changes afterwards — whatever its calendar date (same day, late, on a rest or pause day) and
+ * whatever later calendar edits do to that date (rest days, past pause periods, undated paused
+ * days). A 9→16 review therefore never satisfies 8→15. Rows without a range fall back to the day
+ * of their date.
+ *
+ * - past missed = owed days whose date is before today with no review of that day
+ * - severe delay = more than 3 (4+) past missed days
  */
 export function calculateMemberRevisionStatus(
   memberId: string,
   activeCycleDates: string[],
-  revisionLogs: RevisionLog[],
+  revisionLogs: (Pick<RevisionLog, 'member_id' | 'date'> & Partial<Pick<RevisionLog, 'review_end_quarter'>>)[],
   todayDateStr: string = formatDate(),
-  joinedOnDate?: string
+  joinedOnDate?: string,
+  calendar?: RevisionCalendar
 ): MemberRevisionStatus {
   const memberLogs = revisionLogs.filter((r) => r.member_id === memberId);
   const reviewedDates = new Set(memberLogs.map((r) => r.date));
+  const legacyPaused = calendar?.total_paused_days || 0;
+  const maxDay = calendar?.total_quarters || 240;
+  const dayAt = (index: number) => Math.min(maxDay, Math.max(1, index + 1 - legacyPaused));
 
-  /*
-   * A review obligation is identified by its ACTIVE program day (as in Mutqin for
-   * Sisters), not by an arbitrary calendar date. Men reviews are stored by date,
-   * and a review dated on a rest or pause day carries the range of the last active
-   * day before it (the database computes it with men_cycle_day). So each review
-   * satisfies the latest active date on or before its own date: an active date
-   * matches itself; a rest/pause date credits the active day whose range it holds.
-   * Adding a rest day later never turns a completed review into a missed one, and
-   * distinct active days are never merged. Future-dated reviews credit nothing.
-   */
-  const satisfiedDates = new Set<string>();
-  for (const date of reviewedDates) {
-    if (date > todayDateStr) continue;
+  // Program day of any date = day of the latest active date on or before it (0 before the start).
+  const dayOfDate = (date: string) => {
     let lo = 0;
     let hi = activeCycleDates.length - 1;
     let match = -1;
@@ -409,16 +423,83 @@ export function calculateMemberRevisionStatus(
         hi = mid - 1;
       }
     }
-    if (match >= 0) satisfiedDates.add(activeCycleDates[match]);
+    return match >= 0 ? dayAt(match) : 0;
+  };
+
+  // Each program day's obligation date: the last active date carrying that day.
+  const obligationDateOfDay = new Map<number, string>();
+  activeCycleDates.forEach((date, i) => obligationDateOfDay.set(dayAt(i), date));
+
+  /*
+   * Each review row can satisfy ONE day: the day in its stored range (end_quarter), or the day of
+   * the date it was confirmed on (the card the member confirmed then). Both identities are needed
+   * because later calendar edits move dates between days in either direction (undated paused days,
+   * past pause periods, rest days): a row may hold the right range on another date, or sit on the
+   * right date with the range of the calendar at that time. A maximum matching between owed days
+   * and rows credits every day that some distinct row accounts for, never one row twice.
+   * Future-dated rows credit nothing.
+   */
+  const rowsByDay = new Map<number, number[]>();
+  memberLogs.forEach((log, rowIndex) => {
+    if (log.date > todayDateStr) return;
+    const days = new Set([dayOfDate(log.date)]);
+    if (typeof log.review_end_quarter === 'number') days.add(log.review_end_quarter);
+    for (const day of days) {
+      if (day <= 0) continue;
+      if (!rowsByDay.has(day)) rowsByDay.set(day, []);
+      rowsByDay.get(day)!.push(rowIndex);
+    }
+  });
+
+  const owedDays = [...obligationDateOfDay.entries()]
+    // Days before the member joined his current batch are not owed.
+    .filter(([, date]) => !(joinedOnDate && date < joinedOnDate))
+    .map(([day]) => day);
+  const dayOfRow = new Map<number, number>();
+  const tryAssign = (day: number, seen: Set<number>): boolean => {
+    for (const row of rowsByDay.get(day) || []) {
+      if (seen.has(row)) continue;
+      seen.add(row);
+      const holder = dayOfRow.get(row);
+      if (holder === undefined || tryAssign(holder, seen)) {
+        dayOfRow.set(row, day);
+        return true;
+      }
+    }
+    return false;
+  };
+  const reviewedDays = new Set<number>();
+  for (const day of owedDays) if (tryAssign(day, new Set())) reviewedDays.add(day);
+  /*
+   * Same number of credited days, but the stored range wins ties: when a day is still open while
+   * the row holding exactly its range was used for its confirmation date instead, give the row back
+   * to its range (a late 8→15 confirmation satisfies 8→15; its confirmation date is then the open
+   * day). Every swap turns a date assignment into a range assignment, so this terminates.
+   */
+  for (let changed = true; changed; ) {
+    changed = false;
+    const matched = new Set(dayOfRow.values());
+    for (const day of owedDays) {
+      if (matched.has(day)) continue;
+      const row = (rowsByDay.get(day) || []).find(
+        (r) => memberLogs[r].review_end_quarter === day && dayOfRow.get(r) !== day
+      );
+      if (row === undefined) continue;
+      dayOfRow.set(row, day);
+      changed = true;
+      break;
+    }
   }
+  reviewedDays.clear();
+  for (const day of dayOfRow.values()) reviewedDays.add(day);
 
   const missedDates: string[] = [];
   const pastMissedDates: string[] = [];
 
-  for (const date of activeCycleDates) {
+  for (const [day, date] of obligationDateOfDay) {
     // Days before the member joined his current batch are not owed.
     if (joinedOnDate && date < joinedOnDate) continue;
-    if (!satisfiedDates.has(date)) {
+    if (!reviewedDays.has(day)) {
       missedDates.push(date);
       if (date < todayDateStr) {
         pastMissedDates.push(date);
@@ -426,11 +507,13 @@ export function calculateMemberRevisionStatus(
     }
   }
 
+  const isTodayProgramDay = activeCycleDates.includes(todayDateStr);
   const pastMissedCount = pastMissedDates.length;
-  const hasReviewedToday = reviewedDates.has(todayDateStr);
+  const hasReviewedToday =
+    reviewedDates.has(todayDateStr) || (isTodayProgramDay && reviewedDays.has(dayOfDate(todayDateStr)));
 
   return {
-    isTodayProgramDay: activeCycleDates.includes(todayDateStr),
+    isTodayProgramDay,
     missedRevisionDaysCount: pastMissedCount,
     pastMissedRevisionDaysCount: pastMissedCount,
     pastMissedDates,
@@ -439,6 +522,9 @@ export function calculateMemberRevisionStatus(
     totalCompletedRevisions: memberLogs.length,
     isBehindRevision: pastMissedCount >= 1,
     isSeverelyBehindRevision: pastMissedCount > 3,
+    uncreditedReviews: memberLogs
+      .filter((_, i) => !dayOfRow.has(i))
+      .map((log) => ({ date: log.date, review_end_quarter: log.review_end_quarter })),
   };
 }
 

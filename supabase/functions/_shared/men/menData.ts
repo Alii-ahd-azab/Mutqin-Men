@@ -78,34 +78,49 @@ export async function loadActiveCycle(db: SupabaseLike, batchId: string): Promis
 }
 
 /** Members of the batch (any status), its admins, and master admins. */
-export async function loadBatchUsers(db: SupabaseLike, batchId: string): Promise<User[]> {
+export async function loadBatchUsers(db: SupabaseLike, batchId: string, activeCycleId?: string): Promise<User[]> {
   const [memberships, masters] = await Promise.all([
     db
       .from('batch_memberships')
-      .select(`membership_role, joined_at, profile:profiles!batch_memberships_user_id_fkey(${PROFILE_COLUMNS})`)
+      .select(`membership_role, joined_at, start_cycle_id, start_quarter, profile:profiles!batch_memberships_user_id_fkey(${PROFILE_COLUMNS})`)
       .eq('batch_id', batchId),
     db.from('profiles').select(PROFILE_COLUMNS).eq('role', 'admin').eq('is_master_admin', true),
   ]);
   const byId = new Map<string, ProfileRow>();
   // When each MEMBER joined this batch (revision debt starts there).
   const joinedAt = new Map<string, string>();
-  for (const row of check<{ membership_role: string; joined_at: string; profile: ProfileRow | null }[]>(memberships) || []) {
+  // Fresh-start baseline, only for the batch's active cycle.
+  const startQuarter = new Map<string, number>();
+  type MembershipRow = {
+    membership_role: string;
+    joined_at: string;
+    start_cycle_id: string | null;
+    start_quarter: number | null;
+    profile: ProfileRow | null;
+  };
+  for (const row of check<MembershipRow[]>(memberships) || []) {
     if (!row.profile) continue;
     byId.set(row.profile.id, row.profile);
     if (row.membership_role === 'member') joinedAt.set(row.profile.id, row.joined_at);
+    if (row.start_quarter && activeCycleId && row.start_cycle_id === activeCycleId) startQuarter.set(row.profile.id, row.start_quarter);
   }
   for (const row of check<ProfileRow[]>(masters) || []) byId.set(row.id, row);
   return legacyOrder([...byId.values()], (r) => r.created_at).map((row) => {
     const user = mapUser(row);
     const joined = joinedAt.get(row.id);
-    return joined ? { ...user, batch_joined_at: joined } : user;
+    const start = startQuarter.get(row.id);
+    return {
+      ...user,
+      ...(joined ? { batch_joined_at: joined } : {}),
+      ...(start ? { batch_start_quarter: start } : {}),
+    };
   });
 }
 
 export async function loadProgram(db: SupabaseLike, batchId: string): Promise<ProgramState> {
   const cycle = await loadActiveCycle(db, batchId);
   const [users, pauses, thought, restRows, tasmiaRows, reviewRows] = await Promise.all([
-    loadBatchUsers(db, batchId),
+    loadBatchUsers(db, batchId, cycle.id),
     db.from('program_pauses').select('paused_on, resumed_on').eq('cycle_id', cycle.id).then(check),
     db
       .from('daily_thoughts')

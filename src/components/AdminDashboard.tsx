@@ -229,6 +229,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         revisions,
         todayDate: cycleInfo.today_date,
         joinedOnDate: joinedOnDateFromTimestamp(m.batch_joined_at),
+        startQuarter: m.batch_start_quarter,
+        calendar: settings,
       });
 
       const {
@@ -333,7 +335,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
       const quarterStatus = calculateMemberRequiredQuarter(
         m.id,
         cycleInfo.quarter_of_day,
-        recitations
+        recitations,
+        m.batch_start_quarter
       );
 
       const commitmentRate =

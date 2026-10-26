@@ -57,6 +57,8 @@ export interface NewAccountPayload {
   password: string;
   role: UserRole;
   batch_id?: string; // required when role === 'member'
+  // Men: member joins at the batch's current quarter, with no earlier Tasmi'a or review debt
+  fresh_start?: boolean;
   is_master_admin?: boolean; // role === 'admin' only (master admins only)
   batch_ids?: string[]; // role === 'admin' && !is_master_admin
 }

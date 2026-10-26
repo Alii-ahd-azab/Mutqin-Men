@@ -432,6 +432,18 @@ export const api = {
     );
   },
 
+  /* Master admin: any batch; batch admin: an assigned batch only (checked by admin-actions). */
+  async adminRenameBatch(batchId: string, name: string): Promise<{ batch: Batch; message: string }> {
+    const clean = String(name || '').replace(/\s+/g, ' ').trim();
+    if (!clean) throw new Error('اسم الدفعة مطلوب');
+    if (clean.length > 60) throw new Error('اسم الدفعة طويل جدًا (60 حرفًا كحد أقصى)');
+    return invokeFunction(
+      'admin-actions',
+      { action: 'rename-batch', batch_id: requireBatchId(batchId), name: clean },
+      'تعذر تعديل اسم الدفعة. حاول مرة أخرى.'
+    );
+  },
+
   async adminAddRestDay(batchId: string, payload: { date: string; note: string }): Promise<{ message: string }> {
     if (!payload.date || !/^\d{4}-\d{2}-\d{2}$/.test(payload.date)) throw new Error('يرجى تحديد تاريخ صحيح ليوم الاستدراك والراحة (YYYY-MM-DD)');
     const [cycle, profile] = await Promise.all([loadActiveCycle(supabase, requireBatchId(batchId)), getCurrentProfile()]);

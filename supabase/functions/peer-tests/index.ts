@@ -52,6 +52,7 @@ type CycleRow = {
 type BatchMember = {
   id: string;
   name: string;
+  startQuarter: number;
 };
 
 type BatchProgress = {
@@ -130,7 +131,7 @@ async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promis
   const completedById = new Map<string, Set<number>>();
   for (const u of program.users) {
     if (u.role !== 'member' || !u.is_active || !u.batch_joined_at) continue;
-    members.push({ id: u.id, name: u.name });
+    members.push({ id: u.id, name: u.name, startQuarter: u.batch_start_quarter ?? 1 });
     delayById.set(
       u.id,
       computeMemberDelayStatus({
@@ -141,6 +142,8 @@ async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promis
         revisions: program.revisionLogs,
         todayDate: today,
         joinedOnDate: joinedOnDateFromTimestamp(u.batch_joined_at),
+        startQuarter: u.batch_start_quarter,
+        calendar: program.settings,
       })
     );
     completedById.set(u.id, new Set());
@@ -181,7 +184,8 @@ function evaluate(
         progress.activeDates,
         progress.program.revisionLogs,
         progress.today,
-        joinedOnDateFromTimestamp(progress.program.users.find((u) => u.id === memberId)?.batch_joined_at)
+        joinedOnDateFromTimestamp(progress.program.users.find((u) => u.id === memberId)?.batch_joined_at),
+        progress.program.settings
       )
     : undefined;
   return evaluateCandidate({
@@ -552,6 +556,8 @@ Deno.serve(async (req) => {
         (m) =>
           isInAudience(test, selected, m.id) &&
           !(passed.get(m.id) || []).some((a) => a.covers_full_range !== false) &&
+          // tests of quarters before a fresh start never apply (same as the database rule)
+          test.range_start >= m.startQuarter &&
           nextTasmiaQuarter(progress.delayById.get(m.id)!, progress.quarterOfDay) > test.range_end
       );
       return json({

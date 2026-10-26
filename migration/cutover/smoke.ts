@@ -379,6 +379,53 @@ async function main() {
           record('partial-range test: candidate tested on the recited part only', !!pb && pb.is_eligible === true && pb.effective_range_end === bDone && pb.covers_full_range === false, JSON.stringify(pb));
           if (pid) await invoke(h.client, 'peer-tests', { action: 'admin-status', test_id: pid, status_action: 'finish' });
         }
+
+        // ---- Fresh-start member (created at the batch's current quarter, no earlier debt) ----
+        const dayOfS = 3; // the smoke batch started two days ago: today is its day 3
+        const gPassword = password();
+        const gCreate = await invoke(h.client, 'admin-users', { action: 'create', name: 'SMOKE G', phone: '000000000014', password: gPassword, role: 'member', batch_id: S, fresh_start: true });
+        if (gCreate.data?.user?.id) created.push({ key: 'G', id: gCreate.data.user.id, phone: '000000000014', password: gPassword, role: 'member' });
+        const G = created.find((c) => c.key === 'G');
+        record('batch admin creates a fresh-start member at the batch quarter', !!G && gCreate.data?.start_quarter === dayOfS, `${gCreate.status} ${JSON.stringify(gCreate.data?.start_quarter)} ${gCreate.message ?? ''}`);
+        const hFreshOther = await invoke(h.client, 'admin-users', { action: 'create', name: 'x', phone: '000000000015', password: 'abcdef12', role: 'member', batch_id: batchId, fresh_start: true });
+        record('fresh-start creation respects batch scope', hFreshOther.status === 403);
+        const gMembership = G ? (await service.from('batch_memberships').select('start_quarter, start_cycle_id').eq('user_id', G.id).single()).data : null;
+        record('fresh-start baseline stored on the membership', gMembership?.start_quarter === dayOfS && gMembership?.start_cycle_id === smokeCycle.id, JSON.stringify(gMembership));
+        if (G) {
+          const g = await signIn(G);
+          const g1 = await g.client.from('tasmia_submissions').insert({ cycle_id: smokeCycle.id, user_id: G.id, listener_id: A.id, quarter_number: 1 });
+          record('fresh-start member does not owe quarter 1', !!g1.error && new RegExp(`\\(${dayOfS}\\)`).test(g1.error.message), g1.error?.message);
+          const gSkip = await g.client.from('tasmia_submissions').insert({ cycle_id: smokeCycle.id, user_id: G.id, listener_id: A.id, quarter_number: dayOfS + 1 });
+          record('fresh-start member cannot skip his first quarter', !!gSkip.error, gSkip.error?.message);
+          const gOk = await g.client.from('tasmia_submissions').insert({ cycle_id: smokeCycle.id, user_id: G.id, listener_id: A.id, quarter_number: dayOfS });
+          record('fresh-start member records his first quarter', !gOk.error, gOk.error?.message);
+          const gState = await loadProgram(g.client, S);
+          const me = gState.users.find((u) => u.id === G.id);
+          record('loader exposes the baseline and the join date', me?.batch_start_quarter === dayOfS && !!me?.batch_joined_at);
+        }
+        const normal = (await service.from('batch_memberships').select('start_quarter').in('user_id', [A.id, B.id, C.id])).data || [];
+        record('members created without the option keep the normal baseline', normal.length === 3 && normal.every((m) => m.start_quarter === null));
+
+        // ---- Rename batch (master: any; batch admin: assigned only; member/anon: never) ----
+        const mainName = (await service.from('batches').select('name').eq('id', batchId).single()).data?.name;
+        const eRename = await invoke(e.client, 'admin-actions', { action: 'rename-batch', batch_id: S, name: SMOKE_BATCH_NAME + ' م' });
+        record('master admin renames a batch', eRename.status === 200 && eRename.data?.batch?.name === SMOKE_BATCH_NAME + ' م' && eRename.data.batch.id === S, `${eRename.status} ${eRename.message ?? ''}`);
+        const hRename = await invoke(h.client, 'admin-actions', { action: 'rename-batch', batch_id: S, name: '  ' + SMOKE_BATCH_NAME + '   ب ' });
+        record('assigned batch admin renames his batch (trimmed)', hRename.status === 200 && hRename.data?.batch?.name === SMOKE_BATCH_NAME + ' ب', `${hRename.status} ${hRename.data?.batch?.name}`);
+        const hOtherRename = await invoke(h.client, 'admin-actions', { action: 'rename-batch', batch_id: batchId, name: 'x' });
+        record('batch admin cannot rename an unassigned batch', hOtherRename.status === 403, `${hOtherRename.status}`);
+        const aRename = await invoke(a2.client, 'admin-actions', { action: 'rename-batch', batch_id: S, name: 'x' });
+        record('member cannot rename a batch', aRename.status === 403, `${aRename.status}`);
+        const anonRename = await invoke(createClient(url, publishable, { auth: { persistSession: false } }), 'admin-actions', { action: 'rename-batch', batch_id: S, name: 'x' });
+        record('unauthenticated rename denied', anonRename.status === 401 || anonRename.status === 403, `${anonRename.status}`);
+        const blank = await invoke(e.client, 'admin-actions', { action: 'rename-batch', batch_id: S, name: '   ' });
+        record('whitespace-only name refused', blank.status === 400);
+        const dupName = await invoke(e.client, 'admin-actions', { action: 'rename-batch', batch_id: S, name: mainName });
+        record('duplicate batch name refused', dupName.status === 409);
+        const afterRename = (await service.from('cycles').select('id, status').eq('batch_id', S)).data || [];
+        const sMembers = (await service.from('batch_memberships').select('user_id').eq('batch_id', S)).data || [];
+        record('rename changes only the name (same id, cycle and members)', afterRename.length === 1 && afterRename[0].id === smokeCycle.id && sMembers.length >= 4);
+        record('main batch name untouched', (await service.from('batches').select('name').eq('id', batchId).single()).data?.name === mainName);
       }
     }
 

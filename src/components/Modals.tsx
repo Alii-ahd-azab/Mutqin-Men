@@ -15,6 +15,8 @@ interface RecitationModalProps {
   }) => Promise<void>;
   currentUser: User;
   members: User[]; // Active peers excluding current user and admins
+  /** Fresh start: first quarter owed (default 1). */
+  startQuarter?: number;
   cycleInfo: CycleInfo;
   recitations: RecitationLog[];
   loading: boolean;
@@ -26,6 +28,7 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
   onSubmit,
   currentUser,
   members,
+  startQuarter = 1,
   cycleInfo,
   recitations,
   loading,
@@ -38,7 +41,8 @@ export const RecitationModal: React.FC<RecitationModalProps> = ({
   const userQuarterStatus = calculateMemberRequiredQuarter(
     currentUser.id,
     cycleInfo.quarter_of_day,
-    recitations
+    recitations,
+    startQuarter
   );
 
   const quarterNumber = userQuarterStatus.requiredQuarter;
