@@ -19,6 +19,9 @@ import {
   User,
   RecitationLog,
   RevisionLog,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
+  DistantReviewInput,
 } from './types';
 import { BookOpen, RefreshCw, Layers } from 'lucide-react';
 
@@ -61,6 +64,8 @@ const MainApp: React.FC = () => {
   const [revisions, setRevisions] = useState<RevisionLog[]>([]);
   const [peerTests, setPeerTests] = useState<PeerTest[]>([]);
   const [peerTestAttempts, setPeerTestAttempts] = useState<PeerTestAttempt[]>([]);
+  const [distantReviews, setDistantReviews] = useState<DistantReviewAssignment[]>([]);
+  const [distantCompletions, setDistantCompletions] = useState<DistantReviewCompletion[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
   // Men: personal self-test (اختبر نفسك)
@@ -81,6 +86,8 @@ const MainApp: React.FC = () => {
     setRevisions([]);
     setPeerTests([]);
     setPeerTestAttempts([]);
+    setDistantReviews([]);
+    setDistantCompletions([]);
   }, []);
 
   // Resolve which batches this account can open (the server/RLS decides).
@@ -140,6 +147,8 @@ const MainApp: React.FC = () => {
       setRevisions(bootstrapRes.revisions);
       setPeerTests(bootstrapRes.peerTests);
       setPeerTestAttempts(bootstrapRes.peerTestAttempts);
+      setDistantReviews(bootstrapRes.distantReviews);
+      setDistantCompletions(bootstrapRes.distantCompletions);
     } catch (err: any) {
       if (requestId !== loadRequestRef.current) return;
       console.error('Error fetching app data:', err);
@@ -236,6 +245,31 @@ const MainApp: React.FC = () => {
   const handleAddRestDay = async (payload: { date: string; note: string }) => {
     await api.adminAddRestDay(requireSelectedBatch(), payload);
     await loadAppData();
+  };
+
+  // «المراجعة البعيدة»: one dated day at a time (admin-actions checks the batch).
+  const handleCreateDistantReview = async (payload: DistantReviewInput) => {
+    const res = await api.adminCreateDistantReview(requireSelectedBatch(), payload);
+    await loadAppData();
+    return res.message;
+  };
+
+  const handleUpdateDistantReview = async (id: string, payload: DistantReviewInput) => {
+    const res = await api.adminUpdateDistantReview(id, payload);
+    await loadAppData();
+    return res.message;
+  };
+
+  const handleDeleteDistantReview = async (id: string) => {
+    const res = await api.adminDeleteDistantReview(id);
+    await loadAppData();
+    return res.message;
+  };
+
+  const handleCompleteDistantReview = async (assignmentId: string) => {
+    const res = await api.completeDistantReview(assignmentId);
+    await loadAppData();
+    return res.message;
   };
 
   const handleDeleteRestDay = async (id: string) => {
@@ -377,6 +411,11 @@ const MainApp: React.FC = () => {
               onAccountsChanged={loadAppData}
               onAddRestDay={handleAddRestDay}
               onDeleteRestDay={handleDeleteRestDay}
+              distantReviews={distantReviews}
+              distantCompletions={distantCompletions}
+              onCreateDistantReview={handleCreateDistantReview}
+              onUpdateDistantReview={handleUpdateDistantReview}
+              onDeleteDistantReview={handleDeleteDistantReview}
               onPause={handlePause}
               onResume={handleResume}
               onUpdateSettings={handleUpdateSettings}
@@ -400,6 +439,10 @@ const MainApp: React.FC = () => {
               revisions={revisions}
               peerTests={peerTests}
               peerTestAttempts={peerTestAttempts}
+              cycleId={cycleId}
+              distantReviews={distantReviews}
+              distantCompletions={distantCompletions}
+              onCompleteDistantReview={handleCompleteDistantReview}
               onRecordRecitation={handleRecordRecitation}
               onCorrectListener={handleCorrectListener}
               onRecordRevision={handleRecordRevision}

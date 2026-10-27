@@ -72,7 +72,8 @@ async function counts() {
   const c = async (t: string) => (await service.from(t).select('*', { count: 'exact', head: true })).count;
   const out: Record<string, number | null> = {};
   for (const t of ['profiles', 'batches', 'cycles', 'batch_memberships', 'batch_membership_transfers', 'tasmia_submissions',
-    'review_confirmations', 'peer_tests', 'peer_test_attempts', 'peer_test_selected_members', 'personal_tests', 'daily_thoughts'])
+    'review_confirmations', 'peer_tests', 'peer_test_attempts', 'peer_test_selected_members', 'personal_tests', 'daily_thoughts',
+    'group_rest_days', 'program_pauses', 'distant_review_assignments', 'distant_review_completions'])
     out[t] = await c(t);
   return out;
 }
@@ -96,6 +97,7 @@ async function main() {
   const realTests = JSON.stringify((await service.from('peer_tests').select('id, status, updated_at').eq('cycle_id', program.cycle.id).order('id')).data);
   const authBefore = (await service.auth.admin.listUsers({ page: 1, perPage: 1000 })).data.users.length;
   let smokeBatchId: string | null = null;
+  const extraBatchIds: (string | undefined)[] = [];
 
   try {
     const A = await createSmokeAccount('A', '000000000001', 'member', batchId, { bcrypt: true });
@@ -426,6 +428,98 @@ async function main() {
         const sMembers = (await service.from('batch_memberships').select('user_id').eq('batch_id', S)).data || [];
         record('rename changes only the name (same id, cycle and members)', afterRename.length === 1 && afterRename[0].id === smokeCycle.id && sMembers.length >= 4);
         record('main batch name untouched', (await service.from('batches').select('name').eq('id', batchId).single()).data?.name === mainName);
+
+        // ---- «المراجعة البعيدة»: one manual date per call, future-only management, member debt ----
+        const plus = (n: number) => new Date(Date.parse(today + 'T00:00:00Z') + n * 86400000).toISOString().slice(0, 10);
+        const dr = (client: SupabaseClient, body: Record<string, unknown>) => invoke(client, 'admin-actions', body);
+        const d1 = await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(1), start_quarter: 1, end_quarter: 12, note: 'SMOKE مراجعة' });
+        record('batch admin schedules one distant-review day in his batch', d1.status === 200 && d1.data?.assignment?.review_date === plus(1) && d1.data.assignment.note === 'SMOKE مراجعة', `${d1.status} ${d1.message ?? ''}`);
+        const d2 = await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(8), start_quarter: 20, end_quarter: 30 });
+        record('a second day is a separate manual assignment', d2.status === 200 && d2.data?.assignment?.id !== d1.data?.assignment?.id);
+        const sDays = (await service.from('distant_review_assignments').select('review_date').eq('batch_id', S)).data || [];
+        record('no recurrence: exactly the two chosen dates exist', sDays.length === 2);
+        record('duplicate date refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(1), start_quarter: 1, end_quarter: 2 })).status === 409);
+        record('today refused (future dates only)', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: today, start_quarter: 1, end_quarter: 2 })).status === 400);
+        record('past date refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(-1), start_quarter: 1, end_quarter: 2 })).status === 400);
+        record('from > to refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 13, end_quarter: 12 })).status === 400);
+        record('quarter 241 refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 1, end_quarter: 241 })).status === 400);
+        const restOnD1 = await h.client.from('group_rest_days').insert({ cycle_id: smokeCycle.id, rest_date: plus(1), created_by: H.id });
+        record('rest day refused on a distant-review date', !!restOnD1.error && /مراجعة بعيدة/.test(restOnD1.error.message), restOnD1.error?.message);
+        await h.client.from('group_rest_days').insert({ cycle_id: smokeCycle.id, rest_date: plus(5), created_by: H.id });
+        const onRest = await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(5), start_quarter: 1, end_quarter: 2 });
+        record('distant review refused on a rest day', onRest.status === 400 && /استدراك وراحة/.test(onRest.message || ''), `${onRest.status} ${onRest.message}`);
+        const id1 = d1.data?.assignment?.id;
+        const id2 = d2.data?.assignment?.id;
+        const ed = await dr(h.client, { action: 'distant-review-update', assignment_id: id1, review_date: plus(2), start_quarter: 2, end_quarter: 14, note: 'SMOKE تعديل' });
+        record('future assignment edited (date, range, note)', ed.status === 200 && ed.data?.assignment?.review_date === plus(2) && ed.data.assignment.start_quarter === 2 && ed.data.assignment.end_quarter === 14);
+        record('edit onto another distant date refused', (await dr(h.client, { action: 'distant-review-update', assignment_id: id1, review_date: plus(8), start_quarter: 1, end_quarter: 2 })).status === 409);
+        record('member cannot schedule', (await dr(a2.client, { action: 'distant-review-create', batch_id: S, review_date: plus(4), start_quarter: 1, end_quarter: 2 })).status === 403);
+        record('member cannot delete', (await dr(a2.client, { action: 'distant-review-delete', assignment_id: id1 })).status === 403);
+        const anonDr = await dr(createClient(url, publishable, { auth: { persistSession: false } }), { action: 'distant-review-create', batch_id: S, review_date: plus(4), start_quarter: 1, end_quarter: 2 });
+        record('unauthenticated scheduling denied', anonDr.status === 401 || anonDr.status === 403, `${anonDr.status}`);
+        record('batch admin cannot schedule in an unassigned batch', (await dr(h.client, { action: 'distant-review-create', batch_id: batchId, review_date: plus(4), start_quarter: 1, end_quarter: 2 })).status === 403);
+        // A second temporary batch the batch admin does not manage: the master schedules there.
+        const s3 = await invoke(e.client, 'admin-actions', { action: 'create-batch', name: SMOKE_BATCH_NAME + ' 3', start_date: today });
+        extraBatchIds.push(s3.data?.batch?.id);
+        const e3 = await dr(e.client, { action: 'distant-review-create', batch_id: s3.data?.batch?.id, review_date: plus(3), start_quarter: 100, end_quarter: 120 });
+        record('master admin schedules in any batch', e3.status === 200, `${e3.status} ${e3.message ?? ''}`);
+        const id3 = e3.data?.assignment?.id;
+        record('batch admin cannot edit an unassigned batch\'s day', (await dr(h.client, { action: 'distant-review-update', assignment_id: id3, review_date: plus(4), start_quarter: 1, end_quarter: 2 })).status === 403);
+        record('batch admin cannot delete an unassigned batch\'s day', (await dr(h.client, { action: 'distant-review-delete', assignment_id: id3 })).status === 403);
+        record('master admin edits any batch\'s future day', (await dr(e.client, { action: 'distant-review-update', assignment_id: id3, review_date: plus(4), start_quarter: 100, end_quarter: 110 })).status === 200);
+        record('master admin deletes any batch\'s future day', (await dr(e.client, { action: 'distant-review-delete', assignment_id: id3 })).status === 200);
+        const del2 = await dr(h.client, { action: 'distant-review-delete', assignment_id: id2 });
+        const left = (await service.from('distant_review_assignments').select('id').eq('batch_id', S)).data || [];
+        record('batch admin deletes a future day; the other stays', del2.status === 200 && left.length === 1 && left[0].id === id1);
+
+        // Today's and a past day (written by the service role: the API only schedules future dates).
+        await service.from('batch_memberships').update({ joined_at: new Date(Date.parse(plus(-3) + 'T00:00:00Z')).toISOString() }).in('user_id', [A.id, B.id]);
+        const sBefore = await loadProgram(a2.client, S);
+        const { calculateCycleInfo: cci, calculateMemberDistantReviewStatus: mds, joinedOnDateFromTimestamp: jd } = await import('../../supabase/functions/_shared/logic/calculations.ts');
+        const quarterBefore = cci(sBefore.settings, sBefore.restDays, today).quarter_of_day;
+        const ins = await service.from('distant_review_assignments')
+          .insert([{ cycle_id: smokeCycle.id, batch_id: S, review_date: plus(-1), start_quarter: 1, end_quarter: 4 }, { cycle_id: smokeCycle.id, batch_id: S, review_date: today, start_quarter: 5, end_quarter: 8, note: 'SMOKE اليوم' }])
+          .select('id, review_date');
+        const dy = ins.data?.find((r) => r.review_date === plus(-1))?.id;
+        const dt = ins.data?.find((r) => r.review_date === today)?.id;
+        const aState = await loadProgram(a2.client, S);
+        const aInfo = cci(aState.settings, aState.restDays, today);
+        record('distant-review days pause normal progression (program day shifts by two)', aInfo.is_distant_review_day && aInfo.quarter_of_day === quarterBefore - 2, `${quarterBefore} → ${aInfo.quarter_of_day}`);
+        const rev = await a2.client.from('review_confirmations').insert({ cycle_id: smokeCycle.id, user_id: A.id }).select('end_quarter').single();
+        record('normal review on a distant day stores the shifted program day (DB = JS)', !rev.error && rev.data?.end_quarter === aInfo.cycle_day, `${rev.data?.end_quarter} vs ${aInfo.cycle_day} ${rev.error?.message ?? ''}`);
+        const aMe = aState.users.find((u) => u.id === A.id);
+        const aDistant = mds(A.id, aState.distantReviews.filter((x) => x.cycle_id === smokeCycle.id), aState.distantCompletions, aState.settings, aState.restDays, today, jd(aMe?.batch_joined_at));
+        record('member sees today\'s distant review and the missed one as overdue', aDistant.todayAssignment?.id === dt && aDistant.overdue.map((x) => x.id).join() === dy, JSON.stringify({ t: aDistant.todayAssignment?.id, o: aDistant.overdue.map((x) => x.id) }));
+
+        // Peer-test prerequisite: distant-review debt blocks a test that requires completed reviews.
+        const rt = await invoke(h.client, 'peer-tests', {
+          action: 'admin-save', batch_id: S, title: 'SMOKE REVIEW REQ', range_start: 1, range_end: 1, questions_count: 1, lines_per_question: 3,
+          test_type: 'recommended', visibility: 'now', audience: 'all', selected_member_ids: [], require_all_quarters_completed: false, require_revision_completed: true,
+        });
+        const rtId = rt.data?.test?.id as string | undefined;
+        const rc = rtId ? await invoke(a2.client, 'peer-tests', { action: 'candidates', test_id: rtId }) : null;
+        const bReasons: string[] = rc?.data?.candidates?.find((c: { id: string }) => c.id === B.id)?.reasons || [];
+        record('peer test requiring reviews: distant-review debt blocks', bReasons.some((r) => /مراجعات بعيدة متأخرة \(1\)/.test(r)) && bReasons.some((r) => /المراجعة البعيدة لليوم/.test(r)) && !bReasons.some((r) => /لم يؤكد مراجعة اليوم بعد/.test(r)), JSON.stringify(bReasons));
+
+        const ct = await a2.client.rpc('men_complete_distant_review', { p_assignment_id: dt });
+        record('member confirms today\'s distant review', !ct.error && ct.data?.completed_on === today && ct.data.already_recorded === false, ct.error?.message);
+        const ct2 = await a2.client.rpc('men_complete_distant_review', { p_assignment_id: dt });
+        record('confirmation is idempotent', !ct2.error && ct2.data?.already_recorded === true);
+        const cy = await a2.client.rpc('men_complete_distant_review', { p_assignment_id: dy });
+        record('late confirmation keeps assigned and actual dates', !cy.error && cy.data?.completed_on === today, cy.error?.message);
+        const cf = await a2.client.rpc('men_complete_distant_review', { p_assignment_id: id1 });
+        record('future distant review cannot be confirmed', !!cf.error);
+        const aAfter = await loadProgram(a2.client, S);
+        const aDone = mds(A.id, aAfter.distantReviews.filter((x) => x.cycle_id === smokeCycle.id), aAfter.distantCompletions, aAfter.settings, aAfter.restDays, today, jd(aMe?.batch_joined_at));
+        record('debt cleared after completion; member sees only his completions', aDone.outstanding.length === 0 && aAfter.distantCompletions.length === 2 && aAfter.distantCompletions.every((c) => c.member_id === A.id));
+        const bState = await loadProgram(b2.client, S);
+        record('another member\'s completions are not visible to him', bState.distantCompletions.length === 0);
+        const hState = await loadProgram(h.client, S);
+        record('batch admin sees completion statistics of his batch', hState.distantCompletions.filter((c) => c.assignment_id === dt).length === 1);
+        const pastEdit = await dr(h.client, { action: 'distant-review-update', assignment_id: dt, review_date: plus(9), start_quarter: 1, end_quarter: 2 });
+        const pastDel = await dr(e.client, { action: 'distant-review-delete', assignment_id: dy });
+        record('today\'s and past days are view-only (no edit, no delete)', pastEdit.status === 400 && pastDel.status === 400, `${pastEdit.status} ${pastDel.status}`);
+        if (rtId) await invoke(h.client, 'peer-tests', { action: 'admin-status', test_id: rtId, status_action: 'finish' });
       }
     }
 
@@ -457,6 +551,12 @@ async function main() {
       const { error } = await service.rpc('men_delete_member_completely', { p_user_id: s.id });
       if (error && !/غير موجود/.test(error.message)) console.error('cleanup profile', s.key, error.message);
       await service.auth.admin.deleteUser(s.id);
+    }
+    for (const extra of extraBatchIds) {
+      if (!extra) continue;
+      await service.from('cycles').delete().eq('batch_id', extra);
+      const { error } = await service.from('batches').delete().eq('id', extra);
+      if (error) console.error('cleanup extra batch', error.message);
     }
     if (smokeBatchId) {
       const cycles = ((await service.from('cycles').select('id').eq('batch_id', smokeBatchId)).data || []).map((c) => c.id);

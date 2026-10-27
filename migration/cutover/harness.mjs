@@ -56,8 +56,8 @@ export async function linkAuthLocally(db) {
 }
 
 // Production order: access migration, Auth link + FK, then the later runtime migrations.
-// linkAuth=false skips only the auth.users link/FK step.
-export async function createCutoverDb(backupDir, { linkAuth = true } = {}) {
+// linkAuth=false skips only the auth.users link/FK step; stopBefore leaves later migrations unapplied.
+export async function createCutoverDb(backupDir, { linkAuth = true, stopBefore } = {}) {
   const { rows } = transform(backupDir);
   const db = new PGlite();
   await db.exec(AUTH_STUBS);
@@ -68,7 +68,7 @@ export async function createCutoverDb(backupDir, { linkAuth = true } = {}) {
     await linkAuthLocally(db);
     await applyCutover(db, { startAt: AUTH_LINK, stopBefore: "20261026000300" });
   }
-  await applyCutover(db, { startAt: "20261026000300" });
+  await applyCutover(db, { startAt: "20261026000300", stopBefore });
   return { db, rows };
 }
 

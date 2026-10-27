@@ -1,21 +1,35 @@
-import type { User, GroupSettings, RestDay, RecitationLog, RevisionLog } from '../logic/programTypes.ts';
+import type {
+  User,
+  GroupSettings,
+  RestDay,
+  RecitationLog,
+  RevisionLog,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
+} from '../logic/programTypes.ts';
 import {
   PROFILE_COLUMNS,
   CYCLE_COLUMNS,
   TASMIA_COLUMNS,
   REVIEW_COLUMNS,
   REST_DAY_COLUMNS,
+  DISTANT_REVIEW_COLUMNS,
+  DISTANT_COMPLETION_COLUMNS,
   legacyOrder,
   mapUser,
   buildSettings,
   mapRestDays,
   mapRecitations,
   mapRevisions,
+  mapDistantReviews,
+  mapDistantCompletions,
   type ProfileRow,
   type CycleRow,
   type TasmiaRow,
   type ReviewRow,
   type RestDayRow,
+  type DistantReviewRow,
+  type DistantCompletionRow,
 } from './menRows.ts';
 
 /**
@@ -34,6 +48,10 @@ export interface ProgramState {
   restDays: RestDay[];
   recitationLogs: RecitationLog[];
   revisionLogs: RevisionLog[];
+  // «المراجعة البعيدة» of the batch (every cycle, oldest date first; the calendar uses this cycle's)
+  distantReviews: DistantReviewAssignment[];
+  // Completions the caller may see (RLS: a member his own, an admin the batch's)
+  distantCompletions: DistantReviewCompletion[];
 }
 
 const PAGE = 1000;
@@ -119,7 +137,7 @@ export async function loadBatchUsers(db: SupabaseLike, batchId: string, activeCy
 
 export async function loadProgram(db: SupabaseLike, batchId: string): Promise<ProgramState> {
   const cycle = await loadActiveCycle(db, batchId);
-  const [users, pauses, thought, restRows, tasmiaRows, reviewRows] = await Promise.all([
+  const [users, pauses, thought, restRows, tasmiaRows, reviewRows, distantRows] = await Promise.all([
     loadBatchUsers(db, batchId, cycle.id),
     db.from('program_pauses').select('paused_on, resumed_on').eq('cycle_id', cycle.id).then(check),
     db
@@ -135,7 +153,21 @@ export async function loadProgram(db: SupabaseLike, batchId: string): Promise<Pr
     db.from('group_rest_days').select(REST_DAY_COLUMNS).eq('cycle_id', cycle.id).then(check),
     fetchAll<TasmiaRow>((f, t) => db.from('tasmia_submissions').select(TASMIA_COLUMNS).eq('cycle_id', cycle.id).order('id').range(f, t)),
     fetchAll<ReviewRow>((f, t) => db.from('review_confirmations').select(REVIEW_COLUMNS).eq('cycle_id', cycle.id).order('id').range(f, t)),
+    fetchAll<DistantReviewRow>((f, t) =>
+      db.from('distant_review_assignments').select(DISTANT_REVIEW_COLUMNS).eq('batch_id', batchId).order('review_date').order('id').range(f, t)
+    ),
   ]);
+  const distantIds = distantRows.map((r) => r.id);
+  const completionRows: DistantCompletionRow[] = [];
+  // Bounded id lists keep each request URL short.
+  for (let i = 0; i < distantIds.length; i += 100) {
+    const ids = distantIds.slice(i, i + 100);
+    completionRows.push(
+      ...(await fetchAll<DistantCompletionRow>((f, t) =>
+        db.from('distant_review_completions').select(DISTANT_COMPLETION_COLUMNS).in('assignment_id', ids).order('id').range(f, t)
+      ))
+    );
+  }
   const names = new Map(users.map((u) => [u.id, u.name]));
   // People who have since left this batch keep their name in its history (Sisters history_member_names).
   const missing = [...tasmiaRows, ...reviewRows].some((r) => !names.has(r.user_id) && !r.member_name_snapshot);
@@ -148,9 +180,16 @@ export async function loadProgram(db: SupabaseLike, batchId: string): Promise<Pr
     batchId,
     cycle,
     users,
-    settings: buildSettings(cycle, pauses || [], thought || null),
+    settings: buildSettings(
+      cycle,
+      pauses || [],
+      thought || null,
+      distantRows.filter((r) => r.cycle_id === cycle.id).map((r) => r.review_date)
+    ),
     restDays: mapRestDays((restRows || []) as RestDayRow[]),
     recitationLogs: mapRecitations(tasmiaRows, cycle.cycle_number, names),
     revisionLogs: mapRevisions(reviewRows, cycle.cycle_number, names),
+    distantReviews: mapDistantReviews(distantRows),
+    distantCompletions: mapDistantCompletions(completionRows, names),
   };
 }

@@ -1,5 +1,5 @@
 import React from 'react';
-import { Award, Sparkles, HeartHandshake } from 'lucide-react';
+import { Award, Sparkles, HeartHandshake, BookMarked } from 'lucide-react';
 
 interface CelebrationBannerProps {
   currentCycle: number;
@@ -68,6 +68,35 @@ export const RestDayBanner: React.FC<{ note?: string }> = ({ note }) => {
           ) : null}
           خطة التقدم اليومي للمجموعة متوقفة في هذا اليوم ولا يُحتسب ضمن الـ 240 يومًا (رقم ربع اليوم للمجموعة لا يتقدم). 
           <strong> أزرار وفورم تسجيل التسميع والمراجعة فعّالة بشكل طبيعي تمامًا</strong> لجميع الأعضاء لتعويض أي أرباع سابقة متأخرة تباعًا حتى ربع آخر يوم نشاط للمجموعة.
+        </p>
+      </div>
+    </div>
+  );
+};
+
+// «المراجعة البعيدة»: today the normal program does not advance; the admin's range is due instead.
+export const DistantReviewBanner: React.FC<{ start?: number; end?: number; note?: string }> = ({ start, end, note }) => {
+  return (
+    <div id="distant-review-banner" className="rounded-2xl bg-emerald-50 border-2 border-emerald-300 p-4 sm:p-5 mb-6 text-emerald-950 flex items-start gap-3 shadow-xs">
+      <div className="p-2.5 bg-emerald-100 rounded-xl text-emerald-800 shrink-0 mt-0.5">
+        <BookMarked className="w-5 h-5" />
+      </div>
+      <div className="space-y-1 flex-1">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h3 className="font-bold text-sm sm:text-base text-emerald-950">المراجعة البعيدة</h3>
+          <span className="text-[11px] px-2.5 py-0.5 bg-amber-200/80 text-amber-950 rounded-full font-bold">
+            اليوم راحة من التقدم المعتاد للبرنامج
+          </span>
+        </div>
+        <p className="text-xs sm:text-sm text-emerald-900 leading-relaxed">
+          حدد المشرف اليوم يومًا للمراجعة البعيدة: لا يُطلب ربع تسميع جديد ولا مراجعة يومية جديدة، ولا يُحتسب اليوم ضمن الـ 240 يومًا.
+          {start && end ? (
+            <strong className="block mt-1">
+              المراجعة المطلوبة اليوم: من الربع {start} إلى الربع {end}
+            </strong>
+          ) : null}
+          {note ? <span className="block mt-1 font-medium">ملاحظة المشرف: {note}</span> : null}
+          <span className="block mt-1 text-emerald-800/90">يبقى استدراك ما فاتك من تسميع أو مراجعة متاحًا كالمعتاد.</span>
         </p>
       </div>
     </div>

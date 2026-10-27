@@ -13,6 +13,7 @@ import {
 } from '../_shared/auth.ts';
 import {
   calculateCycleInfo,
+  calculateMemberDistantReviewStatus,
   calculateMemberRevisionStatus,
   getActiveCycleDates,
   joinedOnDateFromTimestamp,
@@ -58,6 +59,8 @@ type BatchMember = {
 type BatchProgress = {
   today: string;
   quarterOfDay: number;
+  // Today is a «المراجعة البعيدة» day: no normal review is due today.
+  isDistantReviewDay: boolean;
   members: BatchMember[];
   delayById: Map<string, MemberDelayStatus>;
   completedById: Map<string, Set<number>>;
@@ -152,7 +155,16 @@ async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promis
     completedById.get(r.member_id)?.add(r.quarter_number);
   }
 
-  return { today, quarterOfDay: cycleInfo.quarter_of_day, members, delayById, completedById, program, activeDates };
+  return {
+    today,
+    quarterOfDay: cycleInfo.quarter_of_day,
+    isDistantReviewDay: cycleInfo.is_distant_review_day,
+    members,
+    delayById,
+    completedById,
+    program,
+    activeDates,
+  };
 }
 
 async function passedAttemptsByCandidate(admin: SupabaseClient, testId: string): Promise<Map<string, PassedAttempt[]>> {
@@ -178,16 +190,37 @@ function evaluate(
   passed: Map<string, PassedAttempt[]>,
   memberId: string
 ): CandidateEvaluation {
-  const revision = test.require_revision_completed
-    ? calculateMemberRevisionStatus(
-        memberId,
-        progress.activeDates,
-        progress.program.revisionLogs,
-        progress.today,
-        joinedOnDateFromTimestamp(progress.program.users.find((u) => u.id === memberId)?.batch_joined_at),
-        progress.program.settings
-      )
-    : undefined;
+  /*
+   * Revision prerequisite: normal reviews AND «المراجعة البعيدة» (a required review obligation).
+   * On a distant-review day there is no normal review today; that day's distant review replaces it.
+   */
+  let revision: Parameters<typeof evaluateCandidate>[0]['revision'];
+  if (test.require_revision_completed) {
+    const joinedOn = joinedOnDateFromTimestamp(progress.program.users.find((u) => u.id === memberId)?.batch_joined_at);
+    const normal = calculateMemberRevisionStatus(
+      memberId,
+      progress.activeDates,
+      progress.program.revisionLogs,
+      progress.today,
+      joinedOn,
+      progress.program.settings
+    );
+    const distant = calculateMemberDistantReviewStatus(
+      memberId,
+      progress.program.distantReviews.filter((a) => a.cycle_id === progress.program.cycle.id),
+      progress.program.distantCompletions,
+      progress.program.settings,
+      progress.program.restDays,
+      progress.today,
+      joinedOn
+    );
+    revision = {
+      missedRevisionDaysCount: normal.missedRevisionDaysCount,
+      hasReviewedToday: progress.isDistantReviewDay || normal.hasReviewedToday,
+      distantOverdueCount: distant.overdueCount,
+      distantTodayPending: !!distant.todayAssignment && !distant.hasCompletedToday,
+    };
+  }
   return evaluateCandidate({
     test,
     completedQuarters: progress.completedById.get(memberId) || new Set(),
