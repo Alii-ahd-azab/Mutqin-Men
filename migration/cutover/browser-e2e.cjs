@@ -24,6 +24,7 @@ async function counts() {
   return {
     profiles: await c("profiles"), tasmia: await c("tasmia_submissions"), reviews: await c("review_confirmations"), attempts: await c("peer_test_attempts"),
     batches: await c("batches"), cycles: await c("cycles"), rest_days: await c("group_rest_days"),
+    distant_reviews: await c("distant_review_assignments"), distant_completions: await c("distant_review_completions"),
   };
 }
 
@@ -334,6 +335,159 @@ async function counts() {
     const realName = (await service.from("batches").select("name").eq("id", batchId).single()).data.name;
     record("real batch name untouched", realName.length > 0 && !realName.startsWith("SMOKE"));
     await hCtx.close();
+
+    // ---- «المراجعة البعيدة» (temporary batch S3 started 6 days ago: d0..d6 = today) ----
+    const s3 = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE S3 ${randomBytes(3).toString("hex")}`, p_start_date: riyadhDay(6), p_actor: null });
+    if (s3.error) throw s3.error;
+    extraBatchIds.push(s3.data.id);
+    const S3 = s3.data.id;
+    const s3Cycle = (await service.from("cycles").select("id").eq("batch_id", S3).single()).data.id;
+    const DM = await account("BROWSER DM", "000000000019", "member", S3);
+    await service.from("batch_memberships").update({ joined_at: riyadhDay(6) + "T00:00:00+03:00" }).eq("user_id", DM.id);
+    await service.from("group_rest_days").insert({ cycle_id: s3Cycle, rest_date: riyadhDay(-5), reason: "SMOKE" });
+    const xCtx = await browser.newContext();
+    const xp = await xCtx.newPage();
+    page = xp; // failure screenshots show the active page
+    xp.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+    await xp.goto(URL_APP);
+    await xp.locator("input").nth(0).fill(X.phone);
+    await xp.locator("input").nth(1).fill(X.pw);
+    await xp.locator('button[type="submit"]').click();
+    await xp.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await xp.locator("#batch-selector").selectOption(S3);
+    await xp.getByText(/الإعدادات والإيقاف/).first().click();
+    await xp.locator("#distant-review-section").waitFor({ timeout: 20000 });
+    const order = await xp.evaluate(() => {
+      const h = [...document.querySelectorAll("h3")].map((x) => x.textContent.trim());
+      return [h.findIndex((t) => t.startsWith("التحكم في سريان البرنامج")), h.findIndex((t) => t === "المراجعة البعيدة"), h.findIndex((t) => t.startsWith("أيام الاستدراك والراحة المحددة مسبقًا"))];
+    });
+    record("distant-review section sits between program pause control and rest days", order[0] >= 0 && order[0] < order[1] && order[1] < order[2], JSON.stringify(order));
+    const rows = async () => (await service.from("distant_review_assignments").select("review_date, start_quarter, end_quarter, note").eq("batch_id", S3).order("review_date")).data || [];
+    const pick = async (id, query) => {
+      await xp.locator(`#${id}-button`).click();
+      await xp.locator(`#${id}-search`).fill(query);
+      await xp.locator(`#${id}-search`).press("Enter");
+    };
+    // First day: search FROM by number, TO by number; preview; note; add.
+    await xp.locator("#distant-review-date").fill(riyadhDay(-3));
+    await xp.locator("#distant-from-button").click();
+    await xp.locator("#distant-from-search").fill("23");
+    const firstHit = await xp.locator('#distant-from-list [role="option"]').first().getAttribute("id");
+    const hitText = await xp.locator('#distant-from-list [role="option"]').first().textContent();
+    record("searchable FROM selector: typing 23 finds «الربع 23» first, with surah and opening", firstHit === "distant-from-option-23" && /الربع 23 — آل عمران — بداية:/.test(hitText), hitText);
+    await xp.locator("#distant-from-search").press("Enter");
+    await xp.locator("#distant-to-button").click();
+    const disabledBefore = await xp.locator("#distant-to-option-5").getAttribute("aria-disabled");
+    record("TO selector cannot go before FROM", disabledBefore === "true", disabledBefore);
+    await xp.locator("#distant-to-search").fill("البقرة");
+    const surahHits = await xp.locator('#distant-to-list [role="option"]').count();
+    await xp.locator("#distant-to-search").fill("30");
+    await xp.locator("#distant-to-search").press("Enter");
+    record("search by surah name works too", surahHits > 10, String(surahHits));
+    const preview = await xp.locator("#distant-review-preview").textContent();
+    record("range preview «المراجعة المطلوبة» shows the chosen range and its bounds", /المراجعة المطلوبة/.test(preview) && /من الربع 23 إلى الربع 30/.test(preview) && /ابدأ من/.test(preview) && /توقف عند/.test(preview), preview.slice(0, 120));
+    await xp.locator("#distant-review-note").fill("SMOKE مراجعة ما سبق قبل الاختبار");
+    await xp.locator("#add-distant-review-btn").click();
+    await xp.locator("#distant-review-msg").waitFor({ timeout: 20000 });
+    let r = await rows();
+    record("admin adds ONE distant-review day from the UI", r.length === 1 && r[0].review_date === riyadhDay(-3) && r[0].start_quarter === 23 && r[0].end_quarter === 30 && r[0].note === "SMOKE مراجعة ما سبق قبل الاختبار", JSON.stringify(r));
+    const formReset = (await xp.locator("#distant-review-date").inputValue()) === "" && (await xp.locator("#distant-review-preview").count()) === 0;
+    record("form resets after adding", formReset);
+    // Second, separate day.
+    await xp.locator("#distant-review-date").fill(riyadhDay(-10));
+    await pick("distant-from", "1");
+    await pick("distant-to", "12");
+    await xp.locator("#add-distant-review-btn").click();
+    await xp.locator(`#distant-review-item-${riyadhDay(-10)}`).waitFor({ timeout: 20000 });
+    r = await rows();
+    record("a second day is created manually as its own assignment", r.length === 2 && r[1].review_date === riyadhDay(-10) && r[1].start_quarter === 1 && r[1].end_quarter === 12, JSON.stringify(r));
+    // Validation and conflict messages.
+    await xp.locator("#distant-review-date").fill(riyadhDay(-3));
+    await pick("distant-from", "1");
+    await pick("distant-to", "2");
+    await xp.locator("#add-distant-review-btn").click();
+    const dupMsg = await xp.locator("#distant-review-error").textContent();
+    await xp.locator("#distant-review-date").fill(riyadhDay(-5));
+    await xp.locator("#add-distant-review-btn").click();
+    const restMsg = await xp.locator("#distant-review-error").textContent();
+    record("conflict messages: same date, and a rest-day date", /يوجد يوم مراجعة بعيدة/.test(dupMsg) && /استدراك وراحة/.test(restMsg), `${dupMsg} | ${restMsg}`);
+    record("refused attempts wrote nothing", (await rows()).length === 2);
+    // Edit a future day, then delete another.
+    await xp.locator(`#edit-distant-${riyadhDay(-10)}`).click();
+    await pick("distant-to", "15");
+    await xp.locator("#distant-review-note").fill("SMOKE تعديل");
+    await xp.locator("#add-distant-review-btn").click();
+    await xp.locator("#distant-review-msg").waitFor({ timeout: 20000 });
+    r = await rows();
+    record("admin edits a future day (range and note)", r.length === 2 && r[1].end_quarter === 15 && r[1].note === "SMOKE تعديل", JSON.stringify(r));
+    await xp.locator(`#delete-distant-${riyadhDay(-3)}`).click();
+    await xp.locator(`#confirm-delete-distant-${riyadhDay(-3)}`).click();
+    await xp.locator(`#distant-review-item-${riyadhDay(-3)}`).waitFor({ state: "detached", timeout: 20000 });
+    r = await rows();
+    record("admin deletes a future day", r.length === 1 && r[0].review_date === riyadhDay(-10), JSON.stringify(r));
+    await shot("admin-distant-review");
+
+    // Member: yesterday's day (missed) and today's day (written by the service role; the UI schedules future dates only).
+    const dIns = await service.from("distant_review_assignments").insert([
+      { cycle_id: s3Cycle, batch_id: S3, review_date: riyadhDay(1), start_quarter: 1, end_quarter: 4 },
+      { cycle_id: s3Cycle, batch_id: S3, review_date: riyadhDay(0), start_quarter: 5, end_quarter: 8, note: "SMOKE مراجعة اليوم" },
+    ]).select("id, review_date");
+    if (dIns.error) throw dIns.error;
+    const dmCtx = await browser.newContext();
+    const dp = await dmCtx.newPage();
+    page = dp; // failure screenshots show the active page
+    dp.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+    await dp.goto(URL_APP);
+    await dp.locator("input").nth(0).fill(DM.phone);
+    await dp.locator("input").nth(1).fill(DM.pw);
+    await dp.locator('button[type="submit"]').click();
+    await dp.getByText("SMOKE BROWSER DM").first().waitFor({ timeout: 30000 });
+    await dp.locator("#distant-review-banner").waitFor({ timeout: 20000 });
+    const banner = await dp.locator("#distant-review-banner").textContent();
+    record("member banner: today is a distant-review day, normal progression paused, range shown", /اليوم راحة من التقدم المعتاد للبرنامج/.test(banner) && /من الربع 5 إلى الربع 8/.test(banner), banner.slice(0, 160));
+    const dayTitle = await dp.getByText(/^اليوم رقم \d+$/).first().textContent();
+    record("normal progression paused: 2 distant days do not advance the program day (5, not 7)", dayTitle.trim() === "اليوم رقم 5", dayTitle);
+    record("no new normal daily-review card today", (await dp.getByRole("button", { name: /تأكيد إتمام المراجعة اليومية/ }).count()) === 0);
+    record("separate distant-review debt indicator", /مراجعات بعيدة متأخرة: 1/.test(await dp.locator("#distant-overdue-alert").textContent()));
+    const counter = (await dp.locator("#distant-review-counter").textContent()).trim();
+    const firstTitle = await dp.locator("#distant-review-title").textContent();
+    record("missed distant review is overdue, separate from today's (1 من 2)", counter === "1 من 2" && /مراجعة بعيدة متأخرة/.test(firstTitle) && (await dp.locator("#distant-review-to").textContent()).trim() === "4", `${counter} ${firstTitle}`);
+    await shot("member-distant-overdue");
+    await dp.locator("#distant-next").click();
+    const todayTitle = (await dp.locator("#distant-review-title").textContent()).trim();
+    const todayRange = [(await dp.locator("#distant-review-from").textContent()).trim(), (await dp.locator("#distant-review-to").textContent()).trim()];
+    record("today's distant-review card: range and admin note", todayTitle === "المراجعة البعيدة" && todayRange.join("-") === "5-8" && /SMOKE مراجعة اليوم/.test(await dp.locator("#distant-review-note-text").textContent()), `${todayTitle} ${todayRange}`);
+    await shot("member-distant-today");
+    await dp.locator("#complete-distant-review-btn").click();
+    await dp.waitForFunction(() => !document.querySelector("#distant-review-counter"), null, { timeout: 20000 });
+    const dmDone = async () => (await service.from("distant_review_completions").select("assignment_id, completed_on").eq("user_id", DM.id)).data || [];
+    let comps = await dmDone();
+    const tId = dIns.data.find((x) => x.review_date === riyadhDay(0)).id;
+    const yId = dIns.data.find((x) => x.review_date === riyadhDay(1)).id;
+    record("member confirms today's distant review from the UI", comps.length === 1 && comps[0].assignment_id === tId && comps[0].completed_on === riyadhDay(0), JSON.stringify(comps));
+    record("the missed one stays owed after today's confirmation", /مراجعة بعيدة متأخرة/.test(await dp.locator("#distant-review-title").textContent()));
+    await dp.locator("#complete-distant-review-btn").click();
+    await dp.locator("#distant-review-completed-status").waitFor({ timeout: 20000 });
+    comps = await dmDone();
+    record("late completion through the UI removes the debt", comps.length === 2 && comps.some((c) => c.assignment_id === yId && c.completed_on === riyadhDay(0)) && (await dp.locator("#distant-overdue-alert").count()) === 0, JSON.stringify(comps));
+    await dp.locator("#history-tab-distant").click();
+    const lateRow = await dp.locator(`#distant-history-${riyadhDay(1)}`).textContent();
+    const todayRow = await dp.locator(`#distant-history-${riyadhDay(0)}`).textContent();
+    record("history: late entry shows assigned and actual dates; today's shows done", /تم الإنجاز \(متأخرًا\)/.test(lateRow) && /موعدها/.test(lateRow) && /تمت/.test(lateRow) && /تم الإنجاز/.test(todayRow) && /من الربع 5 إلى الربع 8/.test(todayRow), `${lateRow.slice(0, 120)} | ${todayRow.slice(0, 80)}`);
+    await shot("member-distant-history");
+    await dmCtx.close();
+
+    // Admin history: today's day is view-only with its completion statistics.
+    page = xp;
+    await xp.reload();
+    await xp.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await xp.locator("#batch-selector").selectOption(S3);
+    await xp.getByText(/الإعدادات والإيقاف/).first().click();
+    await xp.locator(`#distant-review-stats-${riyadhDay(0)}`).waitFor({ timeout: 20000 });
+    const stats = await xp.locator(`#distant-review-stats-${riyadhDay(0)}`).textContent();
+    const todayItem = await xp.locator(`#distant-review-item-${riyadhDay(0)}`).textContent();
+    record("admin history: today's day shows status, completion statistics and is view-only", /1 \/ 1 أتموا المراجعة/.test(stats) && /اليوم/.test(todayItem) && /عرض فقط/.test(todayItem) && (await xp.locator(`#edit-distant-${riyadhDay(0)}`).count()) === 0, `${stats} | ${todayItem.slice(0, 120)}`);
+    await xCtx.close();
 
     record("all requests go to the app, Men Supabase or fonts only", [...hosts].every((h) => [new URL(URL_APP).host, "uaublandjewfzmhnbflc.supabase.co", "fonts.googleapis.com", "fonts.gstatic.com"].includes(h)), [...hosts].join(", "));
     record("no failed requests", failed.length === 0, failed.join(", "));

@@ -103,7 +103,13 @@ export function evaluateCandidate(input: {
   delay: MemberDelayStatus;
   inAudience: boolean;
   /** Needed only when the test requires the revision to be complete. */
-  revision?: { missedRevisionDaysCount: number; hasReviewedToday: boolean };
+  revision?: {
+    missedRevisionDaysCount: number;
+    hasReviewedToday: boolean;
+    // «المراجعة البعيدة»: missed scheduled days, and today's one when not yet confirmed
+    distantOverdueCount?: number;
+    distantTodayPending?: boolean;
+  };
 }): CandidateEvaluation {
   const { test } = input;
   const reasons: string[] = [];
@@ -158,6 +164,12 @@ export function evaluateCandidate(input: {
     }
     if (!input.revision.hasReviewedToday) {
       reasons.push('لم يؤكد مراجعة اليوم بعد');
+    }
+    if (input.revision.distantOverdueCount) {
+      reasons.push(`توجد مراجعات بعيدة متأخرة (${input.revision.distantOverdueCount})`);
+    }
+    if (input.revision.distantTodayPending) {
+      reasons.push('لم يؤكد المراجعة البعيدة لليوم بعد');
     }
   }
 

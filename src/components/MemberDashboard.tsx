@@ -1,5 +1,16 @@
 import React, { useState, useMemo } from 'react';
-import { User, CycleInfo, RecitationLog, RevisionLog, GroupSettings, RestDay, PeerTest, PeerTestAttempt } from '../types';
+import {
+  User,
+  CycleInfo,
+  RecitationLog,
+  RevisionLog,
+  GroupSettings,
+  RestDay,
+  PeerTest,
+  PeerTestAttempt,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
+} from '../types';
 import { isPeerTestLive } from '../lib/peerTests';
 import { PeerTestCard } from './PeerTestCard';
 import { PeerTestingModal } from './PeerTestingModal';
@@ -14,6 +25,7 @@ import {
   getPreLaunchMessage,
   calculateCycleInfo,
   joinedOnDateFromTimestamp,
+  calculateMemberDistantReviewStatus,
   SEVERE_DELAY_THRESHOLD,
 } from '../lib/calculations';
 import {
@@ -38,7 +50,8 @@ import {
 } from 'lucide-react';
 import { RecitationModal, RevisionModal } from './Modals';
 import { MemberHistoryView } from './MemberHistoryView';
-import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
+import { CelebrationBanner, RestDayBanner, PauseBanner, DistantReviewBanner } from './Banners';
+import { DistantReviewMemberCard } from './DistantReviewMemberCard';
 import { DailyThoughtCard } from './DailyThoughtCard';
 
 interface RevisionDayItem {
@@ -70,6 +83,11 @@ interface MemberDashboardProps {
   // Live peer test(s) of his batch and his own peer-test attempts
   peerTests?: PeerTest[];
   peerTestAttempts?: PeerTestAttempt[];
+  // «المراجعة البعيدة»: active cycle id, the batch's scheduled days and his completions
+  cycleId?: string;
+  distantReviews?: DistantReviewAssignment[];
+  distantCompletions?: DistantReviewCompletion[];
+  onCompleteDistantReview?: (assignmentId: string) => Promise<string>;
   onRecordRecitation: (payload: {
     quarter_number: number;
     listener_id: string;
@@ -92,6 +110,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   revisions,
   peerTests = [],
   peerTestAttempts = [],
+  cycleId,
+  distantReviews = [],
+  distantCompletions = [],
+  onCompleteDistantReview,
   onRecordRecitation,
   onCorrectListener,
   onRecordRevision,
@@ -160,6 +182,41 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       settings
     );
   }, [currentUser.id, activeCycleDates, revisions, cycleInfo.today_date, joinedOnDate, settings]);
+
+  // «المراجعة البعيدة»: each scheduled day of the active cycle is its own obligation.
+  const cycleDistantReviews = useMemo(
+    () => distantReviews.filter((a) => a.cycle_id === cycleId),
+    [distantReviews, cycleId]
+  );
+  const distantStatus = useMemo(
+    () =>
+      calculateMemberDistantReviewStatus(
+        currentUser.id,
+        settings && cycleInfo.has_started ? cycleDistantReviews : [],
+        distantCompletions,
+        settings || ({ start_date: cycleInfo.start_date } as GroupSettings),
+        restDays,
+        cycleInfo.today_date,
+        joinedOnDate
+      ),
+    [currentUser.id, cycleDistantReviews, distantCompletions, settings, restDays, cycleInfo.today_date, cycleInfo.start_date, cycleInfo.has_started, joinedOnDate]
+  );
+  const todayDistant = cycleInfo.is_distant_review_day
+    ? cycleDistantReviews.find((a) => a.review_date === cycleInfo.today_date)
+    : undefined;
+  // His permanent distant-review log: completed ones (any cycle) and those still owed, newest first.
+  const distantHistory = useMemo(() => {
+    const items = new Map<string, { assignment: DistantReviewAssignment; completion?: DistantReviewCompletion }>();
+    for (const c of distantCompletions) {
+      if (c.member_id !== currentUser.id) continue;
+      const a = distantReviews.find((x) => x.id === c.assignment_id);
+      if (a) items.set(a.id, { assignment: a, completion: c });
+    }
+    for (const a of distantStatus.outstanding) if (!items.has(a.id)) items.set(a.id, { assignment: a });
+    return [...items.values()].sort((x, y) => y.assignment.review_date.localeCompare(x.assignment.review_date));
+  }, [distantCompletions, distantReviews, distantStatus.outstanding, currentUser.id]);
+  // No new normal Tasmi'a/review today: rest day, pause, or a distant-review day.
+  const isNonProgressDay = cycleInfo.is_rest_day || cycleInfo.is_paused || cycleInfo.is_distant_review_day;
 
   const pastMissedQuartersCount = userQuarterStatus.pastMissedQuartersCount;
   const pastMissedRevisionDaysCount = userRevisionStatus.pastMissedRevisionDaysCount;
@@ -317,7 +374,8 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   // The alert banner should ONLY appear if there is an ACTUAL delay from past days:
   // i.e., user is behind on quarters before today (userQuarterStatus.isBehind) OR missed revision on a previous day.
   // Today's ongoing recitation or today's revision are NOT considered overdue/delayed during the day.
-  const hasActualPastDelay = userQuarterStatus.isBehind || pastMissedRevisionDaysCount > 0;
+  const hasActualPastDelay =
+    userQuarterStatus.isBehind || pastMissedRevisionDaysCount > 0 || distantStatus.overdueCount > 0;
 
   return (
     <div className="space-y-6 pb-12">
@@ -434,6 +492,11 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       {/* Rest Day banner */}
       {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
 
+      {/* «المراجعة البعيدة» banner: normal progression is paused today */}
+      {cycleInfo.is_distant_review_day && (
+        <DistantReviewBanner start={todayDistant?.start_quarter} end={todayDistant?.end_quarter} note={todayDistant?.note} />
+      )}
+
       {/* Exclusion / Suspension Notice Banner */}
       {!currentUser.is_active && (
         <div className="rounded-2xl bg-rose-50 border border-rose-200 p-5 flex items-start gap-3.5 shadow-xs">
@@ -490,6 +553,16 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                     {userQuarterStatus.requiredQuarter !== cycleInfo.quarter_of_day && (
                       <span className="text-amber-800/80"> (ربع المقرأة لليوم الحالي: الربع {cycleInfo.quarter_of_day})</span>
                     )}
+                  </span>
+                </p>
+              )}
+
+              {/* «المراجعة البعيدة» debt: counted separately from the daily review */}
+              {distantStatus.overdueCount > 0 && (
+                <p id="distant-overdue-alert" className="flex items-start gap-2">
+                  <span className="w-1.5 h-1.5 rounded-full bg-amber-700 mt-1.5 shrink-0" />
+                  <span>
+                    مراجعات بعيدة متأخرة: <strong>{distantStatus.overdueCount}</strong> — يلزم تأكيدها من بطاقة «المراجعة البعيدة».
                   </span>
                 </p>
               )}
@@ -583,6 +656,16 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
           </div>
         </div>
       ) : (
+        <>
+        {/* «المراجعة البعيدة»: today's assigned range and every missed one (separate from the daily review) */}
+        {onCompleteDistantReview && (distantStatus.outstanding.length > 0 || distantStatus.todayAssignment) && (
+          <DistantReviewMemberCard
+            status={distantStatus}
+            today={cycleInfo.today_date}
+            isActive={currentUser.is_active}
+            onComplete={onCompleteDistantReview}
+          />
+        )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {/* CARD 1: ورد المراجعة اليومي (يظهر على اليمين في تخطيط RTL) */}
         <div className={`bg-white rounded-3xl border ${currentRevisionItem.isMissed ? 'border-amber-200 ring-1 ring-amber-200/50' : 'border-stone-200'} shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md`}>
@@ -763,7 +846,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               >
                 <CheckCircle2 className="w-4 h-4 text-stone-500 shrink-0" />
                 <span>
-                  {cycleInfo.is_paused ? 'البرنامج متوقف مؤقتًا' : 'اليوم يوم راحة'} — لا توجد مراجعة جديدة، وأنت مواكب لورد آخر يوم نشط
+                  {cycleInfo.is_paused
+                    ? 'البرنامج متوقف مؤقتًا'
+                    : cycleInfo.is_distant_review_day
+                    ? 'اليوم يوم مراجعة بعيدة'
+                    : 'اليوم يوم راحة'}{' '}
+                  — لا توجد مراجعة يومية جديدة، وأنت مواكب لورد آخر يوم نشط
                 </span>
               </div>
             ) : currentRevisionItem.isReviewed ? (
@@ -814,10 +902,10 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   <h3 className="font-bold text-stone-900 text-base">ورد التسميع</h3>
                   <p className="text-xs text-stone-500">
                     {isAllCaughtUp
-                      ? (cycleInfo.is_rest_day || cycleInfo.is_paused)
+                      ? isNonProgressDay
                         ? 'مواكب لجميع الأرباع حتى ربع آخر نشاط'
                         : 'أتممت جميع الأرباع حتى اليوم'
-                      : (cycleInfo.is_rest_day || cycleInfo.is_paused)
+                      : isNonProgressDay
                       ? 'يمكنك استدراك الأرباع الفائتة الآن'
                       : 'سجّل إتمامك للربع المطلوب'}
                   </p>
@@ -828,7 +916,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               {isAllCaughtUp ? (
                 <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-emerald-50 text-emerald-700 border border-emerald-200">
                   <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  {(cycleInfo.is_rest_day || cycleInfo.is_paused)
+                  {isNonProgressDay
                     ? `مواكب لآخر نشاط (الربع ${cycleInfo.quarter_of_day})`
                     : `مواكب للخطة (الربع ${cycleInfo.quarter_of_day})`}
                 </span>
@@ -840,7 +928,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               ) : (
                 <span className="inline-flex items-center gap-1 px-3 py-1 rounded-full text-xs font-bold bg-stone-100 text-stone-700 border border-stone-200">
                   <Clock className="w-3.5 h-3.5 text-stone-600" />
-                  {(cycleInfo.is_rest_day || cycleInfo.is_paused)
+                  {isNonProgressDay
                     ? `مطلوب استدراك الربع ${cycleInfo.quarter_of_day}`
                     : 'ورد اليوم بانتظار التسميع'}
                 </span>
@@ -852,12 +940,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               <div className="flex items-baseline justify-between">
                 <span className="text-xs font-semibold text-stone-500">
                   {isAllCaughtUp
-                    ? (cycleInfo.is_rest_day || cycleInfo.is_paused)
+                    ? isNonProgressDay
                       ? 'ربع آخر يوم نشاط للمجموعة:'
                       : 'آخر ربع مقرر للمجموعة اليوم:'
                     : userQuarterStatus.isBehind
                     ? 'الربع المطلوب منك تسميعه الآن (تعويض سابق):'
-                    : (cycleInfo.is_rest_day || cycleInfo.is_paused)
+                    : isNonProgressDay
                     ? 'الربع المطلوب تسميعه (استدراك):'
                     : 'الربع المطلوب تسميعه اليوم:'}
                 </span>
@@ -944,12 +1032,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   <CheckCircle2 className="w-4 h-4" />
                   <span>
                     {isAllCaughtUp
-                      ? (cycleInfo.is_rest_day || cycleInfo.is_paused)
+                      ? isNonProgressDay
                         ? `مواكب لجميع الأرباع حتى ربع آخر نشاط (${cycleInfo.quarter_of_day})`
                         : 'أتممت ربع اليوم'
                       : userQuarterStatus.isBehind
                       ? `استدراك تسميع الربع ${userQuarterStatus.requiredQuarter} (سابق)`
-                      : (cycleInfo.is_rest_day || cycleInfo.is_paused)
+                      : isNonProgressDay
                       ? `تسجيل تسميع الربع ${cycleInfo.quarter_of_day} (استدراك)`
                       : `تسجيل تسميع الربع ${userQuarterStatus.requiredQuarter}`}
                   </span>
@@ -959,6 +1047,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
           </div>
         </div>
       </div>
+        </>
       )}
 
       {/* History section - Clean collapsible */}
@@ -985,6 +1074,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               revisions={revisions}
               peerMembers={peerMembers}
               onCorrectListener={onCorrectListener}
+              distantHistory={distantHistory}
             />
           </div>
         )}

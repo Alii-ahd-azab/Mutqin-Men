@@ -308,3 +308,145 @@ test('distinct ranges stay distinct and genuine gaps stay overdue on the unconfi
   const dup2 = statusCal(p, [...days(1, 14).map((d) => review(p, d)), review(p, '2026-10-15'), confirmed(p, '2026-10-15', '2026-10-15')], '2026-10-17');
   assert.equal(dup2.pastMissedDates.length, 1);
 });
+
+// ---------------------------------------------------------------------------------------------
+// «المراجعة البعيدة» (distant-review days): calendar, obligations, peer-test prerequisite
+// ---------------------------------------------------------------------------------------------
+import {
+  calculateMemberDistantReviewStatus,
+  calculateMemberRequiredQuarter,
+} from '../supabase/functions/_shared/logic/calculations.ts';
+import type { DistantReviewAssignment, DistantReviewCompletion } from '../supabase/functions/_shared/logic/programTypes.ts';
+
+const withDistant = (dates: string[], restDates: string[] = [], extra: Partial<GroupSettings> = {}) =>
+  program(restDates, { distant_review_dates: dates, ...extra });
+const assignment = (date: string, start = 1, end = 12, id = `a-${date}`): DistantReviewAssignment => ({
+  id, batch_id: 'b', cycle_id: 'c', review_date: date, start_quarter: start, end_quarter: end, created_at: '', updated_at: '',
+});
+const done = (a: DistantReviewAssignment, on: string, member = 'm'): DistantReviewCompletion => ({
+  id: `${a.id}-${member}`, assignment_id: a.id, member_id: member, completed_at: `${on}T10:00:00Z`, completed_on: on,
+});
+const dayOf = (p: ReturnType<typeof program>, d: string) => calculateCycleInfo(p.settings, p.restDays, d).cycle_day;
+
+test('distant review: Oct 5 does not consume a program day (Oct 1–4, then Oct 6 = day 5)', () => {
+  const p = withDistant(['2026-10-05']);
+  assert.deepEqual(getActiveCycleDates(START, '2026-10-06', p.restDays, p.settings), [...days(1, 4), '2026-10-06']);
+  assert.deepEqual(days(1, 6).map((d) => dayOf(p, d)), [1, 2, 3, 4, 4, 5]);
+  const info = calculateCycleInfo(p.settings, p.restDays, '2026-10-05');
+  assert.equal(info.is_distant_review_day, true);
+  assert.equal(info.is_rest_day, false);
+  assert.equal(info.distant_review_days_count, 1);
+  // Monday q30 → Tuesday distant (still 30, no new quarter) → Wednesday q31
+  const q = withDistant(['2026-10-31']);
+  assert.deepEqual(['2026-10-30', '2026-10-31', '2026-11-01'].map((d) => dayOf(q, d)), [30, 30, 31]);
+});
+
+test('distant review: several manual days, consecutive and separated, each skipped once', () => {
+  const p = withDistant(['2026-10-05', '2026-10-06', '2026-10-12']);
+  assert.deepEqual(getActiveCycleDates(START, '2026-10-13', p.restDays, p.settings), [...days(1, 4), ...days(7, 11), '2026-10-13']);
+  assert.equal(dayOf(p, '2026-10-13'), 10);
+  assert.equal(calculateCycleInfo(p.settings, p.restDays, '2026-10-13').distant_review_days_count, 3);
+});
+
+test('distant review: a date that is also a rest day or paused is never counted twice', () => {
+  // (the database forbids rest day + distant review on one date; the calendar stays safe anyway)
+  const both = withDistant(['2026-10-05'], ['2026-10-05']);
+  assert.equal(dayOf(both, '2026-10-06'), 5);
+  const paused = withDistant(['2026-10-05'], [], { pause_periods: [{ from: '2026-10-04', to: '2026-10-06' }] });
+  assert.equal(dayOf(paused, '2026-10-07'), 4);
+  assert.equal(calculateCycleInfo(paused.settings, paused.restDays, '2026-10-05').is_distant_review_day, false);
+  assert.equal(calculateCycleInfo(paused.settings, paused.restDays, '2026-10-07').distant_review_days_count, 0);
+});
+
+test('distant review: deleting a future day restores it; adding one never changes past days', () => {
+  const plain = program();
+  const scheduled = withDistant(['2026-10-20']);
+  for (const d of days(1, 19)) assert.equal(dayOf(scheduled, d), dayOf(plain, d), d);
+  assert.equal(dayOf(scheduled, '2026-10-21'), dayOf(plain, '2026-10-21') - 1);
+  const deleted = withDistant([]);
+  assert.equal(dayOf(deleted, '2026-10-21'), dayOf(plain, '2026-10-21'));
+  assert.deepEqual(getActiveCycleDates(START, '2026-10-21', deleted.restDays, deleted.settings), days(1, 21));
+});
+
+test("distant review today: no new normal Tasmi'a or daily review, the assignment is due", () => {
+  const p = withDistant(['2026-10-05']);
+  const a = assignment('2026-10-05');
+  const logs = days(1, 4).map((d) => review(p, d));
+  const rev = status(p, logs, '2026-10-05');
+  assert.equal(rev.isTodayProgramDay, false);
+  assert.equal(rev.pastMissedRevisionDaysCount, 0);
+  assert.deepEqual(rev.missedDates, []);
+  // Tasmi'a: the group quarter stays at 4, a member who recited 1..4 owes nothing new.
+  const recs = [1, 2, 3, 4].map((q) => ({ member_id: 'm', quarter_number: q }));
+  const tasmia = calculateMemberRequiredQuarter('m', dayOf(p, '2026-10-05'), recs);
+  assert.equal(tasmia.allCompletedUpToToday, true);
+  assert.equal(tasmia.pastMissedQuartersCount, 0);
+  const s = calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-05');
+  assert.equal(s.todayAssignment?.id, a.id);
+  assert.equal(s.overdueCount, 0);
+  assert.deepEqual(s.outstanding.map((x) => x.id), [a.id]);
+});
+
+test('distant review: completed today → no debt tomorrow; missed → overdue tomorrow; late completion clears it', () => {
+  const p = withDistant(['2026-10-05']);
+  const a = assignment('2026-10-05');
+  const onTime = calculateMemberDistantReviewStatus('m', [a], [done(a, '2026-10-05')], p.settings, p.restDays, '2026-10-06');
+  assert.equal(onTime.overdueCount, 0);
+  const missed = calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-06');
+  assert.deepEqual(missed.overdue.map((x) => x.id), [a.id]);
+  // Still owed days later, the program having moved on.
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-20').overdueCount, 1);
+  const late = done(a, '2026-10-07');
+  const after = calculateMemberDistantReviewStatus('m', [a], [late], p.settings, p.restDays, '2026-10-08');
+  assert.equal(after.overdueCount, 0);
+  assert.equal(after.completionByAssignment.get(a.id)?.completed_on, '2026-10-07');
+  // Another member's completion never settles his.
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [done(a, '2026-10-05', 'x')], p.settings, p.restDays, '2026-10-06').overdueCount, 1);
+});
+
+test('distant review: several missed days stay separately owed, even with overlapping ranges', () => {
+  const p = withDistant(['2026-10-06', '2026-10-13']);
+  const a1 = assignment('2026-10-06', 1, 12);
+  const a2 = assignment('2026-10-13', 5, 12);
+  const s = calculateMemberDistantReviewStatus('m', [a2, a1], [], p.settings, p.restDays, '2026-10-14');
+  assert.deepEqual(s.overdue.map((x) => x.id), [a1.id, a2.id]);
+  const one = calculateMemberDistantReviewStatus('m', [a1, a2], [done(a2, '2026-10-14')], p.settings, p.restDays, '2026-10-14');
+  assert.deepEqual(one.overdue.map((x) => x.id), [a1.id]);
+});
+
+test('distant review: not owed before joining, before the date, or on a paused date', () => {
+  const p = withDistant(['2026-10-05', '2026-10-09'], [], { pause_periods: [{ from: '2026-10-08', to: '2026-10-10' }] });
+  const a = assignment('2026-10-05');
+  const pausedA = assignment('2026-10-09');
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-20', '2026-10-06').overdueCount, 0);
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-04').outstanding.length, 0);
+  assert.equal(calculateMemberDistantReviewStatus('m', [pausedA], [], p.settings, p.restDays, '2026-10-20').overdueCount, 0);
+  // Open (global) pause covering the date: no obligation either.
+  const open = withDistant(['2026-10-05'], [], { is_paused: true, paused_at: '2026-10-04' });
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], open.settings, open.restDays, '2026-10-05').todayAssignment, null);
+});
+
+test('distant review: normal historical overdue reviews are unaffected', () => {
+  const p = withDistant(['2026-10-05']);
+  const logs = ['2026-10-01', '2026-10-02', '2026-10-04', '2026-10-06'].map((d) => review(p, d)); // Oct 3 missed
+  const s = status(p, logs, '2026-10-07');
+  assert.deepEqual(s.pastMissedDates, ['2026-10-03']);
+});
+
+test("peer test with require_revision_completed: distant-review debt blocks, today's distant review replaces the daily one", () => {
+  const t = { ...test8, require_revision_completed: true };
+  const base = { test: t, completedQuarters: quarters(1, 2, 3, 4, 5, 6, 7, 8), passedAttempts: [], delay: okDelay, inAudience: true };
+  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true } }).is_eligible, true);
+  const overdue = evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true, distantOverdueCount: 2 } });
+  assert.equal(overdue.is_eligible, false);
+  assert.match(overdue.reasons.join(' '), /مراجعات بعيدة متأخرة \(2\)/);
+  const todayPending = evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true, distantTodayPending: true } });
+  assert.match(todayPending.reasons.join(' '), /المراجعة البعيدة لليوم/);
+  // Without the prerequisite, distant debt does not matter.
+  assert.equal(evaluateCandidate({ ...base, test: test8, revision: undefined }).is_eligible, true);
+});
+
+test("settings mapping carries this cycle's distant-review dates (sorted), absent when none", () => {
+  assert.equal('distant_review_dates' in buildSettings(cycle, [], null), false);
+  assert.deepEqual(buildSettings(cycle, [], null, ['2026-11-13', '2026-11-06']).distant_review_dates, ['2026-11-06', '2026-11-13']);
+});

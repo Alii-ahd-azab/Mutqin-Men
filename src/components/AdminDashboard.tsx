@@ -1,5 +1,18 @@
 import React, { useState, useMemo, useEffect } from 'react';
-import { AdminAccountUpdate, Batch, User, GroupSettings, NewAccountPayload, RestDay, RecitationLog, RevisionLog, CycleInfo } from '../types';
+import {
+  AdminAccountUpdate,
+  Batch,
+  User,
+  GroupSettings,
+  NewAccountPayload,
+  RestDay,
+  RecitationLog,
+  RevisionLog,
+  CycleInfo,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
+  DistantReviewInput,
+} from '../types';
 import { getQuarterInfo } from '../data/quranData';
 import {
   calculateMemberRequiredQuarter,
@@ -11,6 +24,7 @@ import {
   calculateListenersLeaderboard,
   joinedOnDateFromTimestamp,
   computeMemberDelayStatus,
+  calculateMemberDistantReviewStatus,
   SEVERE_DELAY_THRESHOLD,
 } from '../lib/calculations';
 import { api } from '../api/client';
@@ -46,7 +60,8 @@ import {
   ArrowLeftRight,
 } from 'lucide-react';
 import { AdminMemberModal } from './AdminMemberModal';
-import { CelebrationBanner, RestDayBanner, PauseBanner } from './Banners';
+import { CelebrationBanner, RestDayBanner, PauseBanner, DistantReviewBanner } from './Banners';
+import { DistantReviewAdminSection } from './DistantReviewAdminSection';
 import { DailyThoughtEditor } from './DailyThoughtEditor';
 import { AdminAccountsManager } from './AdminAccountsManager';
 import { AdminPeerTestsTab } from './AdminPeerTestsTab';
@@ -78,6 +93,12 @@ interface AdminDashboardProps {
   onAccountsChanged: () => void;
   onAddRestDay: (payload: { date: string; note: string }) => Promise<void>;
   onDeleteRestDay: (id: string) => Promise<void>;
+  // «المراجعة البعيدة» of the batch (all cycles) and the completions of its members
+  distantReviews: DistantReviewAssignment[];
+  distantCompletions: DistantReviewCompletion[];
+  onCreateDistantReview: (payload: DistantReviewInput) => Promise<string>;
+  onUpdateDistantReview: (id: string, payload: DistantReviewInput) => Promise<string>;
+  onDeleteDistantReview: (id: string) => Promise<string>;
   onPause: () => Promise<void>;
   onResume: () => Promise<void>;
   onUpdateSettings: (payload: {
@@ -110,6 +131,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onAccountsChanged,
   onAddRestDay,
   onDeleteRestDay,
+  distantReviews,
+  distantCompletions,
+  onCreateDistantReview,
+  onUpdateDistantReview,
+  onDeleteDistantReview,
   onPause,
   onResume,
   onUpdateSettings,
@@ -192,6 +218,15 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
     );
   }, [settings.start_date, cycleInfo.start_date, cycleInfo.today_date, restDays, settings]);
 
+  // «المراجعة البعيدة» days of the active cycle (each one its own obligation)
+  const cycleDistantReviews = useMemo(
+    () => distantReviews.filter((a) => a.cycle_id === cycleId),
+    [distantReviews, cycleId]
+  );
+  const todayDistant = cycleInfo.is_distant_review_day
+    ? cycleDistantReviews.find((a) => a.review_date === cycleInfo.today_date)
+    : undefined;
+
   // Members filtering:
   // 1) Active members only (for daily recitation/revision obligations, leaderboard, and today's status)
   const activeMemberUsers = useMemo(
@@ -250,7 +285,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         (r) => r.listener_id === m.id && (r.member_id || r.reciter_id) !== m.id
       ).length;
 
+      // Distant-review debt is tracked separately (not part of the elimination threshold).
+      const distant = calculateMemberDistantReviewStatus(
+        m.id,
+        cycleInfo.has_started ? cycleDistantReviews : [],
+        distantCompletions,
+        settings,
+        restDays,
+        cycleInfo.today_date,
+        joinedOnDateFromTimestamp(m.batch_joined_at)
+      );
+
       return {
+        distantOverdueCount: distant.overdueCount,
+        hasDistantToday: !!distant.todayAssignment,
+        hasCompletedDistantToday: distant.hasCompletedToday,
         user: m,
         hasRecited: todayRecs.length > 0,
         todayRecsCount: todayRecs.length,
@@ -275,7 +324,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
         totalTimesListened,
       };
     });
-  }, [activeMemberUsers, recitations, revisions, cycleInfo.today_date, cycleInfo.quarter_of_day, activeCycleDates]);
+  }, [activeMemberUsers, recitations, revisions, cycleInfo.today_date, cycleInfo.quarter_of_day, activeCycleDates, cycleDistantReviews, distantCompletions, settings, restDays, cycleInfo.has_started]);
 
   // Aggregate metrics (active members only)
   const totalMembersCount = activeMemberUsers.length;
@@ -303,8 +352,8 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
   // Weekly Stats calculation (active members only)
   const currentWeek = useMemo(() => {
-    return getCurrentWeekRange(cycleInfo.today_date, settings.start_date, restDays);
-  }, [cycleInfo.today_date, settings.start_date, restDays]);
+    return getCurrentWeekRange(cycleInfo.today_date, settings.start_date, restDays, settings.distant_review_dates);
+  }, [cycleInfo.today_date, settings.start_date, restDays, settings.distant_review_dates]);
 
   const membersWeeklyStatus = useMemo(() => {
     const activeDaysCount = currentWeek.activeRecitationDaysThisWeek.length;
@@ -549,6 +598,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
 
       {/* Rest day banner if today is rest day */}
       {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
+
+      {/* «المراجعة البعيدة» day: normal progression paused today */}
+      {cycleInfo.is_distant_review_day && (
+        <DistantReviewBanner start={todayDistant?.start_quarter} end={todayDistant?.end_quarter} note={todayDistant?.note} />
+      )}
 
       {/* Main Tabs Navigation */}
       <div className="grid grid-cols-2 sm:grid-cols-5 bg-emerald-50/60 p-1.5 rounded-2xl gap-1 text-xs font-bold border border-emerald-100">
@@ -895,6 +949,24 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   </span>
                                 </div>
                               )}
+                              {m.hasDistantToday && (
+                                <div>
+                                  <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold border ${
+                                    m.hasCompletedDistantToday
+                                      ? 'bg-emerald-50 text-emerald-800 border-emerald-200'
+                                      : 'bg-stone-100 text-stone-600 border-stone-200'
+                                  }`}>
+                                    {m.hasCompletedDistantToday ? 'أتم المراجعة البعيدة' : 'لم يؤكد المراجعة البعيدة'}
+                                  </span>
+                                </div>
+                              )}
+                              {m.distantOverdueCount > 0 && (
+                                <div>
+                                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-md text-[10px] font-bold border bg-amber-50 text-amber-900 border-amber-300">
+                                    مراجعات بعيدة متأخرة: {m.distantOverdueCount}
+                                  </span>
+                                </div>
+                              )}
                             </div>
                           </td>
 
@@ -1075,6 +1147,9 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                                   </div>
                                   <div className={memberStatus.isSeverelyBehindRevision ? 'text-rose-700 font-bold' : memberStatus.missedRevisionDaysCount > 0 ? 'text-amber-700 font-medium' : 'text-stone-400'}>
                                     المراجعات الفائتة: {memberStatus.missedRevisionDaysCount}
+                                  </div>
+                                  <div className={memberStatus.distantOverdueCount > 0 ? 'text-amber-700 font-medium' : 'text-stone-400'}>
+                                    مراجعات بعيدة متأخرة: {memberStatus.distantOverdueCount}
                                   </div>
                                   <div className="text-emerald-700 font-semibold">
                                     جلسات الاستماع للزملاء: {memberStatus.totalTimesListened}
@@ -1691,6 +1766,21 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
               </div>
             </div>
           </div>
+
+          {/* Section: «المراجعة البعيدة» (between program pause control and rest days) */}
+          <DistantReviewAdminSection
+            cycleId={cycleId}
+            today={cycleInfo.today_date}
+            settings={settings}
+            restDays={restDays}
+            users={users}
+            assignments={distantReviews}
+            completions={distantCompletions}
+            onCreate={onCreateDistantReview}
+            onUpdate={onUpdateDistantReview}
+            onDelete={onDeleteDistantReview}
+            loading={loading}
+          />
 
           {/* Section 2: Rest / Catch-up Days */}
           <div className="bg-white rounded-3xl border border-stone-200 p-6 shadow-2xs space-y-4">

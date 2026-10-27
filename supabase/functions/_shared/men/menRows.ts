@@ -1,4 +1,12 @@
-import type { User, GroupSettings, RestDay, RecitationLog, RevisionLog } from '../logic/programTypes.ts';
+import type {
+  User,
+  GroupSettings,
+  RestDay,
+  RecitationLog,
+  RevisionLog,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
+} from '../logic/programTypes.ts';
 
 /**
  * Supabase rows → the Men application shapes (the inverse of the approved Firestore → Supabase
@@ -12,6 +20,9 @@ export const TASMIA_COLUMNS =
 export const REVIEW_COLUMNS =
   'id, firestore_id, cycle_id, user_id, start_quarter, end_quarter, confirmed_at, legacy_date, member_name_snapshot, notes';
 export const REST_DAY_COLUMNS = 'id, firestore_id, cycle_id, rest_date, reason, created_by, created_by_name_snapshot, created_at';
+export const DISTANT_REVIEW_COLUMNS =
+  'id, batch_id, cycle_id, review_date, start_quarter, end_quarter, note, created_by_name_snapshot, created_at, updated_at';
+export const DISTANT_COMPLETION_COLUMNS = 'id, assignment_id, user_id, completed_at, completed_on, member_name_snapshot';
 export type ProfileRow = {
   id: string;
   full_name: string;
@@ -68,6 +79,26 @@ export type RestDayRow = {
   created_by_name_snapshot: string | null;
   created_at: string;
 };
+export type DistantReviewRow = {
+  id: string;
+  batch_id: string;
+  cycle_id: string;
+  review_date: string;
+  start_quarter: number;
+  end_quarter: number;
+  note: string | null;
+  created_by_name_snapshot: string | null;
+  created_at: string;
+  updated_at: string;
+};
+export type DistantCompletionRow = {
+  id: string;
+  assignment_id: string;
+  user_id: string;
+  completed_at: string;
+  completed_on: string;
+  member_name_snapshot: string | null;
+};
 /** Timestamps exactly like JavaScript toISOString() (what the legacy data stored). */
 export function iso(value: string | null | undefined): string | undefined {
   return value ? new Date(value).toISOString() : undefined;
@@ -117,7 +148,13 @@ export function mapUser(row: ProfileRow): User {
   };
 }
 
-export function buildSettings(cycle: CycleRow, pauses: PauseRow[], thought: ThoughtRow): GroupSettings {
+export function buildSettings(
+  cycle: CycleRow,
+  pauses: PauseRow[],
+  thought: ThoughtRow,
+  // «المراجعة البعيدة» dates of THIS cycle (non-program days of the normal calendar)
+  distantReviewDates: string[] = []
+): GroupSettings {
   const ordered = [...pauses].sort((a, b) => a.paused_on.localeCompare(b.paused_on));
   const open = ordered.find((p) => p.resumed_on === null) || null;
   // Men periods are inclusive {from, to}; resumed_on is the first active day. A same-day resume is no period.
@@ -134,6 +171,7 @@ export function buildSettings(cycle: CycleRow, pauses: PauseRow[], thought: Thou
     paused_at: open ? open.paused_on : null,
     total_paused_days: cycle.legacy_paused_days,
     ...(closed.length ? { pause_periods: closed } : {}),
+    ...(distantReviewDates.length ? { distant_review_dates: [...distantReviewDates].sort() } : {}),
     ...(thought
       ? {
           daily_thought: thought.content_html,
@@ -193,5 +231,39 @@ export function mapRevisions(rows: ReviewRow[], cycleNumber: number, names: Map<
         created_at: iso(r.confirmed_at),
         cycle_number: cycleNumber,
       }) as RevisionLog
+  );
+}
+
+export function mapDistantReviews(rows: DistantReviewRow[]): DistantReviewAssignment[] {
+  return [...rows]
+    .sort((a, b) => a.review_date.localeCompare(b.review_date))
+    .map(
+      (r) =>
+        compact({
+          id: r.id,
+          batch_id: r.batch_id,
+          cycle_id: r.cycle_id,
+          review_date: r.review_date,
+          start_quarter: r.start_quarter,
+          end_quarter: r.end_quarter,
+          note: r.note,
+          created_by_name: r.created_by_name_snapshot,
+          created_at: iso(r.created_at),
+          updated_at: iso(r.updated_at),
+        }) as DistantReviewAssignment
+    );
+}
+
+export function mapDistantCompletions(rows: DistantCompletionRow[], names: Map<string, string>): DistantReviewCompletion[] {
+  return rows.map(
+    (r) =>
+      compact({
+        id: r.id,
+        assignment_id: r.assignment_id,
+        member_id: r.user_id,
+        member_name: r.member_name_snapshot ?? names.get(r.user_id),
+        completed_at: iso(r.completed_at),
+        completed_on: r.completed_on,
+      }) as DistantReviewCompletion
   );
 }

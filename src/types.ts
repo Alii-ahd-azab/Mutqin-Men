@@ -6,10 +6,30 @@ import type {
   RecitationLog,
   RevisionLog,
   CycleInfo,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
 } from '../supabase/functions/_shared/logic/programTypes.ts';
 
 // Core program types live in the shared folder so the Edge Functions use the same definitions.
-export type { UserRole, User, GroupSettings, RestDay, RecitationLog, RevisionLog, CycleInfo };
+export type {
+  UserRole,
+  User,
+  GroupSettings,
+  RestDay,
+  RecitationLog,
+  RevisionLog,
+  CycleInfo,
+  DistantReviewAssignment,
+  DistantReviewCompletion,
+};
+
+// Admin form for one «المراجعة البعيدة» day
+export interface DistantReviewInput {
+  review_date: string; // YYYY-MM-DD
+  start_quarter: number;
+  end_quarter: number;
+  note?: string;
+}
 
 export type MembershipRole = 'member' | 'admin';
 
@@ -91,6 +111,9 @@ export interface BatchBootstrap {
   revisions: RevisionLog[];
   todayRecitations: RecitationLog[];
   todayRevisions: RevisionLog[];
+  // «المراجعة البعيدة»: the batch's scheduled days (all cycles) and the completions the user may see
+  distantReviews: DistantReviewAssignment[];
+  distantCompletions: DistantReviewCompletion[];
   // Peer tests of the cycle (members only receive live ones via RLS)
   peerTests: PeerTest[];
   // Attempts the user may see (members: their own as candidate/examiner)

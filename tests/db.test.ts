@@ -611,3 +611,232 @@ test('fresh-start member: starts at the batch quarter of today, sequential from 
   // Nothing persisted: all real accounts and memberships unchanged.
   assert.equal((await one('select count(*)::int n from batch_memberships where start_quarter is not null')).n, 0);
 });
+
+// ---------------------------------------------------------------------------------------------
+// «المراجعة البعيدة» (distant-review days)
+// ---------------------------------------------------------------------------------------------
+const addDays = (d: string, n: number) => {
+  const x = new Date(d + 'T00:00:00Z');
+  x.setUTCDate(x.getUTCDate() + n);
+  return x.toISOString().slice(0, 10);
+};
+// Calendar of the active cycle as the shared JS code sees it (pauses, rest days, distant dates).
+async function jsCalendar() {
+  const c = await one("select to_char(starts_on,'YYYY-MM-DD') s, total_quarters, review_window, legacy_paused_days from cycles where id=$1", [cycle]);
+  const pauses = (await db.query("select to_char(paused_on,'YYYY-MM-DD') f, to_char(resumed_on - 1,'YYYY-MM-DD') t, resumed_on is null o from program_pauses where cycle_id=$1 and (resumed_on is null or resumed_on > paused_on) order by paused_on", [cycle])).rows as any[];
+  const rest = (await db.query("select to_char(rest_date,'YYYY-MM-DD') d from group_rest_days where cycle_id=$1", [cycle])).rows as any[];
+  const distant = (await db.query("select to_char(review_date,'YYYY-MM-DD') d from distant_review_assignments where cycle_id=$1", [cycle])).rows as any[];
+  const open = pauses.find((p) => p.o);
+  const settings: GroupSettings = {
+    id: 'x', start_date: c.s, total_quarters: c.total_quarters, review_window: c.review_window, current_cycle_number: 1,
+    is_paused: !!open, paused_at: open?.f ?? null, total_paused_days: c.legacy_paused_days,
+    pause_periods: pauses.filter((p) => !p.o).map((p) => ({ from: p.f, to: p.t })),
+    distant_review_dates: distant.map((r) => r.d),
+  };
+  const restDays: RestDay[] = rest.map((r, i) => ({ id: String(i), date: r.d, note: '', added_by_admin_id: '', created_at: '' }));
+  return { settings, restDays };
+}
+async function assertCalendarParity(label: string) {
+  const { settings, restDays } = await jsCalendar();
+  const rows = (await db.query(
+    "select to_char(d,'YYYY-MM-DD') d, app_private.men_cycle_day($1, d::date) n from generate_series('2026-09-10'::date, '2027-03-31'::date, interval '1 day') d",
+    [cycle]
+  )).rows as any[];
+  for (const r of rows) {
+    const info = calculateCycleInfo(settings, restDays, r.d);
+    assert.equal(r.n, info.has_started ? info.cycle_day : 0, `${label} ${r.d}`);
+  }
+}
+const closeOpenPause = () => db.query("update program_pauses set resumed_on = paused_on + 2 where cycle_id=$1 and resumed_on is null", [cycle]);
+const addDistant = (date: string, start = 1, end = 12) =>
+  db.query('insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1, $2, $3, $4, $5) returning id', [cycle, batch, date, start, end]).then((r: any) => r.rows[0].id as string);
+
+test('distant review: SQL program day equals the JS calendar (one, several, consecutive, rest/pause overlap, deletion)', async () => {
+  await db.query('begin');
+  try {
+    await closeOpenPause();
+    const before = (await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, addDays(TODAY, 20)])).n;
+    await addDistant(addDays(TODAY, 3));
+    await addDistant(addDays(TODAY, 4)); // consecutive
+    const separated = await addDistant(addDays(TODAY, 11));
+    await addDistant('2026-10-08'); // a historical date
+    await db.query("insert into program_pauses(cycle_id,paused_on,resumed_on) values($1,$2,$3)", [cycle, addDays(TODAY, 30), addDays(TODAY, 33)]);
+    await addDistant(addDays(TODAY, 31)); // inside a global pause: not counted twice
+    await assertCalendarParity('distant');
+    // Each non-paused distant day takes exactly one program day; the Tuesday rule: next day continues.
+    assert.equal((await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, addDays(TODAY, 20)])).n, before - 4);
+    const d3 = (await one('select app_private.men_cycle_day($1, $2::date) a, app_private.men_cycle_day($1, $3::date) b, app_private.men_cycle_day($1, $4::date) c', [cycle, addDays(TODAY, 2), addDays(TODAY, 3), addDays(TODAY, 5)]));
+    assert.deepEqual([d3.b - d3.a, d3.c - d3.a], [0, 1]);
+    // Deleting a future day restores it as a program day.
+    await db.query('delete from distant_review_assignments where id=$1', [separated]);
+    await assertCalendarParity('after delete');
+    assert.equal((await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, addDays(TODAY, 20)])).n, before - 3);
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('distant review: one schedule type per date — rest day XOR distant review (database guards)', async () => {
+  await db.query('begin');
+  try {
+    const date = addDays(TODAY, 6);
+    await addDistant(date);
+    await fails(db, "insert into group_rest_days(cycle_id, rest_date) values ($1, $2)", [cycle, date], /مجدول كيوم مراجعة بعيدة/);
+    const restDate = addDays(TODAY, 7);
+    await db.query("insert into group_rest_days(cycle_id, rest_date) values ($1, $2)", [cycle, restDate]);
+    await fails(db, 'select public.men_distant_review_save(null, $1, $2, 1, 5, null, $3)', [batch, restDate, id.admin], /يوم استدراك وراحة/);
+    await fails(db, "insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1,$2,$3,1,2)", [cycle, batch, restDate], /يوم استدراك وراحة/);
+    // The admin's own rest-day insert (browser, RLS) is refused with the same message.
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id.admin, role: 'authenticated' })]);
+    await db.query('set local role authenticated');
+    await fails(db, "insert into group_rest_days(cycle_id, rest_date, created_by) values ($1, $2, $3)", [cycle, date, id.admin], /مجدول كيوم مراجعة بعيدة/);
+    await db.query('reset role');
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('distant review admin RPCs: service role only; one future date per call; edit/delete only while future', async () => {
+  await as(id.admin, async (tx) => {
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 1, 12, null, $3)', [batch, addDays(TODAY, 5), id.admin], '42501');
+    await fails(tx, 'select public.men_distant_review_delete($1, $2)', [batch, batch], '42501');
+    await fails(tx, "insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1,$2,$3,1,2)", [cycle, batch, addDays(TODAY, 5)], '42501');
+  });
+  await as(id.member, async (tx) => {
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 1, 12, null, $3)', [batch, addDays(TODAY, 5), id.member], '42501');
+  });
+  await asService(async (tx) => {
+    const save = (aid: string | null, date: string, s: number, e: number, note: string | null = null) =>
+      tx.query('select public.men_distant_review_save($1, $2, $3, $4, $5, $6, $7) r', [aid, batch, date, s, e, note, id.admin]).then((r: any) => r.rows[0].r);
+    const first = await save(null, addDays(TODAY, 10), 1, 12, '  مراجعة ما سبق قبل الاختبار  ');
+    assert.deepEqual([first.review_date, first.start_quarter, first.end_quarter, first.note, first.batch_id, first.cycle_id], [addDays(TODAY, 10), 1, 12, 'مراجعة ما سبق قبل الاختبار', batch, cycle]);
+    const second = await save(null, addDays(TODAY, 17), 20, 30);
+    assert.notEqual(second.id, first.id);
+    assert.equal(await n(tx, 'select 1 from distant_review_assignments where cycle_id=$1', [cycle]), 2); // nothing generated besides
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 1, 12, null, $3)', [batch, TODAY, id.admin], /في المستقبل/);
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 1, 12, null, $3)', [batch, addDays(TODAY, -3), id.admin], /في المستقبل/);
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 13, 12, null, $3)', [batch, addDays(TODAY, 12), id.admin], /نطاق الأرباع/);
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 0, 12, null, $3)', [batch, addDays(TODAY, 12), id.admin], /نطاق الأرباع/);
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 1, 241, null, $3)', [batch, addDays(TODAY, 12), id.admin], /نطاق الأرباع/);
+    await fails(tx, 'select public.men_distant_review_save(null, $1, $2, 1, 12, null, $3)', [batch, addDays(TODAY, 10), id.admin], '23505');
+    // Edit a future one: date, range and note; colliding with another day is refused.
+    const edited = await save(first.id, addDays(TODAY, 11), 2, 14, 'تعديل');
+    assert.deepEqual([edited.id, edited.review_date, edited.start_quarter, edited.end_quarter, edited.note], [first.id, addDays(TODAY, 11), 2, 14, 'تعديل']);
+    await fails(tx, 'select public.men_distant_review_save($1, $2, $3, 1, 2, null, $4)', [first.id, batch, addDays(TODAY, 17), id.admin], '23505');
+    // Delete a future one.
+    assert.equal((await tx.query('select public.men_distant_review_delete($1, $2) r', [second.id, batch])).rows[0].r.id, second.id);
+    // Wrong batch for an existing id: not found.
+    await fails(tx, 'select public.men_distant_review_delete($1, $2)', [first.id, '00000000-0000-0000-0000-000000000000'], 'P0002');
+    // Today's and past days are kept: neither edited nor deleted.
+    const past = (await tx.query("insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1,$2,$3,1,2) returning id", [cycle, batch, TODAY])).rows[0].id;
+    await fails(tx, 'select public.men_distant_review_save($1, $2, $3, 1, 2, null, $4)', [past, batch, addDays(TODAY, 20), id.admin], /حلّ موعده/);
+    await fails(tx, 'select public.men_distant_review_delete($1, $2)', [past, batch], /حلّ موعده/);
+  });
+});
+
+test('distant review RLS: members read their batch days and only their own completions; anon nothing', async () => {
+  await db.query('begin');
+  try {
+    await closeOpenPause();
+    const a = await addDistant(TODAY, 1, 12);
+    await db.query('insert into distant_review_completions(assignment_id, user_id, completed_on) values ($1, $2, $3)', [a, id.peer, TODAY]);
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id.member, role: 'authenticated' })]);
+    await db.query('set local role authenticated');
+    assert.equal(await n(db, 'select 1 from distant_review_assignments where id=$1', [a]), 1);
+    assert.equal(await n(db, 'select 1 from distant_review_completions'), 0); // the peer's completion is not his
+    await fails(db, 'insert into distant_review_completions(assignment_id, user_id, completed_on) values ($1, $2, $3)', [a, id.member, TODAY], '42501');
+    await fails(db, 'update distant_review_assignments set end_quarter = 20 where id=$1', [a], '42501');
+    await fails(db, 'delete from distant_review_assignments where id=$1', [a], '42501');
+    await db.query('reset role');
+    await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id.admin, role: 'authenticated' })]);
+    await db.query('set local role authenticated');
+    assert.equal(await n(db, 'select 1 from distant_review_completions where assignment_id=$1', [a]), 1); // admin sees the batch's
+    await db.query('reset role');
+    await db.query("select set_config('request.jwt.claims', '', true)");
+    await db.query('set local role anon');
+    await fails(db, 'select 1 from distant_review_assignments', [], '42501');
+    await fails(db, 'select 1 from distant_review_completions', [], '42501');
+    await fails(db, 'select public.men_complete_distant_review($1)', [a], '42501');
+    await db.query('reset role');
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('distant review completion: owed today or late, idempotent, never future/paused/other batch/inactive; guards use the shifted day', async () => {
+  await db.query('begin');
+  try {
+    await closeOpenPause();
+    const dayBefore = (await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, TODAY])).n as number;
+    const today = await addDistant(TODAY, 1, 12);
+    // A past program date that is not a rest day or paused (the snapshot has a real rest day).
+    const missedDate = (await one(`select max(d)::date::text d from generate_series($1::date - 10, $1::date - 1, interval '1 day') d
+      where not exists (select 1 from group_rest_days r where r.cycle_id=$2 and r.rest_date=d::date)
+        and not app_private.men_is_paused_date($2, d::date)`, [TODAY, cycle])).d as string;
+    const missed = await addDistant(missedDate, 13, 24);
+    const future = await addDistant(addDays(TODAY, 2), 1, 2);
+    // Today and the missed day no longer advance the program: today's day is two less.
+    assert.equal((await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, TODAY])).n, dayBefore - 2);
+    // Normal guards follow the same calendar: a review recorded today stores the shifted range.
+    const asUser = async (uid: string) => {
+      await db.query('reset role');
+      await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: uid, role: 'authenticated' })]);
+      await db.query('set local role authenticated');
+    };
+    await asUser(id.member);
+    const completed = (await one('select public.men_complete_distant_review($1) r', [today])).r;
+    assert.deepEqual([completed.user_id, completed.completed_on, completed.already_recorded], [id.member, TODAY, false]);
+    assert.equal((await one('select public.men_complete_distant_review($1) r', [today])).r.already_recorded, true);
+    const late = (await one('select public.men_complete_distant_review($1) r', [missed])).r;
+    assert.equal(late.completed_on, TODAY); // completed late: assigned on a past date, done today
+    await fails(db, 'select public.men_complete_distant_review($1)', [future], /لم يحن موعد/);
+    await fails(db, 'select public.men_complete_distant_review($1)', ['00000000-0000-0000-0000-000000000000'], 'P0002');
+    assert.equal(await n(db, 'select 1 from distant_review_completions where user_id=$1', [id.member]), 2);
+    await asUser(id.inactive);
+    await fails(db, 'select public.men_complete_distant_review($1)', [today], '42501');
+    await db.query('reset role');
+    // Paused date: no obligation, no confirmation.
+    const pausedDate = (await one(`select min(d)::date::text d from generate_series($1::date - 20, $1::date - 12, interval '1 day') d
+      where not exists (select 1 from group_rest_days r where r.cycle_id=$2 and r.rest_date=d::date)`, [TODAY, cycle])).d as string;
+    await db.query("insert into program_pauses(cycle_id,paused_on,resumed_on) values($1,$2,$3)", [cycle, pausedDate, addDays(pausedDate, 1)]);
+    const paused = await addDistant(pausedDate, 1, 2);
+    await asUser(id.member);
+    await fails(db, 'select public.men_complete_distant_review($1)', [paused], /غير مطلوبة/);
+    await db.query('reset role');
+    // Another batch's day: not his.
+    const other = (await one("select public.create_batch_with_cycle('دفعة اختبار بعيدة', $1::date, null) b", [addDays(TODAY, -10)])).b;
+    const otherCycle = (await one("select id from cycles where batch_id=$1 and status='active'", [other.id])).id;
+    const otherA = (await one('insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1,$2,$3,1,2) returning id', [otherCycle, other.id, TODAY])).id;
+    await asUser(id.member);
+    await fails(db, 'select public.men_complete_distant_review($1)', [otherA], '42501');
+    await db.query('reset role');
+    // History: snapshot name kept; deleting the member removes only his completions (cascade).
+    assert.ok((await one('select member_name_snapshot from distant_review_completions where assignment_id=$1', [today])).member_name_snapshot);
+  } finally {
+    await db.query('rollback');
+  }
+  assert.equal((await one('select count(*)::int n from distant_review_assignments')).n, 0);
+});
+
+test('migration 20261030 (distant review) changes no existing row, no history and no program day', async () => {
+  const { createCutoverDb: build } = await import('../migration/cutover/harness.mjs');
+  const fs = await import('node:fs');
+  // The database exactly as production had it before this migration.
+  const { db: fresh }: { db: any } = await (build as any)(BACKUP, { stopBefore: '20261030000100' });
+  try {
+    const tables = ['profiles', 'batches', 'batch_memberships', 'cycles', 'group_rest_days', 'program_pauses', 'tasmia_submissions', 'review_confirmations', 'peer_tests', 'peer_test_attempts', 'daily_thoughts'];
+    const snapshot = async () => {
+      const out: Record<string, string> = {};
+      for (const t of tables) out[t] = (await fresh.query(`select count(*)::text || ':' || coalesce(md5(string_agg(x::text, '|' order by x::text)), '') h from public.${t} x`)).rows[0].h;
+      const c = (await fresh.query("select id from cycles where status='active'")).rows[0].id;
+      out.days = (await fresh.query("select string_agg(app_private.men_cycle_day($1, d::date)::text, ',' order by d) h from generate_series('2026-09-10'::date, '2027-06-30'::date, interval '1 day') d", [c])).rows[0].h;
+      return out;
+    };
+    const before = await snapshot();
+    assert.equal((await fresh.query("select to_regclass('public.distant_review_assignments') r")).rows[0].r, null);
+    await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261030000100_men_distant_review_days.sql', import.meta.url), 'utf8'));
+    assert.deepEqual(await snapshot(), before);
+  } finally {
+    await fresh.close();
+  }
+});

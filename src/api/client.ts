@@ -13,6 +13,8 @@ import {
   PeerTestCandidate,
   PeerTestQuestion,
   PeerTestSaveInput,
+  DistantReviewAssignment,
+  DistantReviewInput,
 } from '../types';
 import { supabase } from '../lib/supabase';
 import { formatDate, calculateCycleInfo } from '../lib/calculations';
@@ -70,6 +72,16 @@ function dbError(error: { code?: string; message: string }, fallback: string): E
 }
 
 const today = () => formatDate(new Date());
+
+function distantReviewBody(payload: DistantReviewInput) {
+  const start = Number(payload.start_quarter);
+  const end = Number(payload.end_quarter);
+  if (!payload.review_date || !/^\d{4}-\d{2}-\d{2}$/.test(payload.review_date)) throw new Error('يرجى تحديد تاريخ المراجعة البعيدة');
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end > 240 || start > end) {
+    throw new Error('نطاق الأرباع غير صالح: يجب أن يكون «من الربع» بين 1 و240 وألا يتجاوز «إلى الربع».');
+  }
+  return { review_date: payload.review_date, start_quarter: start, end_quarter: end, note: (payload.note || '').trim() };
+}
 
 function requireBatchId(batchId: string | undefined | null): string {
   if (!batchId) throw new Error('يرجى اختيار الدفعة أولاً');
@@ -179,6 +191,8 @@ async function buildBootstrap(batchId: string): Promise<BatchBootstrap> {
     revisions,
     todayRecitations: recitations.filter((r) => r.date === todayStr),
     todayRevisions: revisions.filter((r) => r.date === todayStr),
+    distantReviews: program.distantReviews,
+    distantCompletions: program.distantCompletions,
     peerTests,
     peerTestAttempts,
   };
@@ -459,6 +473,43 @@ export const api = {
       throw dbError(error, 'فشل حفظ يوم الاستدراك والراحة، يرجى المحاولة ثانية.');
     }
     return { message: 'تمت إضافة يوم الاستدراك والراحة بنجاح' };
+  },
+
+  /*
+   * «المراجعة البعيدة»: one manually chosen day per call (no recurrence). admin-actions checks the
+   * batch; the database allows only future dates and refuses a date that is a rest day.
+   */
+  async adminCreateDistantReview(batchId: string, payload: DistantReviewInput): Promise<{ assignment: DistantReviewAssignment; message: string }> {
+    return invokeFunction(
+      'admin-actions',
+      { action: 'distant-review-create', batch_id: requireBatchId(batchId), ...distantReviewBody(payload) },
+      'تعذر إضافة يوم المراجعة البعيدة. حاول مرة أخرى.'
+    );
+  },
+
+  async adminUpdateDistantReview(assignmentId: string, payload: DistantReviewInput): Promise<{ message: string }> {
+    return invokeFunction(
+      'admin-actions',
+      { action: 'distant-review-update', assignment_id: assignmentId, ...distantReviewBody(payload) },
+      'تعذر تعديل يوم المراجعة البعيدة. حاول مرة أخرى.'
+    );
+  },
+
+  async adminDeleteDistantReview(assignmentId: string): Promise<{ message: string }> {
+    return invokeFunction(
+      'admin-actions',
+      { action: 'distant-review-delete', assignment_id: assignmentId },
+      'تعذر حذف يوم المراجعة البعيدة. حاول مرة أخرى.'
+    );
+  },
+
+  /* Member: confirm one owed distant review (identity: assignment + member; idempotent). */
+  async completeDistantReview(assignmentId: string): Promise<{ message: string; already_recorded: boolean }> {
+    const { data, error } = await supabase.rpc('men_complete_distant_review', { p_assignment_id: assignmentId });
+    if (error) throw dbError(error, 'تعذر حفظ إتمام المراجعة البعيدة. حاول مرة أخرى.');
+    return data?.already_recorded
+      ? { message: 'تم تأكيد هذه المراجعة البعيدة مسبقًا.', already_recorded: true }
+      : { message: 'تم تسجيل إتمام المراجعة البعيدة بنجاح، تقبل الله منك.', already_recorded: false };
   },
 
   async adminDeleteRestDay(id: string): Promise<{ success: boolean; message: string }> {
