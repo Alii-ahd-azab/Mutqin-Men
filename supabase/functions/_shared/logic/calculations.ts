@@ -11,35 +11,7 @@ import type {
   RecitationLog,
   User,
 } from './programTypes.ts';
-
-/**
- * Format a Date object to YYYY-MM-DD string with timezone support.
- * On server, defaults to Makkah time (Asia/Riyadh, UTC+3) where the halaqah operates.
- * In browser, formats according to the user device's local calendar day.
- */
-export function formatDate(date: Date = new Date(), timeZone?: string): string {
-  try {
-    if (typeof (globalThis as { window?: unknown }).window !== 'undefined' && !timeZone) {
-      const year = date.getFullYear();
-      const month = String(date.getMonth() + 1).padStart(2, '0');
-      const day = String(date.getDate()).padStart(2, '0');
-      return `${year}-${month}-${day}`;
-    }
-    const targetTz = timeZone || 'Asia/Riyadh';
-    const formatter = new Intl.DateTimeFormat('en-CA', {
-      timeZone: targetTz,
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    return formatter.format(date);
-  } catch {
-    const year = date.getFullYear();
-    const month = String(date.getMonth() + 1).padStart(2, '0');
-    const day = String(date.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
-  }
-}
+import { addDays, membershipDate, programDate, weekdayOf } from './programDate.ts';
 
 /**
  * Parse YYYY-MM-DD string to pure UTC timestamp at midnight to avoid timezone shifting
@@ -164,7 +136,7 @@ export function getDistantReviewDaysInPeriod(
 export function calculateCycleInfo(
   settings: GroupSettings,
   restDays: RestDay[],
-  targetDateStr: string = formatDate()
+  targetDateStr: string = programDate()
 ): CycleInfo {
   const totalQuarters = settings.total_quarters || 240;
   const reviewWindow = settings.review_window || 8;
@@ -364,15 +336,11 @@ export function getActiveCycleDates(
     return [];
   }
 
-  const msPerDay = 1000 * 60 * 60 * 24;
-  const totalDays = Math.floor((targetMs - startMs) / msPerDay) + 1;
   const restDaySet = new Set(restDays.map((r) => r.date));
   const distantSet = new Set(settings?.distant_review_dates || []);
   const activeDates: string[] = [];
 
-  for (let i = 0; i < totalDays; i++) {
-    const curDate = new Date(startMs + i * msPerDay);
-    const dStr = formatDate(curDate);
+  for (let dStr = startDateStr; dStr <= targetDateStr; dStr = addDays(dStr, 1)) {
 
     // Skip rest days and distant-review days
     if (restDaySet.has(dStr) || distantSet.has(dStr)) continue;
@@ -400,11 +368,13 @@ export interface MemberRevisionStatus {
   uncreditedReviews: { date: string; review_end_quarter?: number }[];
 }
 
-/** The calendar date (YYYY-MM-DD) of a membership's joined_at timestamp. */
+/**
+ * The calendar date (YYYY-MM-DD) of a membership's joined_at timestamp: its stored Makkah calendar
+ * date, the same in every browser and in SQL (see membershipDate).
+ */
 export function joinedOnDateFromTimestamp(joinedAt?: string | null): string | undefined {
   if (!joinedAt) return undefined;
-  const parsed = new Date(joinedAt);
-  return Number.isNaN(parsed.getTime()) ? undefined : formatDate(parsed);
+  return membershipDate(joinedAt);
 }
 
 /** The calendar facts the review identity needs (from GroupSettings). */
@@ -433,7 +403,7 @@ export function calculateMemberRevisionStatus(
   memberId: string,
   activeCycleDates: string[],
   revisionLogs: (Pick<RevisionLog, 'member_id' | 'date'> & Partial<Pick<RevisionLog, 'review_end_quarter'>>)[],
-  todayDateStr: string = formatDate(),
+  todayDateStr: string = programDate(),
   joinedOnDate?: string,
   calendar?: RevisionCalendar
 ): MemberRevisionStatus {
@@ -639,40 +609,28 @@ export interface WeekRange {
  * Automatically rolls over every Saturday, resetting weekly statistics without data deletion.
  */
 export function getCurrentWeekRange(
-  todayDateStr: string = formatDate(),
+  todayDateStr: string = programDate(),
   settingsStartDate?: string,
   restDays: RestDay[] = [],
   // «المراجعة البعيدة» dates: no normal recitation is due on them either.
   distantReviewDates: string[] = []
 ): WeekRange {
-  const parts = todayDateStr.split('-').map(Number);
-  const localDate = new Date(parts[0], parts[1] - 1, parts[2], 12, 0, 0);
-  const dayOfWeek = localDate.getDay(); // 0 = Sun, 1 = Mon, ..., 6 = Sat
-  const daysSinceSaturday = (dayOfWeek + 1) % 7;
-
-  const satDate = new Date(localDate);
-  satDate.setDate(localDate.getDate() - daysSinceSaturday);
-
-  const friDate = new Date(satDate);
-  friDate.setDate(satDate.getDate() + 6);
-
-  const startDate = formatDate(satDate);
-  const endDate = formatDate(friDate);
+  const daysSinceSaturday = (weekdayOf(todayDateStr) + 1) % 7; // weekday: 0 = Sun … 6 = Sat
+  const startDate = addDays(todayDateStr, -daysSinceSaturday);
+  const endDate = addDays(startDate, 6);
   const daysPassed = daysSinceSaturday + 1;
 
   const activeRecitationDaysThisWeek: string[] = [];
   const restDaySet = new Set([...restDays.map((r) => r.date), ...distantReviewDates]);
   const effectiveStart = settingsStartDate || startDate;
 
-  const iter = new Date(satDate);
   for (let i = 0; i < daysPassed; i++) {
-    const dStr = formatDate(iter);
+    const dStr = addDays(startDate, i);
     if (dStr <= todayDateStr && dStr >= effectiveStart) {
       if (!restDaySet.has(dStr)) {
         activeRecitationDaysThisWeek.push(dStr);
       }
     }
-    iter.setDate(iter.getDate() + 1);
   }
 
   return {

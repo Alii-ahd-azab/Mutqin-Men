@@ -2,7 +2,7 @@
 // RLS reads/writes per role, Men insert guards, browser RPCs and Edge-Function-only RPCs.
 import test, { before, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { calculateCycleInfo } from '../src/lib/calculations';
+import { calculateCycleInfo, membershipDate, programDate, programDayStart } from '../src/lib/calculations';
 import type { GroupSettings, RestDay } from '../src/types';
 // @ts-ignore - shared ESM tooling
 import { createCutoverDb, asRole } from '../migration/cutover/harness.mjs';
@@ -241,26 +241,23 @@ test('admin writes: rest days, pause/resume, start date, daily thought, past pau
   await as(id.member, (tx) => fails(tx, "select public.men_backfill_revisions($1,'2026-09-19')", [cycle], '42501'));
 });
 
-test('personal tests: saved by RPC with server-computed grade, private, deletable by owner', async () => {
-  const payload = {
-    range_type: 'surah', range_label: 'سورة الفاتحة', start_surah: 1, start_surah_name: 'الفاتحة', end_surah: 1,
-    end_surah_name: 'الفاتحة', questions_count: 2, lines_per_question: 3, difficulty: 'any', notes: ' جيد ',
-    questions: [
-      { start_surah: 1, start_surah_name: 'الفاتحة', start_ayah: 1, end_surah: 1, end_surah_name: 'الفاتحة', end_ayah: 3, errors_count: 1, grade: 100 },
-      { start_surah: 1, start_surah_name: 'الفاتحة', start_ayah: 4, end_surah: 1, end_surah_name: 'الفاتحة', end_ayah: 7, errors_count: 0 },
-    ],
-  };
-  await as(id.member, async (tx) => {
-    const tid = (await tx.query('select public.men_save_personal_test($1) as id', [JSON.stringify(payload)])).rows[0].id;
-    const t = (await tx.query('select grade::float8 g, grade_label l, total_errors e, notes from personal_tests where id=$1', [tid])).rows[0];
-    assert.deepEqual(t, { g: 93, l: 'ممتاز', e: 1, notes: 'جيد' });
-    assert.equal(await n(tx, 'select 1 from personal_test_questions where test_id=$1', [tid]), 2);
-    await fails(tx, 'select public.men_save_personal_test($1)', [JSON.stringify({ ...payload, questions_count: 3 })], /عدد الأسئلة/);
-    assert.equal((await tx.query('delete from personal_tests where id=$1', [tid])).affectedRows, 1);
-  });
-  await as(id.inactive, (tx) => fails(tx, 'select public.men_save_personal_test($1)', [JSON.stringify(payload)], /مُعلّق/));
+test('«اختبر نفسك» retired: history kept and readable by its owner; no save RPC and no deletion', async () => {
+  await db.query('begin');
+  try {
+    // A historical row, as the migrated data would hold it.
+    const tid = (await db.query(`insert into personal_tests(id,member_id,start_surah,start_surah_name,end_surah,end_surah_name,questions_count,lines_per_question,difficulty,total_errors,grade,grade_label,date,created_at)
+      values(gen_random_uuid(),$1,1,'الفاتحة',1,'الفاتحة',1,1,'any',0,100,'ممتاز','2026-10-01',now()) returning id`, [id.member])).rows[0].id;
+    await db.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: id.member, role: 'authenticated' })]);
+    await db.query('set local role authenticated');
+    assert.equal(await n(db, 'select 1 from personal_tests where id=$1', [tid]), 1, 'owner still reads his history');
+    await fails(db, 'select public.men_save_personal_test($1)', ['{}'], '42501');
+    await fails(db, 'delete from personal_tests where id=$1', [tid], '42501');
+    await db.query('reset role');
+    assert.equal(await n(db, 'select 1 from personal_tests where id=$1', [tid]), 1);
+  } finally {
+    await db.query('rollback');
+  }
 });
-
 
 test('Edge-Function RPCs are service-role only', async () => {
   await as(id.admin, async (tx) => {
@@ -836,6 +833,95 @@ test('migration 20261030 (distant review) changes no existing row, no history an
     assert.equal((await fresh.query("select to_regclass('public.distant_review_assignments') r")).rows[0].r, null);
     await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261030000100_men_distant_review_days.sql', import.meta.url), 'utf8'));
     assert.deepEqual(await snapshot(), before);
+  } finally {
+    await fresh.close();
+  }
+});
+
+test('program date: SQL men_program_date equals JS programDate (every 30 min across both DST changes, ±1 s at 05:00 Cairo)', async () => {
+  const instants: Date[] = [];
+  for (const [from, to] of [
+    ['2026-01-14T00:00:00Z', '2026-01-16T00:00:00Z'],
+    ['2026-04-22T00:00:00Z', '2026-04-27T00:00:00Z'],
+    ['2026-07-14T00:00:00Z', '2026-07-16T00:00:00Z'],
+    ['2026-10-26T00:00:00Z', '2026-11-03T00:00:00Z'],
+  ])
+    for (let t = Date.parse(from); t < Date.parse(to); t += 30 * 60_000) instants.push(new Date(t));
+  for (const d of ['2026-01-15', '2026-04-24', '2026-04-25', '2026-07-15', '2026-10-27', '2026-10-28', '2026-10-29', '2026-10-30', '2026-10-31']) {
+    const s = programDayStart(d).getTime();
+    instants.push(new Date(s - 1000), new Date(s), new Date(s + 1000));
+  }
+  const rows = (await db.query(
+    'select i::int, app_private.men_program_date(t)::text d from unnest($1::timestamptz[]) with ordinality u(t, i)',
+    [instants.map((x) => x.toISOString())]
+  )).rows as { i: number; d: string }[];
+  assert.equal(rows.length, instants.length);
+  const mismatches = rows
+    .filter((r) => r.d !== programDate(instants[r.i - 1]))
+    .map((r) => `${instants[r.i - 1].toISOString()}: SQL ${r.d} JS ${programDate(instants[r.i - 1])}`);
+  assert.deepEqual(mismatches, []);
+  // The boundary itself, in SQL: 04:59:59 → previous date, 05:00:00 → new date (Cairo, both offsets).
+  const at = async (iso: string) => (await one('select app_private.men_program_date($1::timestamptz)::text d', [iso])).d;
+  assert.equal(await at('2026-10-28T01:59:59Z'), '2026-10-27'); // 04:59:59 Cairo (UTC+3)
+  assert.equal(await at('2026-10-28T02:00:00Z'), '2026-10-28'); // 05:00:00 Cairo
+  assert.equal(await at('2026-01-15T02:59:59Z'), '2026-01-14'); // 04:59:59 Cairo (UTC+2)
+  assert.equal(await at('2026-01-15T03:00:00Z'), '2026-01-15'); // 05:00:00 Cairo
+  // men_today() is the program date now.
+  const js1 = programDate();
+  const sql = (await one('select app_private.men_today()::text d, app_private.men_program_date(now())::text p')) as { d: string; p: string };
+  const js2 = programDate();
+  assert.equal(sql.d, sql.p);
+  assert.ok(sql.d === js1 || sql.d === js2, `${sql.d} vs ${js1}/${js2}`);
+});
+
+test('membership join dates: JS and SQL read every stored joined_at as the same date (unchanged rule)', async () => {
+  const rows = (await db.query(
+    "select (extract(epoch from joined_at) * 1000)::float8 ms, (joined_at at time zone 'Asia/Riyadh')::date::text d from batch_memberships"
+  )).rows as { ms: number; d: string }[];
+  assert.ok(rows.length > 0);
+  assert.deepEqual(rows.filter((r) => membershipDate(new Date(r.ms)) !== r.d), []);
+});
+
+test('batch admin data scope (alerts input): an unassigned batch yields no members, Tasmia or reviews', async () => {
+  await db.query('begin');
+  try {
+    const b2 = (await db.query("select public.create_batch_with_cycle('دفعة التنبيهات', $1::date, $2) r", [TODAY, id.admin])).rows[0].r;
+    const admin2 = (await one("select id from profiles where role='admin' and id<>$1 order by firestore_id limit 1", [id.admin]))?.id;
+    assert.ok(admin2, 'a second admin exists in the snapshot');
+    await db.query('update profiles set is_master_admin=false where id=$1', [admin2]);
+    await db.query('select public.set_admin_batches($1, $2::uuid[], $3)', [admin2, [b2.id], id.admin]);
+    await db.query("select set_config('request.jwt.claims',$1,true)", [JSON.stringify({ sub: admin2, role: 'authenticated' })]);
+    await db.query('set local role authenticated');
+    assert.equal(await n(db, "select 1 from batch_memberships where batch_id=$1 and membership_role='member'", [batch]), 0);
+    assert.equal(await n(db, 'select 1 from tasmia_submissions where cycle_id=$1', [cycle]), 0);
+    assert.equal(await n(db, 'select 1 from review_confirmations where cycle_id=$1', [cycle]), 0);
+    assert.equal(await n(db, 'select 1 from cycles where batch_id=$1', [batch]), 0);
+    await db.query('reset role');
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('migration 20261031 (05:00 Cairo program date) changes no row, no history and no program day', async () => {
+  const { createCutoverDb: build } = await import('../migration/cutover/harness.mjs');
+  const fs = await import('node:fs');
+  const { db: fresh }: { db: any } = await (build as any)(BACKUP, { stopBefore: '20261031000100' });
+  try {
+    const tables = ['profiles', 'batches', 'batch_memberships', 'cycles', 'group_rest_days', 'program_pauses', 'tasmia_submissions', 'review_confirmations',
+      'peer_tests', 'peer_test_attempts', 'daily_thoughts', 'distant_review_assignments', 'distant_review_completions', 'personal_tests', 'personal_test_questions'];
+    const snapshot = async () => {
+      const out: Record<string, string> = {};
+      for (const t of tables) out[t] = (await fresh.query(`select count(*)::text || ':' || coalesce(md5(string_agg(x::text, '|' order by x::text)), '') h from public.${t} x`)).rows[0].h;
+      const c = (await fresh.query("select id from cycles where status='active'")).rows[0].id;
+      out.days = (await fresh.query("select string_agg(app_private.men_cycle_day($1, d::date)::text, ',' order by d) h from generate_series('2026-09-10'::date, '2027-06-30'::date, interval '1 day') d", [c])).rows[0].h;
+      return out;
+    };
+    const before = await snapshot();
+    const oldToday = (await fresh.query('select app_private.men_today()::text d')).rows[0].d;
+    assert.equal(oldToday, (await fresh.query("select (now() at time zone 'Asia/Riyadh')::date::text d")).rows[0].d, 'before: Makkah calendar date');
+    await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261031000100_men_program_date_5am_cairo.sql', import.meta.url), 'utf8'));
+    assert.deepEqual(await snapshot(), before);
+    assert.equal((await fresh.query('select app_private.men_today()::text d')).rows[0].d, (await fresh.query('select app_private.men_program_date(now())::text d')).rows[0].d);
   } finally {
     await fresh.close();
   }

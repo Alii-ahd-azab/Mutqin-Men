@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { BookMarked, CheckCircle2, Clock, ChevronLeft, ChevronRight, UserX } from 'lucide-react';
 import { DistantReviewAssignment } from '../types';
 import { formatArabicDateWithDayName, MemberDistantReviewStatus } from '../lib/calculations';
@@ -9,13 +9,16 @@ interface Props {
   today: string;
   isActive: boolean;
   onComplete: (assignmentId: string) => Promise<string>;
+  // Opened from a notification: show this assignment (nonce: each click counts).
+  focus?: { assignmentId: string; nonce: number } | null;
+  highlight?: boolean;
 }
 
 /**
  * Member card «المراجعة البعيدة»: today's assigned review and every missed one, each its own
  * obligation (never merged), with ◀ ▶ navigation when several are owed.
  */
-export const DistantReviewMemberCard: React.FC<Props> = ({ status, today, isActive, onComplete }) => {
+export const DistantReviewMemberCard: React.FC<Props> = ({ status, today, isActive, onComplete, focus, highlight }) => {
   const [index, setIndex] = useState(0);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
@@ -23,6 +26,14 @@ export const DistantReviewMemberCard: React.FC<Props> = ({ status, today, isActi
 
   const items: DistantReviewAssignment[] =
     status.outstanding.length > 0 ? status.outstanding : status.todayAssignment ? [status.todayAssignment] : [];
+
+  useEffect(() => {
+    if (!focus) return;
+    const at = items.findIndex((a) => a.id === focus.assignmentId);
+    if (at >= 0) setIndex(at);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focus?.nonce]);
+
   if (items.length === 0) return message ? <p className="text-xs text-emerald-700 font-bold text-center">{message}</p> : null;
 
   const i = Math.min(index, items.length - 1);
@@ -48,7 +59,7 @@ export const DistantReviewMemberCard: React.FC<Props> = ({ status, today, isActi
   return (
     <div
       id="distant-review-card"
-      className={`bg-white rounded-3xl border ${isOverdue ? 'border-amber-300 ring-1 ring-amber-200/60' : 'border-emerald-300 ring-1 ring-emerald-200/60'} shadow-sm p-6 space-y-4`}
+      className={`${highlight ? 'notification-focus ' : ''}bg-white rounded-3xl border ${isOverdue ? 'border-amber-300 ring-1 ring-amber-200/60' : 'border-emerald-300 ring-1 ring-emerald-200/60'} shadow-sm p-6 space-y-4`}
     >
       <div className="flex items-center justify-between gap-2 flex-wrap">
         <div className="flex items-center gap-2">

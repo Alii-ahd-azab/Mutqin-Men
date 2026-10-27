@@ -47,9 +47,9 @@ export const CelebrationBanner: React.FC<CelebrationBannerProps> = ({
   );
 };
 
-export const RestDayBanner: React.FC<{ note?: string }> = ({ note }) => {
+export const RestDayBanner: React.FC<{ note?: string; highlight?: boolean }> = ({ note, highlight }) => {
   return (
-    <div className="rounded-2xl bg-amber-50 border border-amber-200 p-4 sm:p-5 mb-6 text-amber-900 flex items-start gap-3 shadow-xs">
+    <div id="rest-day-banner" className={`${highlight ? 'notification-focus ' : ''}rounded-2xl bg-amber-50 border border-amber-200 p-4 sm:p-5 mb-6 text-amber-900 flex items-start gap-3 shadow-xs`}>
       <div className="p-2.5 bg-amber-100 rounded-xl text-amber-800 shrink-0 mt-0.5">
         <HeartHandshake className="w-5 h-5" />
       </div>

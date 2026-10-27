@@ -1,6 +1,6 @@
 // Rules shared by the web app and the Edge Functions (pure; no network): the Men program mapping,
 // the Sisters delay / elimination status with the Men threshold, peer-test eligibility with the Men
-// rules, question generation and personal self-tests. Imports the very files that are deployed.
+// rules and question generation. Imports the very files that are deployed.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -10,7 +10,6 @@ import {
   isPeerTestLive,
   nextTasmiaQuarter,
 } from '../supabase/functions/_shared/peer-tests/eligibility.ts';
-import { RuleError, parsePersonalSetup, generatePersonalQuestions } from '../supabase/functions/_shared/peer-tests/personalTests.ts';
 import { generateTestQuestions, estimateRangeLines } from '../supabase/functions/_shared/peer-tests/testGenerator.ts';
 import { computeMemberDelayStatus, SEVERE_DELAY_THRESHOLD, type MemberDelayStatus } from '../supabase/functions/_shared/logic/memberDelayStatus.ts';
 import { buildSettings, mapUser } from '../supabase/functions/_shared/men/menRows.ts';
@@ -128,16 +127,6 @@ test('question generation stays inside the (effective) range with Mushaf geometr
   assert.equal(qs.length, 2);
   assert.ok(qs.every((q) => q.actual_lines > 0 && q.start_page > 0 && q.end_line > 0 && q.start_text && q.difficulty_level));
   assert.ok(estimateRangeLines(1, 8) > estimateRangeLines(1, 3));
-});
-
-test('personal test setup and generation return the resolved range for saving', () => {
-  const setup = parsePersonalSetup({ range_type: 'juz', start_juz: 30, end_juz: 30, questions_count: 3, lines_per_question: 2, difficulty: 'any' });
-  const r = generatePersonalQuestions(setup);
-  assert.equal(r.questions.length, 3);
-  assert.equal(r.setup.start_quarter, 233);
-  assert.equal(r.setup.end_quarter, 240);
-  assert.match(r.setup.range_label, /الجزء 30/);
-  assert.throws(() => parsePersonalSetup({ range_type: 'surah', start_surah: 5, end_surah: 2, questions_count: 1, lines_per_question: 1 }), RuleError);
 });
 
 // ---------------------------------------------------------------------------------------------

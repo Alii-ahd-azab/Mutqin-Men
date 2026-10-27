@@ -9,14 +9,8 @@ import {
   User,
 } from '../types';
 import { distantReviewQuarterCount, getDistantReviewBounds, getQuarterInfo } from '../data/quranData';
-import { formatArabicDateWithDayName, isDistantReviewOwed, isPausedDate, joinedOnDateFromTimestamp } from '../lib/calculations';
+import { addDays, formatArabicDateWithDayName, isDistantReviewOwed, isPausedDate, joinedOnDateFromTimestamp } from '../lib/calculations';
 import { QuarterPicker } from './QuarterPicker';
-
-function addDays(date: string, n: number): string {
-  const d = new Date(date + 'T00:00:00Z');
-  d.setUTCDate(d.getUTCDate() + n);
-  return d.toISOString().slice(0, 10);
-}
 
 /** «من بداية الربع X حتى بداية الربع Y»: the TO quarter is the stopping boundary (not reviewed). */
 export const distantRangeText = (start: number, end: number) => `من بداية الربع ${start} حتى بداية الربع ${end}`;

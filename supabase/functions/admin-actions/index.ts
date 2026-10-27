@@ -9,18 +9,7 @@ import {
   requireManagedBatch,
   errorResponse,
 } from '../_shared/auth.ts';
-
-function getToday(): string {
-  return new Intl.DateTimeFormat(
-    'en-CA',
-    {
-      timeZone: 'Asia/Riyadh',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    }
-  ).format(new Date());
-}
+import { programDate } from '../_shared/logic/programDate.ts';
 
 function isIsoDate(value: unknown): value is string {
   if (
@@ -128,7 +117,7 @@ Deno.serve(async (req) => {
             p_batch_id:
               batch.id,
             p_today:
-              getToday(),
+              programDate(),
             p_actor:
               caller.id,
             p_expected_cycle_id:

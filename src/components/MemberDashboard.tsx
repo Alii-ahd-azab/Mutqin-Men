@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   User,
   CycleInfo,
@@ -14,7 +14,6 @@ import {
 import { isPeerTestLive } from '../lib/peerTests';
 import { PeerTestCard } from './PeerTestCard';
 import { PeerTestingModal } from './PeerTestingModal';
-import { PersonalTestModal } from './PersonalTestModal';
 import { getQuarterInfo, getQuarterBounds, getRangeBounds } from '../data/quranData';
 import {
   calculateMemberRequiredQuarter,
@@ -53,6 +52,7 @@ import { MemberHistoryView } from './MemberHistoryView';
 import { CelebrationBanner, RestDayBanner, PauseBanner, DistantReviewBanner } from './Banners';
 import { DistantReviewMemberCard } from './DistantReviewMemberCard';
 import { DailyThoughtCard } from './DailyThoughtCard';
+import { buildMemberNotifications, type MemberNotification, type MemberNotificationTarget } from '../lib/notifications';
 
 interface RevisionDayItem {
   date: string;
@@ -97,6 +97,10 @@ interface MemberDashboardProps {
   onRecordRevision: (payload: { notes?: string; date?: string }) => Promise<void>;
   onRefresh: () => void;
   loading: boolean;
+  // Header bell: this dashboard's current notifications (derived from the statuses below).
+  onNotificationsChange?: (items: MemberNotification[]) => void;
+  // A notification was opened: bring its card into view (nonce: each click counts).
+  focusRequest?: { target: MemberNotificationTarget; nonce: number } | null;
 }
 
 export const MemberDashboard: React.FC<MemberDashboardProps> = ({
@@ -119,10 +123,11 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   onRecordRevision,
   onRefresh,
   loading,
+  onNotificationsChange,
+  focusRequest,
 }) => {
   const [isRecitationModalOpen, setIsRecitationModalOpen] = useState(false);
   const [isPeerTestOpen, setIsPeerTestOpen] = useState(false);
-  const [isPersonalTestOpen, setIsPersonalTestOpen] = useState(false);
   const [isRevisionModalOpen, setIsRevisionModalOpen] = useState(false);
   const [activeRevisionIndex, setActiveRevisionIndex] = useState<number>(0);
   const [selectedRevisionTarget, setSelectedRevisionTarget] = useState<RevisionDayItem | null>(null);
@@ -355,6 +360,68 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
     cycleInfoForDay: cycleInfo,
   };
 
+  // Header notifications: read from the statuses above (the same numbers this dashboard shows).
+  const notifications = useMemo(
+    () =>
+      buildMemberNotifications({
+        today: cycleInfo.today_date,
+        isActive: currentUser.is_active,
+        hasStarted: cycleInfo.has_started,
+        isCompleted: cycleInfo.is_completed,
+        isRestDay: cycleInfo.is_rest_day,
+        restDayNote: cycleInfo.rest_day_note,
+        tasmia: { pastMissedCount: pastMissedQuartersCount, requiredQuarter: userQuarterStatus.requiredQuarter },
+        revision: { pastMissedDates: userRevisionStatus.pastMissedDates },
+        distant: {
+          overdue: distantStatus.overdue,
+          todayAssignment: distantStatus.todayAssignment,
+          hasCompletedToday: distantStatus.hasCompletedToday,
+        },
+      }),
+    [
+      cycleInfo.today_date,
+      cycleInfo.has_started,
+      cycleInfo.is_completed,
+      cycleInfo.is_rest_day,
+      cycleInfo.rest_day_note,
+      currentUser.is_active,
+      pastMissedQuartersCount,
+      userQuarterStatus.requiredQuarter,
+      userRevisionStatus.pastMissedDates,
+      distantStatus,
+    ]
+  );
+  useEffect(() => {
+    onNotificationsChange?.(notifications);
+  }, [notifications, onNotificationsChange]);
+
+  // Opening a notification: select its day and bring its card into view, briefly highlighted.
+  const [flash, setFlash] = useState<string | null>(null);
+  useEffect(() => {
+    if (!focusRequest) return;
+    const t = focusRequest.target;
+    let elementId = 'tasmia-card';
+    if (t.kind === 'revision') {
+      const at = revisionDays.findIndex((d) => d.date === t.date);
+      if (at >= 0) setActiveRevisionIndex(at);
+      elementId = 'revision-card';
+    } else if (t.kind === 'distant') {
+      elementId = 'distant-review-card';
+    } else if (t.kind === 'rest-day') {
+      elementId = 'rest-day-banner';
+    }
+    setFlash(elementId);
+    const frame = window.requestAnimationFrame(() =>
+      document.getElementById(elementId)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    );
+    const timer = window.setTimeout(() => setFlash(null), 2600);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusRequest?.nonce]);
+
   // Member's all-time statistics across the course
   const memberCourseStats = useMemo(() => {
     const totalRecitations = recitations.filter(
@@ -410,7 +477,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                   البرنامج لم يبدأ بعد
                 </h2>
                 <p className="text-emerald-100/90 text-xs sm:text-sm">
-                  الانطلاق المقرر: <strong>{formatArabicDateWithDayName(cycleInfo.start_date)}</strong> (الساعة 12:00 صباحًا) • التاريخ اليوم: {getHijriDate(cycleInfo.today_date)} (الموافق {cycleInfo.today_date}م)
+                  الانطلاق المقرر: <strong>{formatArabicDateWithDayName(cycleInfo.start_date)}</strong> (الساعة 5:00 صباحًا بتوقيت القاهرة) • التاريخ اليوم: {getHijriDate(cycleInfo.today_date)} (الموافق {cycleInfo.today_date}م)
                 </p>
               </>
             )}
@@ -462,25 +529,6 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         />
       )}
 
-      {/* Personal self-test (اختبر نفسك): available to every active member, separate from the program */}
-      {currentUser.is_active && (
-        <div className="rounded-3xl bg-emerald-50/60 border border-emerald-200 p-4 flex items-center justify-between gap-3">
-          <div className="space-y-0.5">
-            <div className="font-bold text-sm text-emerald-950 flex items-center gap-1.5">
-              <span>اختبر نفسك</span>
-              <span className="text-[10px] bg-emerald-200/80 text-emerald-900 font-bold px-2 py-0.5 rounded-full">بالسور والأجزاء والأرباع</span>
-            </div>
-            <p className="text-xs text-emerald-900/70 leading-relaxed">اختبار ذاتي لقياس مستواك مع درجات وسجل دائم خاص بك، منفصل عن البرنامج ولا يراه أحد.</p>
-          </div>
-          <button
-            onClick={() => setIsPersonalTestOpen(true)}
-            className="shrink-0 px-4 py-2.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white font-bold text-xs cursor-pointer"
-          >
-            ابدأ
-          </button>
-        </div>
-      )}
-
       {/* Celebration banner if day >= 240 */}
       {cycleInfo.is_completed && (
         <CelebrationBanner currentCycle={cycleInfo.current_cycle_number} isAdmin={false} />
@@ -490,7 +538,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       {cycleInfo.is_paused && <PauseBanner pausedAt={cycleInfo.paused_at} />}
 
       {/* Rest Day banner */}
-      {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} />}
+      {cycleInfo.is_rest_day && <RestDayBanner note={cycleInfo.rest_day_note} highlight={flash === 'rest-day-banner'} />}
 
       {/* «المراجعة البعيدة» banner: normal progression is paused today */}
       {cycleInfo.is_distant_review_day && (
@@ -611,7 +659,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
                 <span>تفاصيل وموعد الانطلاق الرسمي:</span>
               </div>
               <p className="text-xs sm:text-sm text-stone-700 leading-relaxed">
-                يبدأ احتساب <strong>اليوم الأول (الربع رقم 1)</strong> تلقائيًا يوم <strong>{formatArabicDateWithDayName(cycleInfo.start_date)}</strong> في تمام الساعة <strong>12:00 صباحًا</strong>. عند حلول هذا التاريخ، سيظهر ربع اليوم وتُفعَّل خيارات تسجيل التسميع وتأكيد المراجعة اليومية لكافة أعضاء المقرأة دون الحاجة لأي تدخل يدوي.
+                يبدأ احتساب <strong>اليوم الأول (الربع رقم 1)</strong> تلقائيًا يوم <strong>{formatArabicDateWithDayName(cycleInfo.start_date)}</strong> في تمام الساعة <strong>5:00 صباحًا بتوقيت القاهرة</strong>. عند حلول هذا التاريخ، سيظهر ربع اليوم وتُفعَّل خيارات تسجيل التسميع وتأكيد المراجعة اليومية لكافة أعضاء المقرأة دون الحاجة لأي تدخل يدوي.
               </p>
             </div>
 
@@ -664,11 +712,17 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
             today={cycleInfo.today_date}
             isActive={currentUser.is_active}
             onComplete={onCompleteDistantReview}
+            focus={
+              focusRequest?.target.kind === 'distant'
+                ? { assignmentId: focusRequest.target.assignmentId, nonce: focusRequest.nonce }
+                : null
+            }
+            highlight={flash === 'distant-review-card'}
           />
         )}
         <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
         {/* CARD 1: ورد المراجعة اليومي (يظهر على اليمين في تخطيط RTL) */}
-        <div className={`bg-white rounded-3xl border ${currentRevisionItem.isMissed ? 'border-amber-200 ring-1 ring-amber-200/50' : 'border-stone-200'} shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md`}>
+        <div id="revision-card" className={`${flash === 'revision-card' ? 'notification-focus ' : ''}bg-white rounded-3xl border ${currentRevisionItem.isMissed ? 'border-amber-200 ring-1 ring-amber-200/50' : 'border-stone-200'} shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md`}>
           <div className="space-y-4">
             {/* Header / Carousel Navigation */}
             <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -891,7 +945,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
         </div>
 
         {/* CARD 2: ورد الحفظ والتسميع (يظهر على اليسار في تخطيط RTL) */}
-        <div className="bg-white rounded-3xl border border-stone-200/90 shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md">
+        <div id="tasmia-card" className={`${flash === 'tasmia-card' ? 'notification-focus ' : ''}bg-white rounded-3xl border border-stone-200/90 shadow-sm p-6 flex flex-col justify-between relative overflow-hidden transition hover:shadow-md`}>
           <div className="space-y-4">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -1090,8 +1144,6 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
           onCompleted={onRefresh}
         />
       )}
-
-      <PersonalTestModal isOpen={isPersonalTestOpen} onClose={() => setIsPersonalTestOpen(false)} />
 
       <RecitationModal
         isOpen={isRecitationModalOpen}

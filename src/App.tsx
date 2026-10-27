@@ -1,11 +1,19 @@
-import React, { useEffect, useState, useCallback, useRef } from 'react';
+import React, { useEffect, useState, useCallback, useMemo, useRef } from 'react';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { Header } from './components/Header';
 import { MemberDashboard } from './components/MemberDashboard';
 import { AdminDashboard } from './components/AdminDashboard';
 import { LoginView } from './components/LoginView';
 import { BatchSelector } from './components/BatchSelector';
-import { PersonalTestModal } from './components/PersonalTestModal';
+import { NotificationCenter } from './components/NotificationCenter';
+import { nextProgramDayStart, programDate } from './lib/calculations';
+import {
+  buildBatchAdminAlerts,
+  type BatchAdminAlert,
+  type MemberNotification,
+  type MemberNotificationTarget,
+} from './lib/notifications';
+import { computeBatchDelays } from '../supabase/functions/_shared/men/batchDelays.ts';
 import { api } from './api/client';
 import {
   AdminAccountUpdate,
@@ -68,8 +76,41 @@ const MainApp: React.FC = () => {
   const [distantCompletions, setDistantCompletions] = useState<DistantReviewCompletion[]>([]);
   const [dataLoading, setDataLoading] = useState(false);
   const [initError, setInitError] = useState<string | null>(null);
-  // Men: personal self-test (اختبر نفسك)
-  const [isPersonalTestOpen, setIsPersonalTestOpen] = useState(false);
+  // Bumped after each successful load (other batches' alerts refresh with it).
+  const [dataVersion, setDataVersion] = useState(0);
+
+  // Notifications (members and batch admins; master admins have none).
+  const [memberNotifications, setMemberNotifications] = useState<MemberNotification[]>([]);
+  const [memberFocus, setMemberFocus] = useState<{ target: MemberNotificationTarget; nonce: number } | null>(null);
+  const [otherBatchAlerts, setOtherBatchAlerts] = useState<BatchAdminAlert[]>([]);
+  const [adminFocus, setAdminFocus] = useState<{ memberId: string; action: 'manage' | 'exclude'; nonce: number } | null>(null);
+
+  /*
+   * The program date (05:00 Africa/Cairo). An app left open moves to the new program day by itself:
+   * one timer for the next 05:00 Cairo (re-armed at most every 6 hours, so a sleeping device is
+   * caught up), plus a check when the tab becomes visible again. A change reloads the batch data.
+   */
+  const [programDay, setProgramDay] = useState(() => programDate());
+  useEffect(() => {
+    let timer = 0;
+    const sync = () => setProgramDay(programDate());
+    const arm = () => {
+      const wait = Math.max(1000, nextProgramDayStart().getTime() - Date.now() + 1000);
+      timer = window.setTimeout(() => {
+        sync();
+        arm();
+      }, Math.min(wait, 6 * 3600 * 1000));
+    };
+    arm();
+    const onVisible = () => document.visibilityState === 'visible' && sync();
+    document.addEventListener('visibilitychange', onVisible);
+    window.addEventListener('focus', sync);
+    return () => {
+      window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
+      window.removeEventListener('focus', sync);
+    };
+  }, []);
 
   // Ignores responses that arrive after the admin already switched batch.
   const loadRequestRef = useRef(0);
@@ -88,6 +129,7 @@ const MainApp: React.FC = () => {
     setPeerTestAttempts([]);
     setDistantReviews([]);
     setDistantCompletions([]);
+    setMemberNotifications([]);
   }, []);
 
   // Resolve which batches this account can open (the server/RLS decides).
@@ -149,6 +191,7 @@ const MainApp: React.FC = () => {
       setPeerTestAttempts(bootstrapRes.peerTestAttempts);
       setDistantReviews(bootstrapRes.distantReviews);
       setDistantCompletions(bootstrapRes.distantCompletions);
+      setDataVersion((v) => v + 1);
     } catch (err: any) {
       if (requestId !== loadRequestRef.current) return;
       console.error('Error fetching app data:', err);
@@ -160,11 +203,43 @@ const MainApp: React.FC = () => {
     }
   }, [currentUserId, selectedBatchId]);
 
+  // programDay: a new program day (05:00 Cairo) reloads the data as well.
   useEffect(() => {
     if (currentUserId && selectedBatchId) {
       loadAppData();
     }
-  }, [currentUserId, selectedBatchId, loadAppData]);
+  }, [currentUserId, selectedBatchId, loadAppData, programDay]);
+
+  // Batch admins: serious alerts of the selected batch from its loaded data, and of his other
+  // assigned batches from their own data (RLS-scoped). Never for members or master admins.
+  const isBatchAdmin = currentUser?.role === 'admin' && !currentUser.is_master_admin;
+  const selectedBatchAlerts = useMemo(() => {
+    const batch = accessibleBatches.find((b) => b.id === selectedBatchId);
+    if (!isBatchAdmin || !batch || !settings || !cycleInfo) return [];
+    const { members, delayById } = computeBatchDelays(
+      { users: allUsers, settings, restDays, recitationLogs: recitations, revisionLogs: revisions },
+      cycleInfo.today_date
+    );
+    return buildBatchAdminAlerts(batch, members, delayById);
+  }, [isBatchAdmin, accessibleBatches, selectedBatchId, settings, cycleInfo, allUsers, restDays, recitations, revisions]);
+
+  useEffect(() => {
+    const others = accessibleBatches.filter((b) => b.id !== selectedBatchId);
+    if (!isBatchAdmin || others.length === 0) {
+      setOtherBatchAlerts([]);
+      return;
+    }
+    let cancelled = false;
+    api.getBatchAdminAlerts(others).then(
+      (alerts) => !cancelled && setOtherBatchAlerts(alerts),
+      () => !cancelled && setOtherBatchAlerts([])
+    );
+    return () => {
+      cancelled = true;
+    };
+  }, [isBatchAdmin, accessibleBatches, selectedBatchId, programDay, dataVersion]);
+
+  const adminAlerts = useMemo(() => [...selectedBatchAlerts, ...otherBatchAlerts], [selectedBatchAlerts, otherBatchAlerts]);
 
   const handleSelectBatch = (batchId: string) => {
     if (!currentUser || batchId === selectedBatchId) return;
@@ -349,7 +424,27 @@ const MainApp: React.FC = () => {
         allUsers={allUsers}
         batchName={selectedBatch?.name}
         onRefresh={loadAppData}
-        onOpenPersonalTest={() => setIsPersonalTestOpen(true)}
+        notifications={
+          currentUser.role === 'member' ? (
+            <NotificationCenter
+              userId={currentUser.id}
+              mode="member"
+              items={memberNotifications}
+              onOpen={(n) => setMemberFocus({ target: n.target, nonce: Date.now() })}
+            />
+          ) : isBatchAdmin ? (
+            <NotificationCenter
+              userId={currentUser.id}
+              mode="admin"
+              items={adminAlerts}
+              showBatchName={accessibleBatches.length > 1}
+              onOpen={(alert, action) => {
+                if (alert.batchId !== selectedBatchId) handleSelectBatch(alert.batchId);
+                setAdminFocus({ memberId: alert.memberId, action, nonce: Date.now() });
+              }}
+            />
+          ) : null
+        }
       />
 
       <main className="max-w-6xl mx-auto px-4 sm:px-6 pt-6">
@@ -426,6 +521,7 @@ const MainApp: React.FC = () => {
               onBackfillRevisions={handleBackfillRevisions}
               onRefresh={loadAppData}
               loading={dataLoading}
+              focusMember={adminFocus}
             />
           ) : (
             <MemberDashboard
@@ -448,6 +544,8 @@ const MainApp: React.FC = () => {
               onRecordRevision={handleRecordRevision}
               onRefresh={loadAppData}
               loading={dataLoading}
+              onNotificationsChange={setMemberNotifications}
+              focusRequest={memberFocus}
             />
           )
         ) : !initError ? (
@@ -457,8 +555,6 @@ const MainApp: React.FC = () => {
           </div>
         ) : null}
       </main>
-
-      <PersonalTestModal isOpen={isPersonalTestOpen} onClose={() => setIsPersonalTestOpen(false)} />
     </div>
   );
 };

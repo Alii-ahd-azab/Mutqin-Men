@@ -10,6 +10,9 @@ import { randomBytes } from 'node:crypto';
 import { createRequire } from 'node:module';
 import { loadBatchIds, loadProgram } from '../../supabase/functions/_shared/men/menData.ts';
 import { phoneToAuthEmail } from '../../supabase/functions/_shared/men/authIdentity.ts';
+import { computeBatchDelays } from '../../supabase/functions/_shared/men/batchDelays.ts';
+import { programDate } from '../../supabase/functions/_shared/logic/programDate.ts';
+import { buildBatchAdminAlerts } from '../../supabase/functions/_shared/logic/notifications.ts';
 // @ts-ignore - shared ESM tooling
 import { authAdmin, requireApproval, requireProjectArg } from './production.mjs';
 
@@ -131,6 +134,7 @@ async function main() {
     // ---- Member writes (database guards) ----
     const review = await a.client.from('review_confirmations').insert({ cycle_id: program.cycle.id, user_id: A.id }).select('start_quarter, end_quarter, legacy_date').single();
     record('member records today\'s review', !review.error, review.error?.message);
+    record('the review is dated with the program date (05:00 Africa/Cairo)', review.data?.legacy_date === programDate(), `${review.data?.legacy_date} vs ${programDate()}`);
     const dup = await a.client.from('review_confirmations').insert({ cycle_id: program.cycle.id, user_id: A.id });
     record('duplicate review for the same date rejected', dup.error?.code === '23505');
     const skip = await a.client.from('tasmia_submissions').insert({ cycle_id: program.cycle.id, user_id: A.id, listener_id: B.id, quarter_number: 2 });
@@ -143,17 +147,14 @@ async function main() {
     record('member cannot change own role', !!promote.error || !(await service.from('profiles').select('role').eq('id', A.id).single()).data?.role.includes('admin'));
     const svc = await a.client.rpc('men_delete_member_completely', { p_user_id: B.id });
     record('member cannot call service-role functions', !!svc.error);
-    const pt = await a.client.rpc('men_save_personal_test', { p_test: {
-      range_type: 'surah', range_label: 'سورة الفاتحة', start_surah: 1, start_surah_name: 'الفاتحة', end_surah: 1, end_surah_name: 'الفاتحة',
-      questions_count: 1, lines_per_question: 2, difficulty: 'any',
-      questions: [{ start_surah: 1, start_surah_name: 'الفاتحة', start_ayah: 1, end_surah: 1, end_surah_name: 'الفاتحة', end_ayah: 7, errors_count: 1 }] } });
-    const ptRow = pt.data ? (await a.client.from('personal_tests').select('grade').eq('id', pt.data).single()).data : null;
-    record('personal test saved with server-computed grade', !pt.error && Number(ptRow?.grade) === 85, pt.error?.message);
+    // «اختبر نفسك» retired: its history stays (owner-readable), its write paths are closed.
+    const pt = await a.client.rpc('men_save_personal_test', { p_test: {} });
+    record('«اختبر نفسك» retired: the save RPC is closed to members', !!pt.error && /permission denied/i.test(pt.error.message), pt.error?.message);
+    const ptDel = await a.client.from('personal_tests').delete().eq('member_id', A.id).select('id');
+    record('«اختبر نفسك» retired: members cannot delete personal-test history', !!ptDel.error && /permission denied/i.test(ptDel.error.message), ptDel.error?.message);
+    const ptRead = await a.client.from('personal_tests').select('id');
+    record('personal-test history stays readable by its owner', !ptRead.error, ptRead.error?.message);
     const b = await signIn(B);
-    const peek = b.error ? null : await b.client.from('personal_tests').select('id').eq('id', pt.data);
-    record('personal tests are private to their owner', !!peek && !peek.error && (peek.data || []).length === 0);
-    const del = await a.client.from('personal_tests').delete().eq('id', pt.data).select('id');
-    record('owner deletes own personal test', (del.data || []).length === 1);
 
     const stored = await service.from('review_confirmations').select('id, member_name_snapshot').eq('user_id', A.id);
     record('member write is stored in Men Supabase', (stored.data || []).length === 1 && stored.data![0].member_name_snapshot === 'SMOKE A');
@@ -232,7 +233,7 @@ async function main() {
     record('admin-actions runs start_next_cycle (stale-cycle guard: nothing reset)', staleReset.status === 400 && /تغيّرت الدورة/.test(staleReset.message || '') && cycleAfter.data?.status === 'active', `${staleReset.status} ${staleReset.message}`);
     const unknown = await invoke(e.client, 'admin-actions', { action: 'nope' });
     record('admin-actions rejects unknown actions', unknown.status === 400);
-    const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Riyadh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
+    const today = programDate();
     const memberBatch = await invoke(a.client, 'admin-actions', { action: 'create-batch', name: 'x', start_date: today });
     record('create-batch refuses a member caller', memberBatch.status === 403);
     // The smoke batch starts two days ago, so quarter 2 is already due (the mandatory-test block is
@@ -262,6 +263,19 @@ async function main() {
         record('batch admin sees only his assigned batch', hBatches.length === 1 && hBatches[0].id === S);
         const hMain = (await h.client.from('tasmia_submissions').select('id').eq('cycle_id', program.cycle.id).limit(1)).data || [];
         record('batch admin cannot read another batch', hMain.length === 0);
+        // Serious alerts are computed from what RLS lets the batch admin read: his batch only.
+        const hAlerts = async (id: string) => {
+          try {
+            const p = await loadProgram(h.client, id);
+            const { members, delayById } = computeBatchDelays(p, programDate());
+            return { members: members.length, alerts: buildBatchAdminAlerts({ id, name: '' }, members, delayById).length };
+          } catch (err) {
+            return { error: (err as Error).message };
+          }
+        };
+        const hOwn = await hAlerts(S);
+        const hReal = await hAlerts(batchId);
+        record('batch admin alerts: his batch is readable, an unassigned batch yields no data (RLS)', !('error' in hOwn) && 'error' in hReal, JSON.stringify({ hOwn, hReal }));
         const hOther = await invoke(h.client, 'admin-users', { action: 'create', name: 'x', phone: '000000000011', password: 'abcdef12', role: 'member', batch_id: batchId });
         record('batch admin cannot add members to another batch', hOther.status === 403, `${hOther.status} ${hOther.message}`);
         const hMaster = await invoke(h.client, 'admin-users', { action: 'update', user_id: H.id, is_master_admin: true });
@@ -528,18 +542,10 @@ async function main() {
     const realAfter = JSON.stringify((await service.from('peer_tests').select('id, status, updated_at').eq('cycle_id', program.cycle.id).order('id')).data);
     record('real batch peer tests untouched', realAfter === realTests);
 
-    // ---- Personal tests through the Edge Function (generation) and the owner RPC (save) ----
+    // ---- «اختبر نفسك» retired: its Edge Function actions are gone ----
     const meta = await invoke(a.client, 'peer-tests', { action: 'personal-meta' });
-    record('personal-test metadata', meta.status === 200 && meta.data?.surahs?.length === 114 && meta.data?.quartersList?.length === 240);
-    const pgen = await invoke(a.client, 'peer-tests', { action: 'personal-generate', range_type: 'juz', start_juz: 30, end_juz: 30, questions_count: 2, lines_per_question: 3, difficulty: 'any' });
-    record('personal-test generation', pgen.status === 200 && pgen.data?.questions?.length === 2 && !!pgen.data?.setup);
-    if (pgen.data?.setup) {
-      const questions = pgen.data.questions.map((q: any, i: number) => ({ ...q, errors_count: i }));
-      const saved = await a.client.rpc('men_save_personal_test', { p_test: { ...pgen.data.setup, questions } });
-      const row = saved.data ? (await a.client.from('personal_tests').select('grade, range_label').eq('id', saved.data).single()).data : null;
-      record('generated personal test saved (grade computed in SQL)', !saved.error && Number(row?.grade) === 93 && /الجزء 30/.test(row?.range_label || ''), saved.error?.message);
-      if (saved.data) await a.client.from('personal_tests').delete().eq('id', saved.data);
-    }
+    const pgen = await invoke(a.client, 'peer-tests', { action: 'personal-generate', range_type: 'juz', start_juz: 30, end_juz: 30, questions_count: 2, lines_per_question: 3 });
+    record('personal-test Edge Function actions removed', meta.status === 400 && pgen.status === 400, `${meta.status} ${pgen.status}`);
 
     await a.client.auth.signOut();
     const { data: afterLogout } = await browserClient(a.storage).auth.getUser();

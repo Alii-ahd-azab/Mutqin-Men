@@ -12,13 +12,13 @@ import {
   type ActiveCaller,
 } from '../_shared/auth.ts';
 import {
-  calculateCycleInfo,
   calculateMemberDistantReviewStatus,
   calculateMemberRevisionStatus,
-  getActiveCycleDates,
   joinedOnDateFromTimestamp,
 } from '../_shared/logic/calculations.ts';
-import { computeMemberDelayStatus, type MemberDelayStatus } from '../_shared/logic/memberDelayStatus.ts';
+import type { MemberDelayStatus } from '../_shared/logic/memberDelayStatus.ts';
+import { computeBatchDelays } from '../_shared/men/batchDelays.ts';
+import { programDate } from '../_shared/logic/programDate.ts';
 import { loadProgram, type ProgramState } from '../_shared/men/menData.ts';
 import { estimateRangeLines, generateTestQuestions, type TestQuestion } from '../_shared/peer-tests/testGenerator.ts';
 import {
@@ -30,10 +30,9 @@ import {
   type PassedAttempt,
   type PeerTestRow,
 } from '../_shared/peer-tests/eligibility.ts';
-import { RuleError, parsePersonalSetup, generatePersonalQuestions, personalMeta } from '../_shared/peer-tests/personalTests.ts';
 
 /*
- * PEER TESTING (الاختبارات المتبادلة) + personal self-test generation.
+ * PEER TESTING (الاختبارات المتبادلة).
  *
  * Same flow as Mutqin for Sisters: members (examiners) and admins call this function; it re-checks
  * every rule server-side and writes only through service-role-only database functions; pass/fail
@@ -67,16 +66,6 @@ type BatchProgress = {
   program: ProgramState;
   activeDates: string[];
 };
-
-// The halaqah runs on Makkah time.
-function programToday(): string {
-  return new Intl.DateTimeFormat('en-CA', {
-    timeZone: 'Asia/Riyadh',
-    year: 'numeric',
-    month: '2-digit',
-    day: '2-digit',
-  }).format(new Date());
-}
 
 function toInt(value: unknown): number | null {
   if (value === null || value === undefined || value === '' || typeof value === 'boolean') return null;
@@ -119,38 +108,17 @@ async function loadActiveCycle(admin: SupabaseClient, batchId: string): Promise<
 
 /*
  * Progress of every active member of the cycle's batch, computed with the SAME shared code as the
- * dashboards (Men program loader + computeMemberDelayStatus).
+ * dashboards (Men program loader + computeBatchDelays / computeMemberDelayStatus).
  */
 async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promise<BatchProgress> {
   const program = await loadProgram(admin, cycle.batch_id);
   if (program.cycle.id !== cycle.id) throw new HttpError('دورة هذا الاختبار غير نشطة', 400);
 
-  const today = programToday();
-  const cycleInfo = calculateCycleInfo(program.settings, program.restDays, today);
-  const activeDates = getActiveCycleDates(program.settings.start_date, today, program.restDays, program.settings);
+  const today = programDate();
+  const { cycleInfo, activeDates, members: active, delayById } = computeBatchDelays(program, today);
 
-  const members: BatchMember[] = [];
-  const delayById = new Map<string, MemberDelayStatus>();
-  const completedById = new Map<string, Set<number>>();
-  for (const u of program.users) {
-    if (u.role !== 'member' || !u.is_active || !u.batch_joined_at) continue;
-    members.push({ id: u.id, name: u.name, startQuarter: u.batch_start_quarter ?? 1 });
-    delayById.set(
-      u.id,
-      computeMemberDelayStatus({
-        memberId: u.id,
-        quarterOfDay: cycleInfo.quarter_of_day,
-        activeCycleDates: activeDates,
-        recitations: program.recitationLogs,
-        revisions: program.revisionLogs,
-        todayDate: today,
-        joinedOnDate: joinedOnDateFromTimestamp(u.batch_joined_at),
-        startQuarter: u.batch_start_quarter,
-        calendar: program.settings,
-      })
-    );
-    completedById.set(u.id, new Set());
-  }
+  const members: BatchMember[] = active.map((u) => ({ id: u.id, name: u.name, startQuarter: u.batch_start_quarter ?? 1 }));
+  const completedById = new Map<string, Set<number>>(members.map((m) => [m.id, new Set<number>()]));
   for (const r of program.recitationLogs) {
     completedById.get(r.member_id)?.add(r.quarter_number);
   }
@@ -308,17 +276,6 @@ Deno.serve(async (req) => {
     const caller = await getActiveCaller(req, admin);
     const body = await req.json();
     const action = body?.action;
-
-    /*
-     * ============ PERSONAL SELF-TESTS (Men) ============
-     * Nothing is stored here; saving is an owner-checked RPC.
-     */
-    if (action === 'personal-meta') {
-      return json(personalMeta());
-    }
-    if (action === 'personal-generate') {
-      return json(generatePersonalQuestions(parsePersonalSetup(body)));
-    }
 
     /*
      * ============ MEMBER (EXAMINER) ACTIONS ============
@@ -601,7 +558,6 @@ Deno.serve(async (req) => {
 
     return json({ error: 'إجراء غير معروف' }, 400);
   } catch (error) {
-    if (error instanceof RuleError) return json({ error: error.message }, error.status);
     return errorResponse(error, 'peer-tests');
   }
 });

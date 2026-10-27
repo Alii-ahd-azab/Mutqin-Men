@@ -1,1 +1,27 @@
 @import "tailwindcss";
+
+/* A card opened from a notification: brief highlight so the member/admin sees where he landed. */
+.notification-focus {
+  animation: notification-focus 2.6s ease-out;
+}
+@keyframes notification-focus {
+  0%,
+  65% {
+    box-shadow: 0 0 0 4px rgb(245 158 11 / 0.65);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgb(245 158 11 / 0);
+  }
+}
+.notification-focus-row > td {
+  animation: notification-focus-row 2.6s ease-out;
+}
+@keyframes notification-focus-row {
+  0%,
+  65% {
+    background-color: rgb(254 243 199);
+  }
+  100% {
+    background-color: transparent;
+  }
+}

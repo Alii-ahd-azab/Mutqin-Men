@@ -17,9 +17,11 @@ import {
   DistantReviewInput,
 } from '../types';
 import { supabase } from '../lib/supabase';
-import { formatDate, calculateCycleInfo } from '../lib/calculations';
+import { programDate, calculateCycleInfo } from '../lib/calculations';
 import { phoneToAuthEmail } from '../lib/authHelpers';
 import { loadActiveCycle, loadProgram } from '../../supabase/functions/_shared/men/menData.ts';
+import { computeBatchDelays } from '../../supabase/functions/_shared/men/batchDelays.ts';
+import { buildBatchAdminAlerts, type BatchAdminAlert } from '../lib/notifications';
 import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../../supabase/functions/_shared/men/menRows.ts';
 
 /*
@@ -29,7 +31,7 @@ import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../../supabase/functi
  *   multi-step     → RPCs (SECURITY DEFINER functions that check the caller)
  *   privileged     → Edge Functions (admin-users, admin-actions, peer-tests)
  * Men rows are mapped by the shared Men loader (date-based reviews, legacy order, undated paused
- * days), and Men extras (past pause periods, revision backfill, personal tests) are kept.
+ * days), and Men extras (past pause periods, revision backfill) are kept.
  */
 
 type BatchRow = {
@@ -71,7 +73,8 @@ function dbError(error: { code?: string; message: string }, fallback: string): E
   return new Error(fallback);
 }
 
-const today = () => formatDate(new Date());
+// The program date: changes at 05:00 Africa/Cairo, whatever the device's time zone.
+const today = () => programDate();
 
 function distantReviewBody(payload: DistantReviewInput) {
   const start = Number(payload.start_quarter);
@@ -211,9 +214,6 @@ function sanitizeThought(input: string): string {
     .trim();
 }
 
-// Personal-test generation result kept until the member finishes (the save RPC needs the resolved range).
-let lastPersonalTest: { setup: Record<string, unknown>; questions: PeerTestQuestion[] } | null = null;
-
 export const api = {
   // ============ AUTH ============
   async login(phone: string, password: string): Promise<{ user: User }> {
@@ -240,7 +240,6 @@ export const api = {
   },
 
   async logout(): Promise<void> {
-    lastPersonalTest = null;
     const { error } = await supabase.auth.signOut();
     if (error) throw error;
   },
@@ -663,116 +662,28 @@ export const api = {
     return invokeFunction('peer-tests', { action: 'admin-preview', test_id: testId }, 'تعذر توليد عيّنة الأسئلة.');
   },
 
+  /*
+   * Batch admin: serious alerts (3+ overdue days) of the given batches, computed from each batch's
+   * program state with the shared delay code. RLS returns only batches he manages, so another
+   * batch yields no data and no alert.
+   */
+  async getBatchAdminAlerts(batches: Pick<Batch, 'id' | 'name'>[]): Promise<BatchAdminAlert[]> {
+    const day = today();
+    const lists = await Promise.all(
+      batches.map(async (b) => {
+        try {
+          const program = await loadProgram(supabase, b.id);
+          const { members, delayById } = computeBatchDelays(program, day);
+          return buildBatchAdminAlerts(b, members, delayById);
+        } catch {
+          return []; // a batch without an active cycle has no alerts
+        }
+      })
+    );
+    return lists.flat();
+  },
+
   async adminPeerTestImpact(testId: string): Promise<{ blocked_count: number; blocked_members: { id: string; name: string }[] }> {
     return invokeFunction('peer-tests', { action: 'admin-impact', test_id: testId }, 'تعذر حساب أثر الاختبار.');
-  },
-
-  // ============ PERSONAL SELF-TESTS (Men; generation: Edge Function; storage: owner-only RLS + RPC) ============
-
-  async personalTestSurahs(): Promise<{ surahs: { number: number; name: string; ayah_count: number }[] }> {
-    const meta = await this.personalTestMeta();
-    return { surahs: meta.surahs };
-  },
-
-  async personalTestMeta(): Promise<{
-    surahs: { number: number; name: string; ayah_count: number }[];
-    juzList: {
-      juz: number;
-      start_surah: number;
-      start_surah_name: string;
-      start_ayah: number;
-      end_surah: number;
-      end_surah_name: string;
-      end_ayah: number;
-      label: string;
-    }[];
-    quartersList: { quarter: number; juz: number; surahName: string; ayahNumber: number; label: string }[];
-  }> {
-    return invokeFunction('peer-tests', { action: 'personal-meta' }, 'تعذّر تحميل بيانات نطاقات الاختبار');
-  },
-
-  async personalTestGenerate(setup: {
-    range_type?: 'surah' | 'juz' | 'quarter';
-    start_surah?: number;
-    end_surah?: number;
-    start_juz?: number;
-    end_juz?: number;
-    start_quarter?: number;
-    end_quarter?: number;
-    questions_count: number;
-    lines_per_question: number;
-    difficulty: string;
-  }): Promise<{ questions: PeerTestQuestion[]; points_per_error: number; range_label?: string }> {
-    const result = await invokeFunction<{ questions: PeerTestQuestion[]; points_per_error: number; range_label: string; setup: Record<string, unknown> }>(
-      'peer-tests',
-      { action: 'personal-generate', ...setup },
-      'تعذّر توليد الأسئلة'
-    );
-    lastPersonalTest = { setup: result.setup, questions: result.questions };
-    return result;
-  },
-
-  async personalTestSave(payload: any): Promise<{ success: boolean; record: any }> {
-    const generated = lastPersonalTest;
-    const results: any[] = Array.isArray(payload?.questions_results) ? payload.questions_results : [];
-    if (!generated || results.length !== generated.questions.length) throw new Error('عدد الأسئلة المرسلة لا يطابق عدد أسئلة الاختبار');
-    const questions = generated.questions.map((q, i) => ({
-      start_surah: q.start_surah,
-      start_surah_name: q.start_surah_name,
-      start_ayah: q.start_ayah,
-      end_surah: q.end_surah,
-      end_surah_name: q.end_surah_name,
-      end_ayah: q.end_ayah,
-      errors_count: Number(results[i]?.errors_count),
-      difficulty_level: q.difficulty_level,
-    }));
-    const { data: id, error } = await supabase.rpc('men_save_personal_test', {
-      p_test: { ...generated.setup, notes: payload?.notes || '', date: today(), questions },
-    });
-    if (error) throw dbError(error, 'تعذّر حفظ نتيجة اختبارك الشخصي، يرجى المحاولة مرة أخرى.');
-    lastPersonalTest = null;
-    const history = await this.personalTestHistory();
-    return { success: true, record: history.records.find((r: any) => r.id === id) };
-  },
-
-  async personalTestHistory(): Promise<{ records: any[]; stats: { count: number; average: number; best: number } }> {
-    const user = await getCurrentAuthUser();
-    const { data, error } = await supabase
-      .from('personal_tests')
-      .select(
-        'id, member_id, range_type, range_label, start_juz, end_juz, start_quarter, end_quarter, start_surah, start_surah_name, end_surah, end_surah_name, questions_count, lines_per_question, difficulty, total_errors, grade, grade_label, notes, date, created_at, questions:personal_test_questions(question_number, start_surah, start_surah_name, start_ayah, end_surah, end_surah_name, end_ayah, errors_count, grade, difficulty_level)'
-      )
-      .eq('member_id', user.id)
-      .order('created_at', { ascending: false });
-    if (error) throw dbError(error, 'تعذّر تحميل سجل اختباراتك الشخصية.');
-    const all = (data || []).map((r: any) => {
-      const record: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(r)) if (v !== null) record[k] = v;
-      record.grade = Number(r.grade);
-      record.created_at = new Date(r.created_at).toISOString();
-      record.questions = [...(r.questions || [])]
-        .sort((a: any, b: any) => a.question_number - b.question_number)
-        .map((q: any) => {
-          const { difficulty_level, ...rest } = q;
-          return { ...rest, grade: Number(q.grade), ...(difficulty_level ? { difficulty_level } : {}) };
-        });
-      return record;
-    });
-    const grades = all.map((r) => r.grade as number);
-    return {
-      records: all.slice(0, 100),
-      stats: {
-        count: all.length,
-        average: all.length ? Math.round(grades.reduce((a, g) => a + g, 0) / all.length) : 0,
-        best: all.length ? Math.max(...grades) : 0,
-      },
-    };
-  },
-
-  async personalTestDelete(id: string): Promise<{ success: boolean }> {
-    const { data, error } = await supabase.from('personal_tests').delete().eq('id', id).select('id');
-    if (error) throw dbError(error, 'تعذّر حذف السجل.');
-    if (!data?.length) throw new Error('السجل غير موجود');
-    return { success: true };
   },
 };

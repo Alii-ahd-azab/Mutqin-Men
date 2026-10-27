@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect } from 'react';
+import React, { useState, useMemo, useEffect, useRef } from 'react';
 import {
   AdminAccountUpdate,
   Batch,
@@ -112,6 +112,9 @@ interface AdminDashboardProps {
   onBackfillRevisions: (until: string) => Promise<string>;
   onRefresh: () => void;
   loading: boolean;
+  // A batch admin opened a serious alert: «إدارة الأعضاء» focused on that member; 'exclude' also
+  // opens the usual exclusion confirmation (nonce: each click counts).
+  focusMember?: { memberId: string; action: 'manage' | 'exclude'; nonce: number } | null;
 }
 
 export const AdminDashboard: React.FC<AdminDashboardProps> = ({
@@ -146,6 +149,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   onBackfillRevisions,
   onRefresh,
   loading,
+  focusMember,
 }) => {
   const [activeTab, setActiveTab] = useState<'today' | 'members' | 'stats' | 'peer' | 'settings'>('today');
   const [membersSubTab, setMembersSubTab] = useState<'active' | 'excluded'>('active');
@@ -207,6 +211,28 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
   }, [settings.start_date, batch.id]);
 
   const isMasterAdmin = !!currentUser.is_master_admin;
+
+  // Opened from a serious alert: switch to «إدارة الأعضاء», show the member's row highlighted, and
+  // for 'exclude' open the existing confirmation (its permissions and checks are unchanged).
+  const [flashMemberId, setFlashMemberId] = useState<string | null>(null);
+  const handledFocusRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!focusMember || handledFocusRef.current === focusMember.nonce) return;
+    const target = users.find((u) => u.id === focusMember.memberId);
+    if (!target) return; // the batch is still loading; runs again with its users
+    handledFocusRef.current = focusMember.nonce;
+    setActiveTab('members');
+    setMembersSubTab(target.is_active ? 'active' : 'excluded');
+    setFlashMemberId(target.id);
+    if (focusMember.action === 'exclude' && target.is_active && target.role === 'member') setMemberToExclude(target);
+  }, [focusMember, users]);
+  // Scroll once the members tab has rendered the row.
+  useEffect(() => {
+    if (!flashMemberId || activeTab !== 'members') return;
+    document.getElementById(`member-row-${flashMemberId}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+    const timer = window.setTimeout(() => setFlashMemberId(null), 2600);
+    return () => window.clearTimeout(timer);
+  }, [flashMemberId, activeTab]);
 
   // Active program cycle calendar dates (excluding rest days and pauses)
   const activeCycleDates = useMemo(() => {
@@ -563,7 +589,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                   لم تبدأ بعد
                 </h2>
                 <p className="text-emerald-100/90 text-xs sm:text-sm">
-                  الانطلاق المقرر: <strong>{formatArabicDateWithDayName(cycleInfo.start_date)}</strong> (الساعة 12:00 صباحًا) • {getPreLaunchMessage(cycleInfo.days_until_start, cycleInfo.start_date)}
+                  الانطلاق المقرر: <strong>{formatArabicDateWithDayName(cycleInfo.start_date)}</strong> (الساعة 5:00 صباحًا بتوقيت القاهرة) • {getPreLaunchMessage(cycleInfo.days_until_start, cycleInfo.start_date)}
                 </p>
               </>
             )}
@@ -684,7 +710,7 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     البرنامج في مرحلة ما قبل الانطلاق (لم يبدأ بعد)
                   </h4>
                   <p className="text-xs text-amber-800">
-                    {getPreLaunchMessage(cycleInfo.days_until_start, cycleInfo.start_date)} — سيبدأ اليوم الأول والربع الأول رسميًا يوم {formatArabicDateWithDayName(cycleInfo.start_date)} في تمام 12:00 صباحًا.
+                    {getPreLaunchMessage(cycleInfo.days_until_start, cycleInfo.start_date)} — سيبدأ اليوم الأول والربع الأول رسميًا يوم {formatArabicDateWithDayName(cycleInfo.start_date)} في تمام الساعة 5:00 صباحًا بتوقيت القاهرة.
                   </p>
                 </div>
               </div>
@@ -1089,7 +1115,11 @@ export const AdminDashboard: React.FC<AdminDashboardProps> = ({
                     {activeUsers.map((u) => {
                       const memberStatus = membersTodayStatus.find((s) => s.user.id === u.id);
                       return (
-                        <tr key={u.id} className="hover:bg-stone-50/50 transition">
+                        <tr
+                          key={u.id}
+                          id={`member-row-${u.id}`}
+                          className={`${flashMemberId === u.id ? 'notification-focus-row ' : ''}hover:bg-stone-50/50 transition`}
+                        >
                           <td className="py-3 px-4">
                             <div className="font-bold text-stone-900">{u.name}</div>
                             {memberStatus?.isSeverelyBehind && (
