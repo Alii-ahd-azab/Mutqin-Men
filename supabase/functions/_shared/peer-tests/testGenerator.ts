@@ -1,4 +1,4 @@
-// Peer-test and personal-test question generator (same generation logic as Mutqin for Sisters).
+// Peer-test question generator (same generation logic as Mutqin for Sisters).
 // Runs only inside the Edge Functions: the Mushaf data never ships to the browser.
 import mushafLinesData from '../data/mushafLines.json' with { type: 'json' };
 import quranQuartersData from '../data/quranQuarters.json' with { type: 'json' };
@@ -51,31 +51,6 @@ export interface QuarterBoundary {
   ayahNumber: number;
   surahName: string;
   ayahText?: string;
-}
-
-export interface JuzInfo {
-  juz: number;
-  start_quarter: number;
-  end_quarter: number;
-  start_surah_name: string;
-  start_ayah: number;
-  label: string;
-}
-
-export function getJuzList(): JuzInfo[] {
-  return Array.from({ length: 30 }, (_, i) => {
-    const j = i + 1;
-    const startQ = (j - 1) * 8 + 1;
-    const qObj = ALL_QUARTERS[startQ - 1];
-    return {
-      juz: j,
-      start_quarter: startQ,
-      end_quarter: j * 8,
-      start_surah_name: qObj ? qObj.surahName : '',
-      start_ayah: qObj ? qObj.ayahNumber : 1,
-      label: qObj ? `الجزء ${j} (${qObj.surahName} ${qObj.ayahNumber})` : `الجزء ${j}`,
-    };
-  });
 }
 
 export const ALL_VERSES: MushafAyah[] = mushafLinesData as MushafAyah[];
@@ -246,7 +221,7 @@ export function generateTestQuestions(
   return generateQuestionsInVerseRange(lo, hi, questionsCount, linesPerQuestion, difficulty);
 }
 
-/** Same generator, but the range is given as verse indices [lo..hi] (used by personal tests: surah ranges). */
+/** Same generator, with the range given as verse indices [lo..hi]. */
 export function generateQuestionsInVerseRange(
   lo: number,
   hi: number,
@@ -336,24 +311,4 @@ export function generateQuestionsInVerseRange(
       difficulty_score: Math.round(c.score * 100),
     };
   });
-}
-
-/** Surah list (number, name, ayah count) and verse-index bounds, computed once from the Mushaf data. */
-export interface SurahInfo { number: number; name: string; ayah_count: number; first_idx: number; last_idx: number }
-let SURAHS: SurahInfo[] | null = null;
-export function getSurahs(): SurahInfo[] {
-  if (!SURAHS) {
-    const list: SurahInfo[] = [];
-    ALL_VERSES.forEach((v, i) => {
-      const last = list[list.length - 1];
-      if (!last || last.number !== v.surah) {
-        list.push({ number: v.surah, name: v.surah_name, ayah_count: 1, first_idx: i, last_idx: i });
-      } else {
-        last.ayah_count++;
-        last.last_idx = i;
-      }
-    });
-    SURAHS = list;
-  }
-  return SURAHS;
 }

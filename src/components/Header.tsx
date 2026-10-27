@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { CycleInfo, User } from '../types';
-import { BookOpen, LogOut, Shield, User as UserIcon, ChevronDown, Key, GraduationCap } from 'lucide-react';
+import { BookOpen, LogOut, Shield, User as UserIcon, ChevronDown, Key } from 'lucide-react';
 import { ChangePasswordModal } from './Modals';
 import { api } from '../api/client';
 
@@ -10,10 +10,11 @@ interface HeaderProps {
   allUsers?: User[];
   batchName?: string;
   onRefresh: () => void;
-  onOpenPersonalTest?: () => void;
+  // Bell for members and batch admins (App omits it for master admins).
+  notifications?: React.ReactNode;
 }
 
-export const Header: React.FC<HeaderProps> = ({ batchName, onOpenPersonalTest }) => {
+export const Header: React.FC<HeaderProps> = ({ batchName, notifications }) => {
   const { currentUser, logout } = useAuth();
   const [showUserMenu, setShowUserMenu] = useState(false);
   const [isChangePasswordOpen, setIsChangePasswordOpen] = useState(false);
@@ -53,17 +54,7 @@ export const Header: React.FC<HeaderProps> = ({ batchName, onOpenPersonalTest })
 
         {/* User Info & Profile Menu */}
         <div className="flex items-center gap-2">
-          {/* اختبر نفسك in Header */}
-          {onOpenPersonalTest && (
-            <button
-              onClick={onOpenPersonalTest}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-emerald-50 hover:bg-emerald-100/90 text-emerald-800 border border-emerald-200 text-xs font-bold transition cursor-pointer shadow-2xs"
-              title="اختبر نفسك (اختبار فردي)"
-            >
-              <GraduationCap className="w-4 h-4 text-emerald-700" />
-              <span className="hidden sm:inline">اختبر نفسك</span>
-            </button>
-          )}
+          {notifications}
 
           <div className="relative">
             <button
@@ -114,18 +105,6 @@ export const Header: React.FC<HeaderProps> = ({ batchName, onOpenPersonalTest })
                   </div>
                 </div>
                 <div className="pt-1 space-y-0.5">
-                  {onOpenPersonalTest && (
-                    <button
-                      onClick={() => {
-                        setShowUserMenu(false);
-                        onOpenPersonalTest();
-                      }}
-                      className="w-full text-right px-3 py-2 text-xs text-stone-700 hover:bg-emerald-50 hover:text-emerald-800 flex items-center gap-2 font-medium cursor-pointer transition"
-                    >
-                      <GraduationCap className="w-3.5 h-3.5 text-emerald-700" />
-                      اختبر نفسك
-                    </button>
-                  )}
                   <button
                     onClick={() => {
                       setShowUserMenu(false);

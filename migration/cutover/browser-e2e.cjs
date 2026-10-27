@@ -19,6 +19,34 @@ const results = [];
 const record = (check, ok, detail) => results.push({ check, ok: !!ok, detail });
 const email = (p) => `${p}@members.mutqin.local`;
 
+// The program date (day starts at 05:00 Africa/Cairo) `offset` days ago, and the instant a program date
+// starts — same rule as supabase/functions/_shared/logic/programDate.ts.
+const cairoParts = (d) =>
+  Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", { timeZone: "Africa/Cairo", year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit", hourCycle: "h23" })
+      .formatToParts(d)
+      .map((p) => [p.type, p.value])
+  );
+const addDays = (date, n) => {
+  const d = new Date(date + "T00:00:00Z");
+  d.setUTCDate(d.getUTCDate() + n);
+  return d.toISOString().slice(0, 10);
+};
+const programDay = (offset = 0) => {
+  const p = cairoParts(new Date());
+  const today = `${p.year}-${p.month}-${p.day}`;
+  return addDays(Number(p.hour) < 5 ? addDays(today, -1) : today, -offset);
+};
+const programDayStart = (date) => {
+  const wanted = Date.parse(date + "T05:00:00Z");
+  let t = wanted;
+  for (let i = 0; i < 3; i++) {
+    const p = cairoParts(new Date(t));
+    t = wanted - (Date.parse(`${p.year}-${p.month}-${p.day}T${p.hour}:${p.minute}:${p.second}Z`) - t);
+  }
+  return new Date(t);
+};
+
 async function counts() {
   const c = async (t) => (await service.from(t).select("*", { count: "exact", head: true })).count;
   return {
@@ -50,8 +78,7 @@ async function counts() {
   try {
     const M = await account("BROWSER M", "000000000011", "member");
     const X = await account("BROWSER X", "000000000012", "admin");
-    const riyadhDay = (offset) => new Date(Date.now() + 3 * 3600000 - offset * 86400000).toISOString().slice(0, 10);
-    const s2 = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE S2 ${randomBytes(3).toString("hex")}`, p_start_date: riyadhDay(9), p_actor: null });
+    const s2 = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE S2 ${randomBytes(3).toString("hex")}`, p_start_date: programDay(9), p_actor: null });
     if (s2.error) throw s2.error;
     extraBatchIds.push(s2.data.id);
     const S2 = s2.data.id;
@@ -111,29 +138,25 @@ async function counts() {
       record("rest/pause day: no new review card for a member with nothing overdue", (await page.locator("#revision-no-obligation-status").count()) === 1);
     }
     failed.length = 0; // requests cut off by the reload below are expected
-    // Controlled UI write: a personal self-test (generation via Edge Function, save via owner RPC)
-    await page.locator('button[title="اختبر نفسك (اختبار فردي)"]').click();
-    await page.getByRole("button", { name: "ابدأ الاختبار" }).click();
-    await page.getByRole("button", { name: "إنهاء الاختبار وحساب الدرجة" }).click({ timeout: 30000 });
-    await page.getByRole("button", { name: "نعم، احفظ" }).click();
-    await page.waitForTimeout(4000);
-    const pts = (await service.from("personal_tests").select("id, grade").eq("member_id", M.id)).data || [];
-    record("personal test taken in the UI is stored in Men Supabase", pts.length === 1 && Number(pts[0].grade) === 100, JSON.stringify(pts));
+    // «اختبر نفسك» is gone (header button, menu entry and dashboard card); the bell takes its place.
+    record("«اختبر نفسك» header button is gone", (await page.locator('button[title="اختبر نفسك (اختبار فردي)"]').count()) === 0);
+    await page.getByText("SMOKE BROWSER M").first().click();
+    record("«اختبر نفسك» is nowhere in the app (no dashboard card, no menu entry)", (await page.getByText("اختبر نفسك").count()) === 0);
     await page.keyboard.press("Escape");
-    await page.goto(URL_APP);
-    await page.getByText("SMOKE BROWSER M").first().waitFor({ timeout: 30000 });
-    await page.waitForTimeout(3000);
-    failed.length = 0; // requests cut off by the test's own reload are expected
+    await page.getByText("SMOKE BROWSER M").first().click();
+    record("member sees the notification button in its place", (await page.locator("#notifications-button").count()) === 1);
 
-    // Edge Function call from the browser origin (CORS + bearer token from the browser session)
+    // Edge Function call from the browser origin (CORS + bearer token); the personal-test action is gone.
+    expectedRefusal = consoleErrors.length; // the browser logs the 400 this check expects
     const edge = await page.evaluate(async (base) => {
       const key = Object.keys(localStorage).find((k) => k.startsWith("sb-") && k.endsWith("-auth-token"));
       const token = key ? JSON.parse(localStorage.getItem(key)).access_token : null;
       const r = await fetch(`${base}/functions/v1/peer-tests`, { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` }, body: JSON.stringify({ action: "personal-meta" }) });
       const j = await r.json();
-      return { status: r.status, surahs: j.surahs?.length, hasToken: !!token };
+      return { status: r.status, error: j.error, hasToken: !!token };
     }, url);
-    record("Edge Function works from the browser (CORS + session token)", edge.status === 200 && edge.surahs === 114, JSON.stringify(edge));
+    record("Edge Function works from the browser (CORS + session token); the personal-test action is removed", edge.status === 400 && edge.error === "إجراء غير معروف" && edge.hasToken, JSON.stringify(edge));
+    consoleErrors.splice(expectedRefusal);
 
     // Logout through the header menu
     await page.getByText("SMOKE BROWSER M").first().click();
@@ -206,18 +229,17 @@ async function counts() {
     // days on d3 (retroactive) and d6 (today). Active days: d0 d1 d2 d4 d5 (program days 1..5). Review
     // identity: the d3 row holds range 1→4 (stored before d3 became a rest day) → day 4; the row on the
     // rest day d6 → day 5 (its date). Genuinely missed: only day 2 (d1). No "today" card on the rest day.
-    const riyadh = (offset) => new Date(Date.now() + 3 * 3600000 - offset * 86400000).toISOString().slice(0, 10);
-    const sb = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE E2E ${randomBytes(3).toString("hex")}`, p_start_date: riyadh(6), p_actor: null });
+    const sb = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE E2E ${randomBytes(3).toString("hex")}`, p_start_date: programDay(6), p_actor: null });
     if (sb.error) throw sb.error;
     smokeBatchId = sb.data.id;
     const sCycle = (await service.from("cycles").select("id").eq("batch_id", smokeBatchId).single()).data.id;
     const R = await account("BROWSER R", "000000000013", "member", smokeBatchId);
-    await service.from("batch_memberships").update({ joined_at: riyadh(6) + "T00:00:00+03:00" }).eq("user_id", R.id);
+    await service.from("batch_memberships").update({ joined_at: programDay(6) + "T00:00:00+03:00" }).eq("user_id", R.id);
     for (const n of [6, 4, 3, 0]) {
-      const r = await service.from("review_confirmations").insert({ cycle_id: sCycle, user_id: R.id, legacy_date: riyadh(n) });
+      const r = await service.from("review_confirmations").insert({ cycle_id: sCycle, user_id: R.id, legacy_date: programDay(n) });
       if (r.error) throw r.error;
     }
-    for (const n of [3, 0]) await service.from("group_rest_days").insert({ cycle_id: sCycle, rest_date: riyadh(n), reason: "SMOKE" });
+    for (const n of [3, 0]) await service.from("group_rest_days").insert({ cycle_id: sCycle, rest_date: programDay(n), reason: "SMOKE" });
     const rCtx = await browser.newContext();
     const rPage = await rCtx.newPage();
     page = rPage; // failure screenshots show the active page
@@ -243,10 +265,10 @@ async function counts() {
     // did), so dates d5/d6 were not real program days; he reviews d7 and skips d8. The old date-based
     // matching showed d5 and d6 as overdue although their ranges were completed; only d8 is genuine.
     const R2 = await account("BROWSER R2", "000000000018", "member", S2);
-    await service.from("batch_memberships").update({ joined_at: riyadhDay(9) + "T00:00:00+03:00" }).eq("user_id", R2.id);
-    for (const n of [9, 8, 7, 6, 5]) await service.from("review_confirmations").insert({ cycle_id: s2Cycle, user_id: R2.id, legacy_date: riyadhDay(n) });
+    await service.from("batch_memberships").update({ joined_at: programDay(9) + "T00:00:00+03:00" }).eq("user_id", R2.id);
+    for (const n of [9, 8, 7, 6, 5]) await service.from("review_confirmations").insert({ cycle_id: s2Cycle, user_id: R2.id, legacy_date: programDay(n) });
     await service.from("cycles").update({ legacy_paused_days: 2 }).eq("id", s2Cycle);
-    await service.from("review_confirmations").insert({ cycle_id: s2Cycle, user_id: R2.id, legacy_date: riyadhDay(2) });
+    await service.from("review_confirmations").insert({ cycle_id: s2Cycle, user_id: R2.id, legacy_date: programDay(2) });
     const rRows = (await service.from("review_confirmations").select("legacy_date, end_quarter").eq("user_id", R2.id).order("legacy_date")).data;
     const r2Ctx = await browser.newContext();
     const r2 = await r2Ctx.newPage();
@@ -337,14 +359,14 @@ async function counts() {
     await hCtx.close();
 
     // ---- «المراجعة البعيدة» (temporary batch S3 started 6 days ago: d0..d6 = today) ----
-    const s3 = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE S3 ${randomBytes(3).toString("hex")}`, p_start_date: riyadhDay(6), p_actor: null });
+    const s3 = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE S3 ${randomBytes(3).toString("hex")}`, p_start_date: programDay(6), p_actor: null });
     if (s3.error) throw s3.error;
     extraBatchIds.push(s3.data.id);
     const S3 = s3.data.id;
     const s3Cycle = (await service.from("cycles").select("id").eq("batch_id", S3).single()).data.id;
     const DM = await account("BROWSER DM", "000000000019", "member", S3);
-    await service.from("batch_memberships").update({ joined_at: riyadhDay(6) + "T00:00:00+03:00" }).eq("user_id", DM.id);
-    await service.from("group_rest_days").insert({ cycle_id: s3Cycle, rest_date: riyadhDay(-5), reason: "SMOKE" });
+    await service.from("batch_memberships").update({ joined_at: programDay(6) + "T00:00:00+03:00" }).eq("user_id", DM.id);
+    await service.from("group_rest_days").insert({ cycle_id: s3Cycle, rest_date: programDay(-5), reason: "SMOKE" });
     const xCtx = await browser.newContext();
     const xp = await xCtx.newPage();
     page = xp; // failure screenshots show the active page
@@ -389,7 +411,7 @@ async function counts() {
     record("FROM 1 / TO 9 preview: starts at quarter 1, stops at the BEGINNING of quarter 9 (2:142), not quarter 10", /من بداية الربع 1 حتى بداية الربع 9/.test(p19) && /توقف عند:\s*بداية الربع 9 — سورة البقرة - الآية 142/.test(p19) && /سَيَقُولُ/.test(p19) && !/الآية 158/.test(p19) && /8 أرباع/.test(p19), p19.replace(/\s+/g, " ").slice(0, 300));
     await shot("admin-distant-preview-1-9");
     // First day: search FROM by number, TO by number; preview; note; add.
-    await xp.locator("#distant-review-date").fill(riyadhDay(-3));
+    await xp.locator("#distant-review-date").fill(programDay(-3));
     await xp.locator("#distant-from-button").click();
     await xp.locator("#distant-from-search").fill("23");
     const firstHit = await xp.locator('#distant-from-list [role="option"]').first().getAttribute("id");
@@ -410,47 +432,47 @@ async function counts() {
     await xp.locator("#add-distant-review-btn").click();
     await xp.locator("#distant-review-msg").waitFor({ timeout: 20000 });
     let r = await rows();
-    record("admin adds ONE distant-review day from the UI", r.length === 1 && r[0].review_date === riyadhDay(-3) && r[0].start_quarter === 23 && r[0].end_quarter === 30 && r[0].note === "SMOKE مراجعة ما سبق قبل الاختبار", JSON.stringify(r));
+    record("admin adds ONE distant-review day from the UI", r.length === 1 && r[0].review_date === programDay(-3) && r[0].start_quarter === 23 && r[0].end_quarter === 30 && r[0].note === "SMOKE مراجعة ما سبق قبل الاختبار", JSON.stringify(r));
     const formReset = (await xp.locator("#distant-review-date").inputValue()) === "" && (await xp.locator("#distant-review-preview").count()) === 0;
     record("form resets after adding", formReset);
     // Second, separate day.
-    await xp.locator("#distant-review-date").fill(riyadhDay(-10));
+    await xp.locator("#distant-review-date").fill(programDay(-10));
     await pick("distant-from", "1");
     await pick("distant-to", "12");
     await xp.locator("#add-distant-review-btn").click();
-    await xp.locator(`#distant-review-item-${riyadhDay(-10)}`).waitFor({ timeout: 20000 });
+    await xp.locator(`#distant-review-item-${programDay(-10)}`).waitFor({ timeout: 20000 });
     r = await rows();
-    record("a second day is created manually as its own assignment", r.length === 2 && r[1].review_date === riyadhDay(-10) && r[1].start_quarter === 1 && r[1].end_quarter === 12, JSON.stringify(r));
+    record("a second day is created manually as its own assignment", r.length === 2 && r[1].review_date === programDay(-10) && r[1].start_quarter === 1 && r[1].end_quarter === 12, JSON.stringify(r));
     // Validation and conflict messages.
-    await xp.locator("#distant-review-date").fill(riyadhDay(-3));
+    await xp.locator("#distant-review-date").fill(programDay(-3));
     await pick("distant-from", "1");
     await pick("distant-to", "2");
     await xp.locator("#add-distant-review-btn").click();
     const dupMsg = await xp.locator("#distant-review-error").textContent();
-    await xp.locator("#distant-review-date").fill(riyadhDay(-5));
+    await xp.locator("#distant-review-date").fill(programDay(-5));
     await xp.locator("#add-distant-review-btn").click();
     const restMsg = await xp.locator("#distant-review-error").textContent();
     record("conflict messages: same date, and a rest-day date", /يوجد يوم مراجعة بعيدة/.test(dupMsg) && /استدراك وراحة/.test(restMsg), `${dupMsg} | ${restMsg}`);
     record("refused attempts wrote nothing", (await rows()).length === 2);
     // Edit a future day, then delete another.
-    await xp.locator(`#edit-distant-${riyadhDay(-10)}`).click();
+    await xp.locator(`#edit-distant-${programDay(-10)}`).click();
     await pick("distant-to", "15");
     await xp.locator("#distant-review-note").fill("SMOKE تعديل");
     await xp.locator("#add-distant-review-btn").click();
     await xp.locator("#distant-review-msg").waitFor({ timeout: 20000 });
     r = await rows();
     record("admin edits a future day (range and note)", r.length === 2 && r[1].end_quarter === 15 && r[1].note === "SMOKE تعديل", JSON.stringify(r));
-    await xp.locator(`#delete-distant-${riyadhDay(-3)}`).click();
-    await xp.locator(`#confirm-delete-distant-${riyadhDay(-3)}`).click();
-    await xp.locator(`#distant-review-item-${riyadhDay(-3)}`).waitFor({ state: "detached", timeout: 20000 });
+    await xp.locator(`#delete-distant-${programDay(-3)}`).click();
+    await xp.locator(`#confirm-delete-distant-${programDay(-3)}`).click();
+    await xp.locator(`#distant-review-item-${programDay(-3)}`).waitFor({ state: "detached", timeout: 20000 });
     r = await rows();
-    record("admin deletes a future day", r.length === 1 && r[0].review_date === riyadhDay(-10), JSON.stringify(r));
+    record("admin deletes a future day", r.length === 1 && r[0].review_date === programDay(-10), JSON.stringify(r));
     await shot("admin-distant-review");
 
     // Member: yesterday's day (missed) and today's day (written by the service role; the UI schedules future dates only).
     const dIns = await service.from("distant_review_assignments").insert([
-      { cycle_id: s3Cycle, batch_id: S3, review_date: riyadhDay(1), start_quarter: 1, end_quarter: 4 },
-      { cycle_id: s3Cycle, batch_id: S3, review_date: riyadhDay(0), start_quarter: 5, end_quarter: 8, note: "SMOKE مراجعة اليوم" },
+      { cycle_id: s3Cycle, batch_id: S3, review_date: programDay(1), start_quarter: 1, end_quarter: 4 },
+      { cycle_id: s3Cycle, batch_id: S3, review_date: programDay(0), start_quarter: 5, end_quarter: 8, note: "SMOKE مراجعة اليوم" },
     ]).select("id, review_date");
     if (dIns.error) throw dIns.error;
     const dmCtx = await browser.newContext();
@@ -478,21 +500,39 @@ async function counts() {
     const todayRange = [(await dp.locator("#distant-review-from").textContent()).trim(), (await dp.locator("#distant-review-to").textContent()).trim()];
     record("today's distant-review card: range and admin note", todayTitle === "المراجعة البعيدة" && todayRange.join("-") === "5-8" && /SMOKE مراجعة اليوم/.test(await dp.locator("#distant-review-note-text").textContent()), `${todayTitle} ${todayRange}`);
     await shot("member-distant-today");
+    // Notifications: today's distant-review day (range + note) and the missed one, separately.
+    await dp.locator("#notifications-button").click();
+    await dp.locator("#notification-distant-day").waitFor({ timeout: 15000 });
+    const dDay = (await dp.locator("#notification-distant-day").textContent()).replace(/\s+/g, " ");
+    const dOver = (await dp.locator("#notification-distant-overdue").textContent()).replace(/\s+/g, " ");
+    record("distant-review day notification shows the required range and the admin note", /اليوم مراجعة بعيدة/.test(dDay) && /المطلوب: من بداية الربع 5 حتى بداية الربع 8/.test(dDay) && /SMOKE مراجعة اليوم/.test(dDay) && /متوقف اليوم/.test(dDay), dDay);
+    const dRev = await dp.locator("#notification-revision-overdue").count() ? (await dp.locator("#notification-revision-overdue").textContent()) : "";
+    record("missed distant review has its own overdue notification, separate from the normal review", /لديك مراجعة بعيدة متأخرة/.test(dOver) && !/بعيدة/.test(dRev), `${dOver} | ${dRev}`);
+    await shot("member-distant-notifications");
+    await dp.locator("#notification-distant-overdue").click();
+    await dp.waitForTimeout(800);
+    record("distant overdue notification opens the overdue distant-review card", /مراجعة بعيدة متأخرة/.test(await dp.locator("#distant-review-title").textContent()) && (await dp.locator("#distant-review-counter").textContent()).trim() === "1 من 2");
+    await dp.locator("#notifications-button").click();
+    await dp.locator("#notification-distant-day").click();
+    await dp.waitForTimeout(800);
+    const focusedTitle = (await dp.locator("#distant-review-title").textContent()).trim();
+    const focusedInView = await dp.locator("#distant-review-card").evaluate((el) => { const r = el.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0; });
+    record("distant-review day notification opens today's distant-review card (not the normal review)", focusedTitle === "المراجعة البعيدة" && focusedInView && (await dp.locator("#distant-review-counter").textContent()).trim() === "2 من 2", focusedTitle);
     await dp.locator("#complete-distant-review-btn").click();
     await dp.waitForFunction(() => !document.querySelector("#distant-review-counter"), null, { timeout: 20000 });
     const dmDone = async () => (await service.from("distant_review_completions").select("assignment_id, completed_on").eq("user_id", DM.id)).data || [];
     let comps = await dmDone();
-    const tId = dIns.data.find((x) => x.review_date === riyadhDay(0)).id;
-    const yId = dIns.data.find((x) => x.review_date === riyadhDay(1)).id;
-    record("member confirms today's distant review from the UI", comps.length === 1 && comps[0].assignment_id === tId && comps[0].completed_on === riyadhDay(0), JSON.stringify(comps));
+    const tId = dIns.data.find((x) => x.review_date === programDay(0)).id;
+    const yId = dIns.data.find((x) => x.review_date === programDay(1)).id;
+    record("member confirms today's distant review from the UI", comps.length === 1 && comps[0].assignment_id === tId && comps[0].completed_on === programDay(0), JSON.stringify(comps));
     record("the missed one stays owed after today's confirmation", /مراجعة بعيدة متأخرة/.test(await dp.locator("#distant-review-title").textContent()));
     await dp.locator("#complete-distant-review-btn").click();
     await dp.locator("#distant-review-completed-status").waitFor({ timeout: 20000 });
     comps = await dmDone();
-    record("late completion through the UI removes the debt", comps.length === 2 && comps.some((c) => c.assignment_id === yId && c.completed_on === riyadhDay(0)) && (await dp.locator("#distant-overdue-alert").count()) === 0, JSON.stringify(comps));
+    record("late completion through the UI removes the debt", comps.length === 2 && comps.some((c) => c.assignment_id === yId && c.completed_on === programDay(0)) && (await dp.locator("#distant-overdue-alert").count()) === 0, JSON.stringify(comps));
     await dp.locator("#history-tab-distant").click();
-    const lateRow = await dp.locator(`#distant-history-${riyadhDay(1)}`).textContent();
-    const todayRow = await dp.locator(`#distant-history-${riyadhDay(0)}`).textContent();
+    const lateRow = await dp.locator(`#distant-history-${programDay(1)}`).textContent();
+    const todayRow = await dp.locator(`#distant-history-${programDay(0)}`).textContent();
     record("history: late entry shows assigned and actual dates; today's shows done", /تم الإنجاز \(متأخرًا\)/.test(lateRow) && /موعدها/.test(lateRow) && /تمت/.test(lateRow) && /تم الإنجاز/.test(todayRow) && /من بداية الربع 5 حتى بداية الربع 8/.test(todayRow), `${lateRow.slice(0, 120)} | ${todayRow.slice(0, 80)}`);
     await shot("member-distant-history");
     await dmCtx.close();
@@ -503,11 +543,261 @@ async function counts() {
     await xp.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
     await xp.locator("#batch-selector").selectOption(S3);
     await xp.getByText(/الإعدادات والإيقاف/).first().click();
-    await xp.locator(`#distant-review-stats-${riyadhDay(0)}`).waitFor({ timeout: 20000 });
-    const stats = await xp.locator(`#distant-review-stats-${riyadhDay(0)}`).textContent();
-    const todayItem = await xp.locator(`#distant-review-item-${riyadhDay(0)}`).textContent();
-    record("admin history: today's day shows status, completion statistics and is view-only", /1 \/ 1 أتموا المراجعة/.test(stats) && /اليوم/.test(todayItem) && /عرض فقط/.test(todayItem) && (await xp.locator(`#edit-distant-${riyadhDay(0)}`).count()) === 0, `${stats} | ${todayItem.slice(0, 120)}`);
+    await xp.locator(`#distant-review-stats-${programDay(0)}`).waitFor({ timeout: 20000 });
+    const stats = await xp.locator(`#distant-review-stats-${programDay(0)}`).textContent();
+    const todayItem = await xp.locator(`#distant-review-item-${programDay(0)}`).textContent();
+    record("admin history: today's day shows status, completion statistics and is view-only", /1 \/ 1 أتموا المراجعة/.test(stats) && /اليوم/.test(todayItem) && /عرض فقط/.test(todayItem) && (await xp.locator(`#edit-distant-${programDay(0)}`).count()) === 0, `${stats} | ${todayItem.slice(0, 120)}`);
     await xCtx.close();
+
+
+    // ================= Notifications (members and batch admins; never master admins) =================
+    const plain = (s) => (s || "").replace(/\s+/g, " ").trim();
+    async function openAs(acct, ctxOptions = {}, beforeGoto) {
+      const c = await browser.newContext(ctxOptions);
+      const p = await c.newPage();
+      page = p; // failure screenshots show the active page
+      p.on("console", (m) => m.type() === "error" && consoleErrors.push(m.text()));
+      // Requests cancelled by our own reloads (ERR_ABORTED) are expected; anything else is a failure.
+      p.on("requestfailed", async (r) => {
+        if ((await r.response().catch(() => null)) || /ERR_ABORTED/.test(r.failure()?.errorText || "")) return;
+        failed.push(new URL(r.url()).pathname + " " + (r.failure()?.errorText || ""));
+      });
+      if (beforeGoto) await beforeGoto(p);
+      await p.goto(URL_APP);
+      await p.locator("input").nth(0).fill(acct.phone);
+      await p.locator("input").nth(1).fill(acct.pw);
+      await p.locator('button[type="submit"]').click();
+      return { c, p };
+    }
+    const openBell = async (p) => {
+      if (!(await p.locator("#notifications-panel").count())) await p.locator("#notifications-button").click();
+      await p.locator("#notifications-panel").waitFor({ timeout: 15000 });
+    };
+    const inView = (p, sel) => p.locator(sel).evaluate((el) => { const r = el.getBoundingClientRect(); return r.top < innerHeight && r.bottom > 0; });
+    const mkBatch = async (label, startOffset) => {
+      const r = await service.rpc("create_batch_with_cycle", { p_name: `SMOKE ${label} ${randomBytes(3).toString("hex")}`, p_start_date: programDay(startOffset), p_actor: null });
+      if (r.error) throw r.error;
+      extraBatchIds.push(r.data.id);
+      const cyc = (await service.from("cycles").select("id").eq("batch_id", r.data.id).single()).data.id;
+      return { id: r.data.id, name: r.data.name, cycle: cyc };
+    };
+    // Joined on that program date (its Makkah calendar date is the same day at noon).
+    const joinOn = (acct, offset) => service.from("batch_memberships").update({ joined_at: programDay(offset) + "T12:00:00+03:00" }).eq("user_id", acct.id);
+    const recite = async (b, acct, listener, quarters) => {
+      for (const q of quarters) {
+        const r = await service.from("tasmia_submissions").insert({ cycle_id: b.cycle, user_id: acct.id, listener_id: listener.id, quarter_number: q });
+        if (r.error) throw new Error(`tasmia ${q}: ${r.error.message}`);
+      }
+    };
+    const reviewOn = async (b, acct, offsets) => {
+      for (const n of offsets) {
+        const r = await service.from("review_confirmations").insert({ cycle_id: b.cycle, user_id: acct.id, legacy_date: programDay(n) });
+        if (r.error) throw new Error(`review ${programDay(n)}: ${r.error.message}`);
+      }
+    };
+    const range = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => a + i);
+
+    // Batch S4 (H4's): started 10 days ago (d10..d0 = today, program day 11, no rest days).
+    //   N : Tasmi'a 1..7 (quarters 8, 9, 10 missed: 3 days), every review but d2 (1 day).
+    //   N2: every quarter, reviews missing d5 d4 d3 (3 days) — listener for N.
+    // Batch S6 (also H4's): N6 with reviews missing d3 d2 d1 (3 days).
+    // Batch S5 (NOT H4's): N5 with 4 days of review debt — must never reach H4.
+    const S4 = await mkBatch("S4", 10);
+    const S5 = await mkBatch("S5", 10);
+    const S6 = await mkBatch("S6", 10);
+    const N = await account("BROWSER N", "000000000020", "member", S4.id);
+    const N2 = await account("BROWSER N2", "000000000021", "member", S4.id);
+    const N5 = await account("BROWSER N5", "000000000022", "member", S5.id);
+    const N6 = await account("BROWSER N6", "000000000023", "member", S6.id);
+    const L6 = await account("BROWSER L6", "000000000024", "member", S6.id);
+    const L5 = await account("BROWSER L5", "000000000025", "member", S5.id);
+    for (const a of [N, N2, N5, N6, L6, L5]) await joinOn(a, 10);
+    await recite(S4, N2, N, range(1, 10));
+    await recite(S4, N, N2, range(1, 7));
+    await reviewOn(S4, N, range(0, 10).filter((n) => n !== 2 && n !== 0));
+    await reviewOn(S4, N2, range(0, 10).filter((n) => ![5, 4, 3, 0].includes(n)));
+    await recite(S6, N6, L6, range(1, 10));
+    await reviewOn(S6, N6, range(0, 10).filter((n) => ![3, 2, 1, 0].includes(n)));
+    await recite(S5, N5, L5, range(1, 10));
+    await reviewOn(S5, N5, range(0, 10).filter((n) => ![4, 3, 2, 1, 0].includes(n)));
+    const H4 = await account("BROWSER H4", "000000000026", "admin");
+    await service.from("profiles").update({ is_master_admin: false }).eq("id", H4.id);
+    await service.rpc("set_admin_batches", { p_user_id: H4.id, p_batch_ids: [S4.id, S6.id], p_actor: null });
+
+    // ---- Member N: separate Tasmi'a (red, 3) and review (yellow, 1) warnings ----
+    const n = await openAs(N);
+    await n.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
+    await n.p.locator("#notifications-badge").waitFor({ timeout: 20000 });
+    record("member sees the notification button with a badge (2 categories)", plain(await n.p.locator("#notifications-badge").textContent()) === "2");
+    await openBell(n.p);
+    const tas = n.p.locator("#notification-tasmia-overdue");
+    const rev = n.p.locator("#notification-revision-overdue");
+    record("3 missed Tasmi'a days: serious red warning (elimination risk)", (await tas.getAttribute("data-tone")) === "serious" && /تنبيه شديد: لديك 3 أيام متأخرة في التسميع/.test(await tas.textContent()) && /الاستبعاد/.test(await tas.textContent()), plain(await tas.textContent()));
+    record("1 missed review day: light yellow warning", (await rev.getAttribute("data-tone")) === "light" && /لديك يوم مراجعة متأخر/.test(await rev.textContent()), plain(await rev.textContent()));
+    const tasBg = await tas.evaluate((el) => getComputedStyle(el).backgroundColor);
+    const revBg = await rev.evaluate((el) => getComputedStyle(el).backgroundColor);
+    record("Tasmi'a and review are separate notifications (red vs yellow), never one merged number", (await n.p.locator('#notifications-panel [id^="notification-"]').count()) === 2 && tasBg !== revBg, `${tasBg} | ${revBg}`);
+    await shot("member-notifications-panel");
+    // Phone width: the panel stays inside the screen, no horizontal page scroll.
+    await n.p.setViewportSize({ width: 390, height: 844 });
+    await n.p.waitForTimeout(300);
+    const panelBox = await n.p.locator("#notifications-panel").boundingBox();
+    const noHScroll = await n.p.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth);
+    record("notification panel fits a phone screen (390 px)", !!panelBox && panelBox.x >= 0 && panelBox.x + panelBox.width <= 390 && noHScroll, JSON.stringify(panelBox));
+    await shot("member-notifications-mobile");
+    await n.p.setViewportSize({ width: 1280, height: 720 });
+    // Review notification → the overdue review card of that exact day.
+    await rev.click();
+    await n.p.waitForTimeout(800);
+    const revTitle = plain(await n.p.locator("#revision-card h3").first().textContent());
+    record("review notification opens the overdue review card of the missed day", (await inView(n.p, "#revision-card")) && revTitle.includes("مراجعة متأخرة") && revTitle.includes(String(Number(programDay(2).slice(8)))), revTitle);
+    // Tasmi'a notification → the Tasmi'a card with the first missed quarter (8).
+    await openBell(n.p);
+    await n.p.locator("#notification-tasmia-overdue").click();
+    await n.p.waitForTimeout(800);
+    record("Tasmi'a notification opens the Tasmi'a card on the first missed quarter", (await inView(n.p, "#tasmia-card")) && /الربع رقم 8/.test(await n.p.locator("#tasmia-card").textContent()));
+    await shot("member-tasmia-focus");
+    // Catching up: 3 → 2 (orange) → 1 (yellow) → none.
+    await recite(S4, N, N2, [8]);
+    await n.p.reload();
+    await openBell(n.p);
+    record("after catching up one quarter: 2 days → stronger orange warning", (await n.p.locator("#notification-tasmia-overdue").getAttribute("data-tone")) === "strong" && /لديك يومان متأخران في التسميع/.test(await n.p.locator("#notification-tasmia-overdue").textContent()));
+    await recite(S4, N, N2, [9]);
+    await n.p.reload();
+    await openBell(n.p);
+    record("then 1 day → light yellow warning", (await n.p.locator("#notification-tasmia-overdue").getAttribute("data-tone")) === "light");
+    await recite(S4, N, N2, [10]);
+    await reviewOn(S4, N, [2]);
+    await n.p.reload();
+    await n.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
+    await openBell(n.p);
+    record("all debt completed: the overdue notifications disappear", (await n.p.locator("#notification-tasmia-overdue").count()) === 0 && (await n.p.locator("#notification-revision-overdue").count()) === 0 && (await n.p.locator("#notifications-empty").count()) === 1 && (await n.p.locator("#notifications-badge").count()) === 0);
+    await n.c.close();
+    // N is back to 2 missed quarters for the admin checks below? No: he caught up. N2 and N6 stay at 3.
+
+    // ---- Batch admin H4: serious alerts only, only his batches, name + phone, opens «إدارة الأعضاء» ----
+    // Put N back to exactly 3 Tasmi'a days in a fresh state: a second S4 member, N3, with 3 missed quarters.
+    const N3 = await account("BROWSER N3", "000000000027", "member", S4.id);
+    await joinOn(N3, 10);
+    await recite(S4, N3, N2, range(1, 7));
+    await reviewOn(S4, N3, range(1, 10));
+    const N1 = await account("BROWSER N1", "000000000028", "member", S4.id);
+    await joinOn(N1, 10);
+    await recite(S4, N1, N2, range(1, 8)); // 2 missed Tasmi'a days → no admin alert
+    await reviewOn(S4, N1, range(1, 10).filter((x) => x !== 4)); // 1 missed review day → no admin alert
+    const h4 = await openAs(H4);
+    await h4.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await h4.p.locator("#notifications-badge").waitFor({ timeout: 30000 });
+    await openBell(h4.p);
+    await h4.p.locator(`#admin-alert-${N6.id}-revision`).waitFor({ timeout: 30000 });
+    const alertIds = await h4.p.locator('#notifications-panel [id^="admin-alert-"]').evaluateAll((els) => els.map((e) => e.id));
+    record("batch admin sees the bell", (await h4.p.locator("#notifications-button").count()) === 1);
+    record("batch admin: serious alerts at 3 days in Tasmi'a and in review, for both of his batches", alertIds.includes(`admin-alert-${N3.id}-tasmia`) && alertIds.includes(`admin-alert-${N2.id}-revision`) && alertIds.includes(`admin-alert-${N6.id}-revision`), JSON.stringify(alertIds));
+    record("batch admin: no alert for 1 or 2 missed days", !alertIds.some((x) => x.includes(N1.id)), JSON.stringify(alertIds));
+    // L6 (S6) never recited or reviewed: genuinely 10 days behind in both, in H4's own batch.
+    const expectedAlerts = [`${N3.id}-tasmia`, `${N2.id}-revision`, `${N6.id}-revision`, `${L6.id}-tasmia`, `${L6.id}-revision`].map((x) => "admin-alert-" + x).sort();
+    record("batch admin: alerts are exactly those of his two batches; none from an unassigned batch", JSON.stringify([...alertIds].sort()) === JSON.stringify(expectedAlerts) && !alertIds.some((x) => x.includes(N5.id) || x.includes(L5.id)), JSON.stringify(alertIds));
+    const a3 = plain(await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).textContent());
+    record("alert shows member name, phone, category and count (red)", a3.includes("SMOKE BROWSER N3") && a3.includes(N3.phone) && a3.includes("3 أيام متأخرة في التسميع") && (await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).getAttribute("data-tone")) === "serious", a3);
+    await shot("admin-alerts-panel");
+    // «إدارة العضو» → «إدارة الأعضاء» with that member's row in view.
+    await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).getByRole("button", { name: "إدارة العضو" }).click();
+    await h4.p.locator(`#member-row-${N3.id}`).waitFor({ timeout: 20000 });
+    await h4.p.waitForTimeout(1200);
+    record("alert opens «إدارة الأعضاء» focused on that member", (await inView(h4.p, `#member-row-${N3.id}`)) && /notification-focus-row/.test(await h4.p.locator(`#member-row-${N3.id}`).getAttribute("class")), await h4.p.locator(`#member-row-${N3.id}`).getAttribute("class"));
+    await shot("admin-member-focus");
+    // An alert from his other batch switches to that batch and focuses the member there.
+    await openBell(h4.p);
+    await h4.p.locator(`#admin-alert-${N6.id}-revision`).getByRole("button", { name: "إدارة العضو" }).click();
+    await h4.p.locator(`#member-row-${N6.id}`).waitFor({ timeout: 30000 });
+    await h4.p.waitForTimeout(1200);
+    record("alert of his other batch switches batch and focuses the member", (await h4.p.locator("#batch-selector").inputValue()) === S6.id && (await inView(h4.p, `#member-row-${N6.id}`)));
+    // The member catches up below 3 → the alert disappears after refresh.
+    await recite(S4, N3, N2, [8]);
+    await h4.p.reload();
+    await h4.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await openBell(h4.p);
+    await h4.p.locator(`#admin-alert-${N2.id}-revision`).waitFor({ timeout: 30000 });
+    record("member back below 3 days: the admin's serious alert disappears", (await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).count()) === 0);
+    await h4.c.close();
+
+    // ---- Master admin: no bell at all ----
+    const xm = await openAs(X);
+    await xm.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await xm.p.waitForTimeout(2000);
+    record("master admin does NOT see the notification button", (await xm.p.locator("#notifications-button").count()) === 0 && (await xm.p.locator("#notifications-panel").count()) === 0);
+    await xm.c.close();
+
+    // ---- 05:00 Africa/Cairo: an app left open crosses the boundary (device clock in Los Angeles) ----
+    // Fake browser clock at 04:59 Cairo of today, then fast-forwarded past 05:00:00; the app's boundary
+    // timer reloads the data by itself (no reload, no new login).
+    const boundary = programDayStart(programDay(0)); // today's 05:00 Cairo (already past in real time)
+    const clocked = async (acct) =>
+      openAs(acct, { timezoneId: "America/Los_Angeles" }, async (p) => {
+        await p.clock.install({ time: new Date(boundary.getTime() - 60000) });
+      });
+    const dayAndDate = async (p) => ({
+      day: plain(await p.getByText(/^اليوم رقم \d+$/).first().textContent()),
+      date: plain(await p.getByText(/الموافق \d{4}-\d{2}-\d{2}م/).first().textContent()),
+    });
+    const panelKinds = (p) => p.locator('#notifications-panel [id^="notification-"]').evaluateAll((els) => els.map((e) => `${e.id.replace("notification-", "")}:${e.dataset.tone}`));
+
+    // S7 started on d2. T recited quarter 1 and reviewed d2 only. Before 05:00 today the program date
+    // is d1 (day 2): quarter 2 and d1's review are TODAY's, not overdue. At 05:00 the program date is d0
+    // (day 3): they become overdue — Tasmi'a and review, each its own light warning.
+    const S7 = await mkBatch("S7", 2);
+    const T = await account("BROWSER T", "000000000029", "member", S7.id);
+    const T2 = await account("BROWSER T2", "000000000030", "member", S7.id);
+    for (const a of [T, T2]) await joinOn(a, 2);
+    await recite(S7, T, T2, [1]);
+    await reviewOn(S7, T, [2]);
+    const t = await clocked(T);
+    await t.p.getByText("SMOKE BROWSER T").first().waitFor({ timeout: 30000 });
+    const tBefore = await dayAndDate(t.p);
+    await openBell(t.p);
+    const tBeforeKinds = await panelKinds(t.p);
+    record("04:59 Cairo: previous program day still active (day 2, its date), its obligations not overdue", tBefore.day === "اليوم رقم 2" && tBefore.date.includes(`الموافق ${programDay(1)}م`) && tBeforeKinds.length === 0 && (await t.p.locator("#notifications-empty").count()) === 1, JSON.stringify({ tBefore, tBeforeKinds }));
+    await t.p.keyboard.press("Escape");
+    await t.p.clock.fastForward(90000); // crosses 05:00:00 Cairo
+    await t.p.getByText("اليوم رقم 3").first().waitFor({ timeout: 30000 });
+    const tAfter = await dayAndDate(t.p);
+    await openBell(t.p);
+    await t.p.locator("#notification-tasmia-overdue").waitFor({ timeout: 20000 });
+    const tAfterKinds = await panelKinds(t.p);
+    record("05:00 Cairo: the new program day appears by itself (day 3, its date)", tAfter.day === "اليوم رقم 3" && tAfter.date.includes(`الموافق ${programDay(0)}م`), JSON.stringify(tAfter));
+    const laDate = new Intl.DateTimeFormat("en-CA", { timeZone: "America/Los_Angeles" }).format(new Date(boundary.getTime() + 30000));
+    record("the device's own time zone is ignored (Los Angeles is still on the previous date at 05:00 Cairo)", laDate !== programDay(0) && tAfter.date.includes(`الموافق ${programDay(0)}م`), laDate);
+    record("05:00 Cairo: the previous day's Tasmi'a and review become overdue only now (separate light warnings)", JSON.stringify(tAfterKinds.sort()) === JSON.stringify(["revision-overdue:light", "tasmia-overdue:light"]), JSON.stringify(tAfterKinds));
+    await t.c.close();
+
+    // S8 started on d2 with a rest day on d0 (today). T8 is fully up to date. At 04:59 there is no rest
+    // day yet; at 05:00 the rest day becomes today, with its informational notification.
+    const S8 = await mkBatch("S8", 2);
+    const T8 = await account("BROWSER T8", "000000000031", "member", S8.id);
+    const T9 = await account("BROWSER T9", "000000000032", "member", S8.id);
+    for (const a of [T8, T9]) await joinOn(a, 2);
+    await service.from("group_rest_days").insert({ cycle_id: S8.cycle, rest_date: programDay(0), reason: "SMOKE راحة" });
+    await recite(S8, T8, T9, [1, 2]);
+    await reviewOn(S8, T8, [2, 1]);
+    const r8 = await clocked(T8);
+    await r8.p.getByText("SMOKE BROWSER T8").first().waitFor({ timeout: 30000 });
+    await openBell(r8.p);
+    const r8Before = { rest: await r8.p.locator("#rest-day-banner").count(), kinds: await panelKinds(r8.p), ...(await dayAndDate(r8.p)) };
+    record("04:59 Cairo: the rest day scheduled for today is not active yet", r8Before.rest === 0 && r8Before.kinds.length === 0 && r8Before.date.includes(`الموافق ${programDay(1)}م`), JSON.stringify(r8Before));
+    await r8.p.keyboard.press("Escape");
+    await r8.p.clock.fastForward(90000);
+    await r8.p.locator("#rest-day-banner").waitFor({ timeout: 30000 });
+    await openBell(r8.p);
+    await r8.p.locator("#notification-rest-day").waitFor({ timeout: 20000 });
+    const r8After = await panelKinds(r8.p);
+    const restText = plain(await r8.p.locator("#notification-rest-day").textContent());
+    record("05:00 Cairo: the rest day becomes today, with an informational (non-warning) notification", JSON.stringify(r8After) === JSON.stringify(["rest-day:info"]) && (await r8.p.getByText(`الموافق ${programDay(0)}م`).count()) > 0, JSON.stringify(r8After));
+    record("rest-day notification: no new Tasmi'a or review today, old debts remain, admin note shown", /اليوم يوم استدراك وراحة/.test(restText) && /لا ربع تسميع جديد ولا مراجعة يومية جديدة/.test(restText) && /يبقى مطلوبًا/.test(restText) && /SMOKE راحة/.test(restText), restText);
+    await shot("member-rest-day-notification");
+    await r8.p.locator("#notification-rest-day").click();
+    await r8.p.waitForTimeout(800);
+    record("rest-day notification opens the rest-day banner", await inView(r8.p, "#rest-day-banner"));
+    await r8.c.close();
 
     record("all requests go to the app, Men Supabase or fonts only", [...hosts].every((h) => [new URL(URL_APP).host, "uaublandjewfzmhnbflc.supabase.co", "fonts.googleapis.com", "fonts.gstatic.com"].includes(h)), [...hosts].join(", "));
     record("no failed requests", failed.length === 0, failed.join(", "));
