@@ -450,3 +450,32 @@ test("settings mapping carries this cycle's distant-review dates (sorted), absen
   assert.equal('distant_review_dates' in buildSettings(cycle, [], null), false);
   assert.deepEqual(buildSettings(cycle, [], null, ['2026-11-13', '2026-11-06']).distant_review_dates, ['2026-11-06', '2026-11-13']);
 });
+
+// «المراجعة البعيدة» range boundary and quarter metadata (the TO quarter is where the review stops).
+import { ALL_QUARTERS, getDistantReviewBounds, distantReviewQuarterCount, getRangeBounds } from '../src/data/quranData.ts';
+import mushafLines from '../supabase/functions/_shared/data/mushafLines.json' with { type: 'json' };
+
+test('distant review FROM 1 / TO 9: starts at the beginning of quarter 1 and stops at the BEGINNING of quarter 9', () => {
+  const b = getDistantReviewBounds(1, 9);
+  assert.deepEqual([b.start.surahNumber, b.start.ayahNumber], [2, 1]);
+  assert.deepEqual([b.stop.surahNumber, b.stop.ayahNumber], [2, 142]); // سيقول السفهاء من الناس
+  assert.match(b.stop.ayahText, /سَيَقُولُ/);
+  assert.notEqual(b.stop.ayahNumber, ALL_QUARTERS[9].ayahStart); // never the beginning of quarter 10 (2:158)
+  assert.doesNotMatch(b.stop.ayahText, /ٱلصَّفَا/);
+  assert.equal(distantReviewQuarterCount(1, 9), 8);
+  // Last possible boundary: stop at the beginning of quarter 240.
+  assert.equal(getDistantReviewBounds(239, 240).stop.ayahNumber, ALL_QUARTERS[239].ayahStart);
+  // The normal daily review keeps its own semantics (end quarter included → stops at quarter 10).
+  assert.equal(getRangeBounds(1, 9).stop.ayahNumber, 158);
+});
+
+test('quarter metadata: juz, hizb, Mushaf page (from mushafLines.json) and ayah for all 240 quarters', () => {
+  const pageOf = new Map((mushafLines as { surah: number; ayah: number; page: number }[]).map((a) => [`${a.surah}:${a.ayah}`, a.page]));
+  assert.equal(ALL_QUARTERS.length, 240);
+  for (const q of ALL_QUARTERS) {
+    assert.ok(q.juz >= 1 && q.hizb >= 1 && q.ayahStart >= 1, `quarter ${q.number}`);
+    assert.equal(q.page, pageOf.get(`${q.surahNumber}:${q.ayahStart}`), `page of quarter ${q.number}`);
+  }
+  assert.deepEqual([ALL_QUARTERS[8].juz, ALL_QUARTERS[8].hizb, ALL_QUARTERS[8].page, ALL_QUARTERS[8].ayahStart], [2, 3, 22, 142]);
+  for (let i = 1; i < 240; i++) assert.ok(ALL_QUARTERS[i].page >= ALL_QUARTERS[i - 1].page);
+});

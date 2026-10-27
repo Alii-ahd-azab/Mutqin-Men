@@ -220,7 +220,9 @@ export const QuarterPicker: React.FC<QuarterPickerProps> = ({
                     <span className="font-bold text-stone-900">الربع {q.number}</span>
                     <span className="text-stone-500"> — {q.surahName} — بداية: </span>
                     <span className="font-quran text-stone-700">{quarterOpening(q)}</span>
-                    <span className="block text-[10px] text-stone-400">الجزء {q.juz} • الحزب {q.hizb} • الآية {q.ayahStart}</span>
+                    <span className="block text-[10px] text-stone-400">
+                      الجزء {q.juz} • الحزب {q.hizb} • الصفحة {q.page} • الآية {q.ayahStart}
+                    </span>
                   </span>
                 </li>
               );

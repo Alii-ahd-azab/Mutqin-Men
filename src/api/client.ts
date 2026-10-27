@@ -77,8 +77,9 @@ function distantReviewBody(payload: DistantReviewInput) {
   const start = Number(payload.start_quarter);
   const end = Number(payload.end_quarter);
   if (!payload.review_date || !/^\d{4}-\d{2}-\d{2}$/.test(payload.review_date)) throw new Error('يرجى تحديد تاريخ المراجعة البعيدة');
-  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end > 240 || start > end) {
-    throw new Error('نطاق الأرباع غير صالح: يجب أن يكون «من الربع» بين 1 و240 وألا يتجاوز «إلى الربع».');
+  // «إلى الربع» is the stopping boundary (the beginning of that quarter): it must come after «من الربع».
+  if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end > 240 || start >= end) {
+    throw new Error('نطاق الأرباع غير صالح: «إلى الربع» هو موضع التوقف (بداية ذلك الربع)، فيجب أن يكون بعد «من الربع» وضمن 1–240.');
   }
   return { review_date: payload.review_date, start_quarter: start, end_quarter: end, note: (payload.note || '').trim() };
 }
