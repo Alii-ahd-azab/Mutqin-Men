@@ -926,3 +926,89 @@ test('migration 20261031 (05:00 Cairo program date) changes no row, no history a
     await fresh.close();
   }
 });
+
+test('notification state: own rows only, one row per key (idempotent seen / archive), no direct writes, anon nothing', async () => {
+  await db.query('begin');
+  try {
+    const item = (key: string, urgent = false) => JSON.stringify({ key, kind: 'rest-tomorrow', tone: 'info', urgent, title: 'غدًا يوم راحة', body: 'x' });
+    await as(id.member, async (tx) => {
+      assert.equal((await tx.query('select public.men_notifications_mark_seen($1::jsonb) n', [`[${item('b:1:rest-tomorrow:2026-11-02')}]`])).rows[0].n, 1);
+      await tx.query('select public.men_notifications_mark_seen($1::jsonb)', [`[${item('b:1:rest-tomorrow:2026-11-02')}]`]);
+      const r1 = (await tx.query("select seen_at, archived_at from notification_states where notification_key='b:1:rest-tomorrow:2026-11-02'")).rows;
+      assert.equal(r1.length, 1, 'opening the panel twice keeps one row');
+      assert.ok(r1[0].seen_at && r1[0].archived_at === null, 'seen, not archived');
+      const a1 = (await tx.query('select public.men_notification_archive($1::jsonb) t', [item('b:1:rest-tomorrow:2026-11-02')])).rows[0].t;
+      const a2 = (await tx.query('select public.men_notification_archive($1::jsonb) t', [item('b:1:rest-tomorrow:2026-11-02')])).rows[0].t;
+      assert.equal(String(a1), String(a2), 'the first click time is kept');
+      assert.equal(await n(tx, 'select 1 from notification_states'), 1);
+      await fails(tx, "insert into notification_states(user_id, notification_key) values($1, 'x')", [id.member], '42501');
+      await fails(tx, 'update notification_states set archived_at = null', [], '42501');
+      await fails(tx, 'delete from notification_states', [], '42501');
+      await fails(tx, "select public.men_notifications_mark_seen('{}'::jsonb)", [], '22023');
+    });
+    await as(id.peer, async (tx) => assert.equal(await n(tx, 'select 1 from notification_states'), 0, "another member's state is invisible"));
+    await as(id.admin, async (tx) => assert.equal(await n(tx, 'select 1 from notification_states'), 0, "admins do not see members' state"));
+    await as(null, async (tx) => {
+      await fails(tx, 'select 1 from notification_states', [], '42501');
+      await fails(tx, "select public.men_notification_archive('{\"key\":\"x\"}'::jsonb)", [], '42501');
+    });
+    await as(id.inactive, (tx) => fails(tx, 'select public.men_notification_archive($1::jsonb)', [item('k')], '42501'));
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('master admin batch follows: only master admins, only their own preferences; batch admins cannot follow', async () => {
+  await db.query('begin');
+  try {
+    const b2 = (await db.query("select public.create_batch_with_cycle('دفعة المتابعة', $1::date, $2) r", [TODAY, id.admin])).rows[0].r.id;
+    const masters = (await db.query("select id from profiles where role='admin' and is_master_admin and active order by firestore_id")).rows.map((r: any) => r.id);
+    const m1 = masters[0];
+    await as(m1, async (tx) => {
+      await tx.query('select public.men_set_notification_batch_follow($1, true)', [batch]);
+      await tx.query('select public.men_set_notification_batch_follow($1, false)', [b2]);
+      await tx.query('select public.men_set_notification_batch_follow($1, true)', [batch]);
+      const rows = (await tx.query('select batch_id, enabled from admin_notification_batch_subscriptions order by enabled desc')).rows;
+      assert.deepEqual(rows.map((r: any) => [r.batch_id, r.enabled]), [[batch, true], [b2, false]], 'one row per batch, latest choice');
+      await fails(tx, 'select public.men_set_notification_batch_follow($1, true)', ['00000000-0000-4000-8000-000000000000'], 'P0002');
+      await fails(tx, 'insert into admin_notification_batch_subscriptions(admin_user_id, batch_id) values($1,$2)', [m1, b2], '42501');
+    });
+    // A batch admin (not master) can neither follow nor read follows.
+    const admin2 = (await one("select id from profiles where role='admin' and id<>$1 order by firestore_id limit 1", [m1]))?.id;
+    if (admin2) {
+      await db.query('update profiles set is_master_admin=false where id=$1', [admin2]);
+      await as(admin2, async (tx) => {
+        await fails(tx, 'select public.men_set_notification_batch_follow($1, true)', [batch], '42501');
+        assert.equal(await n(tx, 'select 1 from admin_notification_batch_subscriptions'), 0);
+      });
+    }
+    await as(id.member, async (tx) => {
+      await fails(tx, 'select public.men_set_notification_batch_follow($1, true)', [batch], '42501');
+      assert.equal(await n(tx, 'select 1 from admin_notification_batch_subscriptions'), 0);
+    });
+    await as(null, (tx) => fails(tx, 'select 1 from admin_notification_batch_subscriptions', [], '42501'));
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('migration 20261101 (notification state) changes no existing row', async () => {
+  const { createCutoverDb: build } = await import('../migration/cutover/harness.mjs');
+  const fs = await import('node:fs');
+  const { db: fresh }: { db: any } = await (build as any)(BACKUP, { stopBefore: '20261101000100' });
+  try {
+    const tables = ['profiles', 'batches', 'batch_memberships', 'cycles', 'group_rest_days', 'program_pauses', 'tasmia_submissions', 'review_confirmations',
+      'peer_tests', 'peer_test_attempts', 'daily_thoughts', 'distant_review_assignments', 'distant_review_completions', 'personal_tests'];
+    const snapshot = async () => {
+      const out: Record<string, string> = {};
+      for (const t of tables) out[t] = (await fresh.query(`select count(*)::text || ':' || coalesce(md5(string_agg(x::text, '|' order by x::text)), '') h from public.${t} x`)).rows[0].h;
+      return out;
+    };
+    const before = await snapshot();
+    await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261101000100_men_notification_state.sql', import.meta.url), 'utf8'));
+    assert.deepEqual(await snapshot(), before);
+    assert.equal((await fresh.query('select count(*)::int n from notification_states')).rows[0].n, 0);
+  } finally {
+    await fresh.close();
+  }
+});

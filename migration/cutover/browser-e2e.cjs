@@ -53,6 +53,7 @@ async function counts() {
     profiles: await c("profiles"), tasmia: await c("tasmia_submissions"), reviews: await c("review_confirmations"), attempts: await c("peer_test_attempts"),
     batches: await c("batches"), cycles: await c("cycles"), rest_days: await c("group_rest_days"),
     distant_reviews: await c("distant_review_assignments"), distant_completions: await c("distant_review_completions"),
+    notification_states: await c("notification_states"), notification_follows: await c("admin_notification_batch_subscriptions"),
   };
 }
 
@@ -473,6 +474,7 @@ async function counts() {
     const dIns = await service.from("distant_review_assignments").insert([
       { cycle_id: s3Cycle, batch_id: S3, review_date: programDay(1), start_quarter: 1, end_quarter: 4 },
       { cycle_id: s3Cycle, batch_id: S3, review_date: programDay(0), start_quarter: 5, end_quarter: 8, note: "SMOKE مراجعة اليوم" },
+      { cycle_id: s3Cycle, batch_id: S3, review_date: programDay(-1), start_quarter: 9, end_quarter: 12, note: "SMOKE مراجعة الغد" },
     ]).select("id, review_date");
     if (dIns.error) throw dIns.error;
     const dmCtx = await browser.newContext();
@@ -505,6 +507,8 @@ async function counts() {
     await dp.locator("#notification-distant-day").waitFor({ timeout: 15000 });
     const dDay = (await dp.locator("#notification-distant-day").textContent()).replace(/\s+/g, " ");
     const dOver = (await dp.locator("#notification-distant-overdue").textContent()).replace(/\s+/g, " ");
+    const dTom = (await dp.locator("#notification-distant-tomorrow").textContent()).replace(/\s+/g, " ");
+    record("tomorrow's distant review: non-urgent notice with its date, range and note", /غدًا مراجعة بعيدة/.test(dTom) && /من بداية الربع 9 حتى بداية الربع 12/.test(dTom) && /SMOKE مراجعة الغد/.test(dTom) && (await dp.locator("#notification-distant-tomorrow").getAttribute("data-urgent")) === "false", dTom);
     record("distant-review day notification shows the required range and the admin note", /اليوم مراجعة بعيدة/.test(dDay) && /المطلوب: من بداية الربع 5 حتى بداية الربع 8/.test(dDay) && /SMOKE مراجعة اليوم/.test(dDay) && /متوقف اليوم/.test(dDay), dDay);
     const dRev = await dp.locator("#notification-revision-overdue").count() ? (await dp.locator("#notification-revision-overdue").textContent()) : "";
     record("missed distant review has its own overdue notification, separate from the normal review", /لديك مراجعة بعيدة متأخرة/.test(dOver) && !/بعيدة/.test(dRev), `${dOver} | ${dRev}`);
@@ -624,19 +628,49 @@ async function counts() {
     await service.from("profiles").update({ is_master_admin: false }).eq("id", H4.id);
     await service.rpc("set_admin_batches", { p_user_id: H4.id, p_batch_ids: [S4.id, S6.id], p_actor: null });
 
-    // ---- Member N: separate Tasmi'a (red, 3) and review (yellow, 1) warnings ----
+    // ---- Member N: urgent Tasmi'a (red, 3 days), light review (1 day), tomorrow's rest day ----
+    await service.from("group_rest_days").insert({ cycle_id: S4.cycle, rest_date: programDay(-1), reason: "SMOKE راحة الغد" });
+    const badgeText = async (p) => ((await p.locator("#notifications-badge").count()) ? plain(await p.locator("#notifications-badge").textContent()) : "0");
+    // Badge anchored to the bell icon: its centre is right of and above the bell's centre, near its top-right corner.
+    const badgeGeometry = (p) =>
+      p.evaluate(() => {
+        const b = document.querySelector("#notifications-badge").getBoundingClientRect();
+        const s = document.querySelector("#notifications-bell svg").getBoundingClientRect();
+        const label = [...document.querySelectorAll("#notifications-button > span")].pop().getBoundingClientRect();
+        const cx = b.left + b.width / 2;
+        const cy = b.top + b.height / 2;
+        return { rightOfBell: cx > s.left + s.width / 2, aboveBell: cy < s.top + s.height / 2, nearTopRight: Math.hypot(cx - s.right, cy - s.top) < 14, notOnLabel: cx > label.right };
+      });
+    const isRed = (p) => p.locator("#notifications-button").evaluate((el) => el.dataset.urgent === "true" && el.className.includes("bg-rose-600") && !!el.querySelector("#notifications-urgent-icon"));
+    const archivedTexts = async (p) => {
+      await p.locator("#notifications-view-all").click();
+      await p.locator("#notifications-history").waitFor({ timeout: 10000 });
+      const items = await p.locator("#notifications-archive .archived-notification").evaluateAll((els) => els.map((e) => e.textContent.replace(/\s+/g, " ")));
+      await p.keyboard.press("Escape");
+      await p.locator('#notifications-history button[title="إغلاق"]').click();
+      return items;
+    };
+
     const n = await openAs(N);
     await n.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
     await n.p.locator("#notifications-badge").waitFor({ timeout: 20000 });
-    record("member sees the notification button with a badge (2 categories)", plain(await n.p.locator("#notifications-badge").textContent()) === "2");
+    record("member: 3 unread (urgent Tasmi'a, review, tomorrow's rest day) and the whole control is red with «!»", (await badgeText(n.p)) === "3" && (await isRed(n.p)), await badgeText(n.p));
+    const geo = await badgeGeometry(n.p);
+    record("badge sits at the visual top-right of the bell icon (not on the «التنبيهات» label), in RTL", geo.rightOfBell && geo.aboveBell && geo.nearTopRight && geo.notOnLabel, JSON.stringify(geo));
+    await shot("member-bell-urgent");
     await openBell(n.p);
     const tas = n.p.locator("#notification-tasmia-overdue");
     const rev = n.p.locator("#notification-revision-overdue");
-    record("3 missed Tasmi'a days: serious red warning (elimination risk)", (await tas.getAttribute("data-tone")) === "serious" && /تنبيه شديد: لديك 3 أيام متأخرة في التسميع/.test(await tas.textContent()) && /الاستبعاد/.test(await tas.textContent()), plain(await tas.textContent()));
-    record("1 missed review day: light yellow warning", (await rev.getAttribute("data-tone")) === "light" && /لديك يوم مراجعة متأخر/.test(await rev.textContent()), plain(await rev.textContent()));
+    const restT = n.p.locator("#notification-rest-tomorrow");
+    record("3 missed Tasmi'a days: serious red warning (elimination risk, urgent)", (await tas.getAttribute("data-tone")) === "serious" && (await tas.getAttribute("data-urgent")) === "true" && /تنبيه شديد: لديك 3 أيام متأخرة في التسميع/.test(await tas.textContent()) && /الاستبعاد/.test(await tas.textContent()), plain(await tas.textContent()));
+    record("1 missed review day: light yellow warning (non-urgent)", (await rev.getAttribute("data-tone")) === "light" && (await rev.getAttribute("data-urgent")) === "false" && /لديك يوم مراجعة متأخر/.test(await rev.textContent()), plain(await rev.textContent()));
+    record("tomorrow's rest day: non-urgent informational notice", (await restT.getAttribute("data-tone")) === "info" && /غدًا يوم راحة من التقدم المعتاد للبرنامج/.test(await restT.textContent()) && /SMOKE راحة الغد/.test(await restT.textContent()), plain(await restT.textContent()));
     const tasBg = await tas.evaluate((el) => getComputedStyle(el).backgroundColor);
     const revBg = await rev.evaluate((el) => getComputedStyle(el).backgroundColor);
-    record("Tasmi'a and review are separate notifications (red vs yellow), never one merged number", (await n.p.locator('#notifications-panel [id^="notification-"]').count()) === 2 && tasBg !== revBg, `${tasBg} | ${revBg}`);
+    record("Tasmi'a and review are separate notifications (red vs yellow), never one merged number", tasBg !== revBg && (await tas.count()) === 1 && (await rev.count()) === 1, `${tasBg} | ${revBg}`);
+    await n.p.waitForTimeout(1500);
+    record("opening the panel: non-urgent become seen, the urgent one still counts → badge 1, still red", (await badgeText(n.p)) === "1" && (await isRed(n.p)) && (await tas.getAttribute("data-unread")) === "true" && (await restT.getAttribute("data-unread")) === "false", await badgeText(n.p));
+    record("opening the panel archives nothing (all 3 still in the active list)", (await n.p.locator('#notifications-panel [id^="notification-"]').count()) === 3);
     await shot("member-notifications-panel");
     // Phone width: the panel stays inside the screen, no horizontal page scroll.
     await n.p.setViewportSize({ width: 390, height: 844 });
@@ -646,37 +680,65 @@ async function counts() {
     record("notification panel fits a phone screen (390 px)", !!panelBox && panelBox.x >= 0 && panelBox.x + panelBox.width <= 390 && noHScroll, JSON.stringify(panelBox));
     await shot("member-notifications-mobile");
     await n.p.setViewportSize({ width: 1280, height: 720 });
-    // Review notification → the overdue review card of that exact day.
-    await rev.click();
-    await n.p.waitForTimeout(800);
+    // Reload: the seen state persisted (badge 1, not 3).
+    await n.p.reload();
+    await n.p.locator("#notifications-badge").waitFor({ timeout: 30000 });
+    await n.p.waitForTimeout(1500);
+    record("seen state persists across a reload (badge stays 1)", (await badgeText(n.p)) === "1");
+    // Review notification → archived + the overdue review card of that exact day.
+    await openBell(n.p);
+    await n.p.locator("#notification-revision-overdue").click();
+    await n.p.waitForTimeout(1000);
     const revTitle = plain(await n.p.locator("#revision-card h3").first().textContent());
     record("review notification opens the overdue review card of the missed day", (await inView(n.p, "#revision-card")) && revTitle.includes("مراجعة متأخرة") && revTitle.includes(String(Number(programDay(2).slice(8)))), revTitle);
-    // Tasmi'a notification → the Tasmi'a card with the first missed quarter (8).
+    // Tasmi'a (urgent) notification → archived + the Tasmi'a card; the debt is still 3 → still red.
     await openBell(n.p);
+    record("clicked notification left the active list", (await n.p.locator("#notification-revision-overdue").count()) === 0);
     await n.p.locator("#notification-tasmia-overdue").click();
-    await n.p.waitForTimeout(800);
+    await n.p.waitForTimeout(1000);
     record("Tasmi'a notification opens the Tasmi'a card on the first missed quarter", (await inView(n.p, "#tasmia-card")) && /الربع رقم 8/.test(await n.p.locator("#tasmia-card").textContent()));
-    await shot("member-tasmia-focus");
-    // Catching up: 3 → 2 (orange) → 1 (yellow) → none.
+    record("urgent notification archived (badge 0) but the control stays red: the 3-day debt still exists", (await badgeText(n.p)) === "0" && (await isRed(n.p)));
+    await shot("member-red-after-archive");
+    // Rest-tomorrow click → archived; «عرض كل التنبيهات» lists the three archived items.
+    await openBell(n.p);
+    await n.p.locator("#notification-rest-tomorrow").click();
+    await n.p.waitForTimeout(800);
+    await openBell(n.p);
+    let archived = await archivedTexts(n.p);
+    record("«عرض كل التنبيهات» shows the clicked notifications as archived (with date and category)", archived.length === 3 && archived.some((t) => /الحالة ما زالت قائمة/.test(t) && /تسميع متأخر/.test(t)) && archived.some((t) => /يوم راحة غدًا/.test(t)) && archived.every((t) => /فُتح في/.test(t)), JSON.stringify(archived));
+    await shot("member-history");
+    // Persistence across logout/login (new browser session).
+    await n.c.close();
+    const n2 = await openAs(N);
+    await n2.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
+    await n2.p.waitForTimeout(2500);
+    await openBell(n2.p);
+    archived = await archivedTexts(n2.p);
+    record("archive state persists across logout/login; no duplicate rows", archived.length === 3 && (await badgeText(n2.p)) === "0" && (await isRed(n2.p)) && (await n2.p.locator('#notifications-panel [id^="notification-"]').count()) === 0, JSON.stringify(archived.length));
+    const nRows = (await service.from("notification_states").select("notification_key, seen_at, archived_at").eq("user_id", N.id)).data || [];
+    record("one stored row per notification key (3), each archived", nRows.length === 3 && nRows.every((r) => r.archived_at && r.seen_at), JSON.stringify(nRows.map((r) => r.notification_key)));
+    // Catching up: 3 → 2 → the red state disappears; the new (orange) warning is a new notification.
     await recite(S4, N, N2, [8]);
-    await n.p.reload();
-    await openBell(n.p);
-    record("after catching up one quarter: 2 days → stronger orange warning", (await n.p.locator("#notification-tasmia-overdue").getAttribute("data-tone")) === "strong" && /لديك يومان متأخران في التسميع/.test(await n.p.locator("#notification-tasmia-overdue").textContent()));
+    await n2.p.reload();
+    await n2.p.locator("#notifications-badge").waitFor({ timeout: 30000 });
+    await openBell(n2.p);
+    record("debt 3 → 2: red state gone, a new orange warning appears", !(await isRed(n2.p)) && (await n2.p.locator("#notification-tasmia-overdue").getAttribute("data-tone")) === "strong" && /لديك يومان متأخران في التسميع/.test(await n2.p.locator("#notification-tasmia-overdue").textContent()));
     await recite(S4, N, N2, [9]);
-    await n.p.reload();
-    await openBell(n.p);
-    record("then 1 day → light yellow warning", (await n.p.locator("#notification-tasmia-overdue").getAttribute("data-tone")) === "light");
+    await n2.p.reload();
+    await n2.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
+    await openBell(n2.p);
+    await n2.p.locator("#notification-tasmia-overdue").waitFor({ timeout: 20000 });
+    record("then 1 day → light yellow warning", (await n2.p.locator("#notification-tasmia-overdue").getAttribute("data-tone")) === "light");
     await recite(S4, N, N2, [10]);
     await reviewOn(S4, N, [2]);
-    await n.p.reload();
-    await n.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
-    await openBell(n.p);
-    record("all debt completed: the overdue notifications disappear", (await n.p.locator("#notification-tasmia-overdue").count()) === 0 && (await n.p.locator("#notification-revision-overdue").count()) === 0 && (await n.p.locator("#notifications-empty").count()) === 1 && (await n.p.locator("#notifications-badge").count()) === 0);
-    await n.c.close();
-    // N is back to 2 missed quarters for the admin checks below? No: he caught up. N2 and N6 stay at 3.
+    await n2.p.reload();
+    await n2.p.getByText("SMOKE BROWSER N").first().waitFor({ timeout: 30000 });
+    await n2.p.waitForTimeout(1500);
+    await openBell(n2.p);
+    record("all debt completed: the overdue notifications disappear (no badge, not red)", (await n2.p.locator("#notification-tasmia-overdue").count()) === 0 && (await n2.p.locator("#notification-revision-overdue").count()) === 0 && (await n2.p.locator("#notifications-empty").count()) === 1 && (await n2.p.locator("#notifications-badge").count()) === 0 && !(await isRed(n2.p)));
+    await n2.c.close();
 
-    // ---- Batch admin H4: serious alerts only, only his batches, name + phone, opens «إدارة الأعضاء» ----
-    // Put N back to exactly 3 Tasmi'a days in a fresh state: a second S4 member, N3, with 3 missed quarters.
+    // ---- Batch admin H4: automatic scope (his two batches), urgent alerts, opens «إدارة الأعضاء» ----
     const N3 = await account("BROWSER N3", "000000000027", "member", S4.id);
     await joinOn(N3, 10);
     await recite(S4, N3, N2, range(1, 7));
@@ -688,44 +750,82 @@ async function counts() {
     const h4 = await openAs(H4);
     await h4.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
     await h4.p.locator("#notifications-badge").waitFor({ timeout: 30000 });
+    await h4.p.waitForFunction(() => document.querySelector("#notifications-badge")?.textContent.trim() === "5", null, { timeout: 30000 }).catch(() => {});
+    const h4BadgeBefore = await badgeText(h4.p);
     await openBell(h4.p);
     await h4.p.locator(`#admin-alert-${N6.id}-revision`).waitFor({ timeout: 30000 });
+    await h4.p.waitForTimeout(1500);
     const alertIds = await h4.p.locator('#notifications-panel [id^="admin-alert-"]').evaluateAll((els) => els.map((e) => e.id));
-    record("batch admin sees the bell", (await h4.p.locator("#notifications-button").count()) === 1);
+    record("batch admin sees the bell, red, with no optional batch-follow settings", (await h4.p.locator("#notifications-button").count()) === 1 && (await isRed(h4.p)) && (await h4.p.locator("#notification-settings-btn").count()) === 0);
+    record("batch admin: opening the panel does not mark urgent alerts seen (badge 5 → 5)", h4BadgeBefore === "5" && (await badgeText(h4.p)) === "5", `${h4BadgeBefore} → ${await badgeText(h4.p)}`);
     record("batch admin: serious alerts at 3 days in Tasmi'a and in review, for both of his batches", alertIds.includes(`admin-alert-${N3.id}-tasmia`) && alertIds.includes(`admin-alert-${N2.id}-revision`) && alertIds.includes(`admin-alert-${N6.id}-revision`), JSON.stringify(alertIds));
     record("batch admin: no alert for 1 or 2 missed days", !alertIds.some((x) => x.includes(N1.id)), JSON.stringify(alertIds));
     // L6 (S6) never recited or reviewed: genuinely 10 days behind in both, in H4's own batch.
     const expectedAlerts = [`${N3.id}-tasmia`, `${N2.id}-revision`, `${N6.id}-revision`, `${L6.id}-tasmia`, `${L6.id}-revision`].map((x) => "admin-alert-" + x).sort();
     record("batch admin: alerts are exactly those of his two batches; none from an unassigned batch", JSON.stringify([...alertIds].sort()) === JSON.stringify(expectedAlerts) && !alertIds.some((x) => x.includes(N5.id) || x.includes(L5.id)), JSON.stringify(alertIds));
     const a3 = plain(await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).textContent());
-    record("alert shows member name, phone, category and count (red)", a3.includes("SMOKE BROWSER N3") && a3.includes(N3.phone) && a3.includes("3 أيام متأخرة في التسميع") && (await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).getAttribute("data-tone")) === "serious", a3);
+    record("alert shows member name, phone, batch, category and count (red)", a3.includes("SMOKE BROWSER N3") && a3.includes(N3.phone) && a3.includes(S4.name) && a3.includes("3 أيام متأخرة في التسميع") && (await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).getAttribute("data-tone")) === "serious", a3);
     await shot("admin-alerts-panel");
-    // «إدارة العضو» → «إدارة الأعضاء» with that member's row in view.
     await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).getByRole("button", { name: "إدارة العضو" }).click();
     await h4.p.locator(`#member-row-${N3.id}`).waitFor({ timeout: 20000 });
     await h4.p.waitForTimeout(1200);
     record("alert opens «إدارة الأعضاء» focused on that member", (await inView(h4.p, `#member-row-${N3.id}`)) && /notification-focus-row/.test(await h4.p.locator(`#member-row-${N3.id}`).getAttribute("class")), await h4.p.locator(`#member-row-${N3.id}`).getAttribute("class"));
+    record("clicking the alert archives it (badge 5 → 4)", (await badgeText(h4.p)) === "4");
     await shot("admin-member-focus");
-    // An alert from his other batch switches to that batch and focuses the member there.
     await openBell(h4.p);
     await h4.p.locator(`#admin-alert-${N6.id}-revision`).getByRole("button", { name: "إدارة العضو" }).click();
     await h4.p.locator(`#member-row-${N6.id}`).waitFor({ timeout: 30000 });
     await h4.p.waitForTimeout(1200);
     record("alert of his other batch switches batch and focuses the member", (await h4.p.locator("#batch-selector").inputValue()) === S6.id && (await inView(h4.p, `#member-row-${N6.id}`)));
-    // The member catches up below 3 → the alert disappears after refresh.
     await recite(S4, N3, N2, [8]);
     await h4.p.reload();
     await h4.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
     await openBell(h4.p);
     await h4.p.locator(`#admin-alert-${N2.id}-revision`).waitFor({ timeout: 30000 });
-    record("member back below 3 days: the admin's serious alert disappears", (await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).count()) === 0);
+    record("member back below 3 days: the admin's serious alert is gone (not in the active list)", (await h4.p.locator(`#admin-alert-${N3.id}-tasmia`).count()) === 0);
     await h4.c.close();
 
-    // ---- Master admin: no bell at all ----
+    // ---- Master admin X: bell + «إعدادات التنبيهات»; follows chosen batches only; persisted ----
     const xm = await openAs(X);
     await xm.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
     await xm.p.waitForTimeout(2000);
-    record("master admin does NOT see the notification button", (await xm.p.locator("#notifications-button").count()) === 0 && (await xm.p.locator("#notifications-panel").count()) === 0);
+    await openBell(xm.p);
+    record("master admin now has the notification button and the settings control", (await xm.p.locator("#notifications-button").count()) === 1 && (await xm.p.locator("#notification-settings-btn").count()) === 1);
+    record("master admin follows nothing by default (empty, not red)", (await xm.p.locator("#notifications-empty").count()) === 1 && !(await isRed(xm.p)));
+    await xm.p.locator("#notification-settings-btn").click();
+    await xm.p.locator("#notification-follow-settings").waitFor({ timeout: 10000 });
+    await xm.p.locator(`#follow-batch-${S4.id}`).click();
+    await xm.p.waitForFunction((id) => document.querySelector(`#follow-batch-${id}`)?.getAttribute("aria-checked") === "true", S4.id, { timeout: 15000 });
+    await shot("master-follow-settings");
+    const xFollow = (await service.from("admin_notification_batch_subscriptions").select("batch_id, enabled").eq("admin_user_id", X.id)).data || [];
+    record("master admin's choice is stored server-side (S4 on)", xFollow.length === 1 && xFollow[0].batch_id === S4.id && xFollow[0].enabled === true, JSON.stringify(xFollow));
+    await xm.p.keyboard.press("Escape");
+    await xm.p.locator(`#notifications-badge`).waitFor({ timeout: 30000 });
+    await openBell(xm.p);
+    await xm.p.locator(`#admin-alert-${N2.id}-revision`).waitFor({ timeout: 30000 });
+    let xIds = await xm.p.locator('#notifications-panel [id^="admin-alert-"]').evaluateAll((els) => els.map((e) => e.id));
+    record("master admin receives the 3+ alerts of the followed batch only (S4), none from S5/S6", JSON.stringify(xIds) === JSON.stringify([`admin-alert-${N2.id}-revision`]) && (await isRed(xm.p)), JSON.stringify(xIds));
+    const xa = plain(await xm.p.locator(`#admin-alert-${N2.id}-revision`).textContent());
+    record("master admin alert shows name, phone, batch name, category and count", xa.includes("SMOKE BROWSER N2") && xa.includes(N2.phone) && xa.includes(S4.name) && xa.includes("3 أيام متأخرة في المراجعة"), xa);
+    await shot("master-alerts");
+    // Change the selection: S4 OFF, S5 ON — persisted across a reload.
+    await xm.p.locator("#notification-settings-btn").click();
+    await xm.p.locator(`#follow-batch-${S4.id}`).click();
+    await xm.p.waitForFunction((id) => document.querySelector(`#follow-batch-${id}`)?.getAttribute("aria-checked") === "false", S4.id, { timeout: 15000 });
+    await xm.p.locator(`#follow-batch-${S5.id}`).click();
+    await xm.p.waitForFunction((id) => document.querySelector(`#follow-batch-${id}`)?.getAttribute("aria-checked") === "true", S5.id, { timeout: 15000 });
+    await xm.p.reload();
+    await xm.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await xm.p.locator(`#notifications-badge`).waitFor({ timeout: 30000 });
+    await openBell(xm.p);
+    await xm.p.locator(`#admin-alert-${N5.id}-revision`).waitFor({ timeout: 30000 });
+    xIds = (await xm.p.locator('#notifications-panel [id^="admin-alert-"]').evaluateAll((els) => els.map((e) => e.id))).sort();
+    const expectedX = [`${N5.id}-revision`, `${L5.id}-tasmia`, `${L5.id}-revision`].map((x) => "admin-alert-" + x).sort();
+    record("new selection persists after reload: alerts now from S5 only (S4 off)", JSON.stringify(xIds) === JSON.stringify(expectedX), JSON.stringify(xIds));
+    await xm.p.locator(`#admin-alert-${N5.id}-revision`).getByRole("button", { name: "إدارة العضو" }).click();
+    await xm.p.locator(`#member-row-${N5.id}`).waitFor({ timeout: 30000 });
+    await xm.p.waitForTimeout(1200);
+    record("master admin alert opens «إدارة الأعضاء» of that batch focused on the member", (await xm.p.locator("#batch-selector").inputValue()) === S5.id && (await inView(xm.p, `#member-row-${N5.id}`)));
     await xm.c.close();
 
     // ---- 05:00 Africa/Cairo: an app left open crosses the boundary (device clock in Los Angeles) ----
@@ -781,9 +881,11 @@ async function counts() {
     await reviewOn(S8, T8, [2, 1]);
     const r8 = await clocked(T8);
     await r8.p.getByText("SMOKE BROWSER T8").first().waitFor({ timeout: 30000 });
+    await r8.p.getByText(/^اليوم رقم \d+$/).first().waitFor({ timeout: 30000 }); // the batch data has loaded
     await openBell(r8.p);
+    await r8.p.locator("#notification-rest-tomorrow").waitFor({ timeout: 15000 }).catch(() => {});
     const r8Before = { rest: await r8.p.locator("#rest-day-banner").count(), kinds: await panelKinds(r8.p), ...(await dayAndDate(r8.p)) };
-    record("04:59 Cairo: the rest day scheduled for today is not active yet", r8Before.rest === 0 && r8Before.kinds.length === 0 && r8Before.date.includes(`الموافق ${programDay(1)}م`), JSON.stringify(r8Before));
+    record("04:59 Cairo: the rest day is not active yet — it is still tomorrow's notice", r8Before.rest === 0 && JSON.stringify(r8Before.kinds) === JSON.stringify(["rest-tomorrow:info"]) && r8Before.date.includes(`الموافق ${programDay(1)}م`), JSON.stringify(r8Before));
     await r8.p.keyboard.press("Escape");
     await r8.p.clock.fastForward(90000);
     await r8.p.locator("#rest-day-banner").waitFor({ timeout: 30000 });

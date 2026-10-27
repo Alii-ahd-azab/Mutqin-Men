@@ -8,8 +8,8 @@ import { connectOwner, requireApproval, requireProjectArg } from "./production.m
 
 const args = process.argv.slice(2);
 const file = args[0];
-// Cutover migrations only (never the Phase 1 20261025* files).
-if (!file || !/^202610(2[6-9]|3[01])\d{6}_[a-z0-9_]+\.sql$/.test(path.basename(file)))
+// Cutover and later migrations only (never the Phase 1 20261025* files).
+if (!file || !/^2026(10(2[6-9]|3[01])|1[12][0-3]\d)\d{6}_[a-z0-9_]+\.sql$/.test(path.basename(file)))
   throw Error("Usage: node migration/cutover/apply-migration.mjs supabase/migrations/2026102XXXXXXX_name.sql --project REF");
 const project = requireProjectArg(args);
 requireApproval(project);

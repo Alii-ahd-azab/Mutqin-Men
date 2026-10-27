@@ -26,6 +26,8 @@ import {
   joinedOnDateFromTimestamp,
   calculateMemberDistantReviewStatus,
   SEVERE_DELAY_THRESHOLD,
+  addDays,
+  isPausedDate,
 } from '../lib/calculations';
 import {
   BookOpen,
@@ -74,6 +76,8 @@ interface RevisionDayItem {
 interface MemberDashboardProps {
   currentUser: User;
   batchName?: string;
+  // Scopes the notification keys.
+  batchId?: string;
   cycleInfo: CycleInfo;
   settings?: GroupSettings;
   restDays?: RestDay[];
@@ -106,6 +110,7 @@ interface MemberDashboardProps {
 export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   currentUser,
   batchName,
+  batchId = '',
   cycleInfo,
   settings,
   restDays = [],
@@ -360,10 +365,19 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
     cycleInfoForDay: cycleInfo,
   };
 
+  // Tomorrow = the next program date (starts at 05:00 Cairo): its scheduled rest day or distant review.
+  const tomorrowDate = addDays(cycleInfo.today_date, 1);
+  const tomorrowApplies =
+    !!settings && tomorrowDate >= cycleInfo.start_date && !isPausedDate(settings, tomorrowDate) && !(joinedOnDate && tomorrowDate < joinedOnDate);
+  const tomorrowRest = tomorrowApplies ? restDays.find((r) => r.date === tomorrowDate) : undefined;
+  const tomorrowDistant =
+    tomorrowApplies && !tomorrowRest && currentUser.is_active ? cycleDistantReviews.find((a) => a.review_date === tomorrowDate) : undefined;
+
   // Header notifications: read from the statuses above (the same numbers this dashboard shows).
   const notifications = useMemo(
     () =>
       buildMemberNotifications({
+        batchId,
         today: cycleInfo.today_date,
         isActive: currentUser.is_active,
         hasStarted: cycleInfo.has_started,
@@ -377,8 +391,12 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
           todayAssignment: distantStatus.todayAssignment,
           hasCompletedToday: distantStatus.hasCompletedToday,
         },
+        tomorrow: { restDay: tomorrowRest ? { note: tomorrowRest.note } : null, distant: tomorrowDistant ?? null },
       }),
     [
+      batchId,
+      tomorrowRest,
+      tomorrowDistant,
       cycleInfo.today_date,
       cycleInfo.has_started,
       cycleInfo.is_completed,
@@ -409,6 +427,8 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       elementId = 'distant-review-card';
     } else if (t.kind === 'rest-day') {
       elementId = 'rest-day-banner';
+    } else if (t.kind === 'overview') {
+      elementId = 'day-overview';
     }
     setFlash(elementId);
     const frame = window.requestAnimationFrame(() =>
@@ -447,7 +467,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   return (
     <div className="space-y-6 pb-12">
       {/* Day Overview Top Card (المستطيل الملوّن الأنيق في أول الصفحة دائماً) */}
-      <div className="bg-gradient-to-l from-emerald-900 via-emerald-800 to-emerald-900 text-white rounded-3xl p-6 sm:p-8 shadow-md border border-emerald-400/20">
+      <div id="day-overview" className="bg-gradient-to-l from-emerald-900 via-emerald-800 to-emerald-900 text-white rounded-3xl p-6 sm:p-8 shadow-md border border-emerald-400/20">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
           <div className="space-y-1">
             <div className="flex items-center gap-2 flex-wrap">
