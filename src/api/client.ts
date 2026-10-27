@@ -21,7 +21,10 @@ import { programDate, calculateCycleInfo } from '../lib/calculations';
 import { phoneToAuthEmail } from '../lib/authHelpers';
 import { loadActiveCycle, loadProgram } from '../../supabase/functions/_shared/men/menData.ts';
 import { computeBatchDelays } from '../../supabase/functions/_shared/men/batchDelays.ts';
-import { buildBatchAdminAlerts, type BatchAdminAlert } from '../lib/notifications';
+import { buildBatchAdminAlerts, type BatchAdminAlert, type NotificationState } from '../lib/notifications';
+
+// What is stored with a seen/archived notification: its key plus a display snapshot for the history.
+export type NotificationSnapshot = { key: string; kind: string; tone: string; urgent: boolean; title: string; body: string };
 import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../../supabase/functions/_shared/men/menRows.ts';
 
 /*
@@ -681,6 +684,52 @@ export const api = {
       })
     );
     return lists.flat();
+  },
+
+  /* Own notification interaction state: seen / archived per notification key (RLS: own rows only). */
+  async getNotificationStates(): Promise<NotificationState[]> {
+    const { data, error } = await supabase
+      .from('notification_states')
+      .select('notification_key, kind, tone, urgent, title, body, seen_at, archived_at')
+      .order('updated_at', { ascending: false })
+      .limit(500);
+    if (error) throw dbError(error, 'تعذر تحميل حالة التنبيهات');
+    return (data || []).map((r) => ({
+      key: r.notification_key,
+      kind: r.kind,
+      tone: r.tone,
+      urgent: r.urgent,
+      title: r.title,
+      body: r.body,
+      seenAt: r.seen_at,
+      archivedAt: r.archived_at,
+    }));
+  },
+
+  /* Opening the panel: the visible non-urgent notifications become seen (never archived). */
+  async markNotificationsSeen(items: NotificationSnapshot[]): Promise<void> {
+    if (items.length === 0) return;
+    const { error } = await supabase.rpc('men_notifications_mark_seen', { p_items: items });
+    // A display hint: the caller warns (never a console error) — e.g. a reload cutting the request.
+    if (error) throw new Error(error.message || 'تعذر حفظ حالة التنبيهات');
+  },
+
+  /* Clicking a notification: archived (moves to «عرض كل التنبيهات»). */
+  async archiveNotification(item: NotificationSnapshot): Promise<void> {
+    const { error } = await supabase.rpc('men_notification_archive', { p_item: item });
+    if (error) throw new Error(error.message || 'تعذر حفظ حالة التنبيه');
+  },
+
+  /* Master admin: the batches whose serious alerts he follows (his own rows only). */
+  async getNotificationFollows(): Promise<string[]> {
+    const { data, error } = await supabase.from('admin_notification_batch_subscriptions').select('batch_id').eq('enabled', true);
+    if (error) throw dbError(error, 'تعذر تحميل إعدادات التنبيهات');
+    return (data || []).map((r) => r.batch_id as string);
+  },
+
+  async setNotificationFollow(batchId: string, enabled: boolean): Promise<void> {
+    const { error } = await supabase.rpc('men_set_notification_batch_follow', { p_batch_id: batchId, p_enabled: enabled });
+    if (error) throw dbError(error, 'تعذر حفظ إعدادات التنبيهات');
   },
 
   async adminPeerTestImpact(testId: string): Promise<{ blocked_count: number; blocked_members: { id: string; name: string }[] }> {

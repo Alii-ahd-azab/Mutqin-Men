@@ -1,14 +1,21 @@
-// In-app notifications (Men): DERIVED from the current program status, never stored. They read the
-// results of the authoritative calculations (calculateMemberRequiredQuarter,
+// In-app notifications (Men): DERIVED from the current program status, never stored as a source of
+// truth. They read the results of the authoritative calculations (calculateMemberRequiredQuarter,
 // calculateMemberRevisionStatus, calculateMemberDistantReviewStatus, computeMemberDelayStatus) and
 // add no rule of their own, so a notification exists exactly while its condition does: catching up
 // lowers or removes it, and the program date (05:00 Africa/Cairo) decides when a day becomes overdue.
-// Master admins have no notifications. Pure TypeScript (bundled by Vite and Deno).
+//
+// Each notification has a stable KEY: the same condition keeps the same key on every refresh (so the
+// user's seen/archived state, stored per key in public.notification_states, maps back to it and no
+// duplicate history accumulates), and a new situation gets a new key (a higher debt level, a new
+// debt episode, another date). URGENT = the elimination-risk condition (3+ overdue days of Tasmi'a or
+// normal review, for the member himself or in an admin's alerts); everything else is non-urgent.
+// Pure TypeScript (bundled by Vite and Deno).
 
+import { addDays } from './programDate.ts';
 import { formatArabicDateWithDayName } from './calculations.ts';
 import { SEVERE_DELAY_THRESHOLD, type MemberDelayStatus } from './memberDelayStatus.ts';
 
-/** Overdue days in one category that make the warning serious (and alert the batch admins). */
+/** Overdue days in one category that make the warning serious (and alert the admins). */
 export const SERIOUS_DEBT_THRESHOLD = 3;
 
 /** 1 day: light (yellow), 2 days: stronger (orange), 3 or more: serious (red). */
@@ -25,7 +32,14 @@ export function arabicLateDays(n: number): string {
   return n <= 10 ? `${n} أيام متأخرة` : `${n} يومًا متأخرًا`;
 }
 
-export type MemberNotificationKind = 'tasmia-overdue' | 'revision-overdue' | 'distant-overdue' | 'rest-day' | 'distant-day';
+export type MemberNotificationKind =
+  | 'tasmia-overdue'
+  | 'revision-overdue'
+  | 'distant-overdue'
+  | 'rest-day'
+  | 'distant-day'
+  | 'rest-tomorrow'
+  | 'distant-tomorrow';
 export type NotificationTone = DebtLevel | 'info' | 'distant';
 
 /** Where opening the notification leads on the member dashboard. */
@@ -33,23 +47,28 @@ export type MemberNotificationTarget =
   | { kind: 'tasmia'; quarter: number }
   | { kind: 'revision'; date: string }
   | { kind: 'distant'; assignmentId: string }
-  | { kind: 'rest-day' };
+  | { kind: 'rest-day' }
+  | { kind: 'overview' };
 
 export interface MemberNotification {
-  /** Stable per condition (one per category, not per missed day). */
+  /** DOM-friendly id of the category (one per category, not per missed day). */
   id: string;
+  /** Stable identity of this exact condition (seen/archived state is stored per key). */
+  key: string;
   kind: MemberNotificationKind;
   tone: NotificationTone;
+  /** Elimination-risk condition: opening the panel does not mark it seen. */
+  urgent: boolean;
   title: string;
   body: string;
   note?: string;
   count?: number;
-  /** Changes whenever what the notification says changes (a read one becomes unread again). */
-  signature: string;
   target: MemberNotificationTarget;
 }
 
 export interface MemberNotificationInput {
+  /** Scopes the keys (a member moved to another batch starts fresh there). */
+  batchId: string;
   /** The program date (05:00 Africa/Cairo). */
   today: string;
   isActive: boolean;
@@ -67,6 +86,11 @@ export interface MemberNotificationInput {
     todayAssignment: { id: string; start_quarter: number; end_quarter: number; note?: string | null } | null;
     hasCompletedToday: boolean;
   };
+  /** Tomorrow's (program date + 1) scheduled rest day / distant review, when one applies to him. */
+  tomorrow?: {
+    restDay?: { note?: string } | null;
+    distant?: { id: string; start_quarter: number; end_quarter: number; note?: string | null } | null;
+  };
 }
 
 const TONE_ORDER: Record<NotificationTone, number> = { serious: 0, strong: 1, light: 2, distant: 3, info: 4 };
@@ -77,12 +101,13 @@ export function distantRangeLabel(start: number, end: number): string {
 
 /**
  * A member's notifications: one per overdue category (Tasmi'a, normal review, distant review — never
- * merged into one number) plus today's schedule information (rest day, distant-review day).
- * Overdue warnings follow the dashboard's own delay alert: only for an active member of a running
- * program.
+ * merged into one number), today's schedule information (rest day, distant-review day) and
+ * tomorrow's (rest day, distant review). Overdue warnings follow the dashboard's own delay alert:
+ * only for an active member of a running program.
  */
 export function buildMemberNotifications(input: MemberNotificationInput): MemberNotification[] {
   const out: MemberNotification[] = [];
+  const b = input.batchId;
   const debtsApply = input.isActive && input.hasStarted && !input.isCompleted;
 
   if (debtsApply) {
@@ -92,8 +117,11 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
       const q = input.tasmia.requiredQuarter;
       out.push({
         id: 'tasmia-overdue',
+        // The debt episode is identified by its first missed quarter.
+        key: `b:${b}:tasmia:${level}:q${q}`,
         kind: 'tasmia-overdue',
         tone: level,
+        urgent: level === 'serious',
         count: n,
         title:
           level === 'light'
@@ -107,7 +135,6 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
             : level === 'strong'
             ? `بادر باستدراك التسميع قبل أن يتراكم، بدءًا من الربع ${q}.`
             : `أنت تقترب من حد الاستبعاد. يرجى استدراك التسميع سريعًا بدءًا من الربع ${q} حتى لا تصبح عرضة للاستبعاد.`,
-        signature: `${n}:${q}`,
         target: { kind: 'tasmia', quarter: q },
       });
     }
@@ -119,8 +146,10 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
       const firstLabel = formatArabicDateWithDayName(first);
       out.push({
         id: 'revision-overdue',
+        key: `b:${b}:revision:${rLevel}:${first}`,
         kind: 'revision-overdue',
         tone: rLevel,
+        urgent: rLevel === 'serious',
         count: dates.length,
         title:
           rLevel === 'light'
@@ -134,20 +163,22 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
             : rLevel === 'strong'
             ? `بادر باستدراك المراجعة قبل أن تتراكم، بدءًا من مراجعة ${firstLabel}.`
             : `أنت تقترب من حد الاستبعاد. يرجى استدراك المراجعة سريعًا بدءًا من مراجعة ${firstLabel} حتى لا تصبح عرضة للاستبعاد.`,
-        signature: dates.join(','),
         target: { kind: 'revision', date: first },
       });
     }
 
-    // «المراجعة البعيدة»: its own debt, separate from the normal review (not part of the elimination rule).
+    // «المراجعة البعيدة»: its own debt, separate from the normal review (not part of the elimination
+    // rule, so never urgent).
     const overdue = input.distant.overdue;
     if (overdue.length > 0) {
       const first = overdue[0];
       const firstLabel = formatArabicDateWithDayName(first.review_date);
       out.push({
         id: 'distant-overdue',
+        key: `b:${b}:distant-overdue:${first.id}:${overdue.length}`,
         kind: 'distant-overdue',
         tone: overdue.length === 1 ? 'light' : 'strong',
+        urgent: false,
         count: overdue.length,
         title:
           overdue.length === 1
@@ -156,7 +187,6 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
             ? 'لديك مراجعتان بعيدتان متأخرتان'
             : `لديك ${overdue.length} ${overdue.length <= 10 ? 'مراجعات بعيدة متأخرة' : 'مراجعة بعيدة متأخرة'}`,
         body: `المراجعة البعيدة ليوم ${firstLabel} لم تُؤكَّد بعد. وهي مستقلة عن ورد المراجعة اليومي.`,
-        signature: overdue.map((a) => a.id).join(','),
         target: { kind: 'distant', assignmentId: first.id },
       });
     }
@@ -164,13 +194,14 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
 
   if (input.hasStarted && input.isRestDay) {
     out.push({
-      id: `rest-day:${input.today}`,
+      id: 'rest-day',
+      key: `b:${b}:rest:${input.today}`,
       kind: 'rest-day',
       tone: 'info',
+      urgent: false,
       title: 'اليوم يوم استدراك وراحة',
       body: 'اليوم راحة من التقدم المعتاد للبرنامج: لا ربع تسميع جديد ولا مراجعة يومية جديدة. وما كان عليك من أوراد متأخرة سابقة يبقى مطلوبًا للاستدراك.',
       note: input.restDayNote || undefined,
-      signature: input.restDayNote || '',
       target: { kind: 'rest-day' },
     });
   }
@@ -178,25 +209,61 @@ export function buildMemberNotifications(input: MemberNotificationInput): Member
   const todayDistant = input.distant.todayAssignment;
   if (input.hasStarted && todayDistant) {
     out.push({
-      id: `distant-day:${todayDistant.id}`,
+      id: 'distant-day',
+      key: `b:${b}:distant-day:${todayDistant.id}`,
       kind: 'distant-day',
       tone: 'distant',
+      urgent: false,
       title: 'اليوم مراجعة بعيدة',
       body: `المطلوب: ${distantRangeLabel(todayDistant.start_quarter, todayDistant.end_quarter)}. التقدم المعتاد للبرنامج (التسميع والمراجعة اليومية) متوقف اليوم.${
         input.distant.hasCompletedToday ? ' وقد أتممتها اليوم، بارك الله فيك.' : ''
       }`,
       note: todayDistant.note || undefined,
-      signature: `${todayDistant.start_quarter}-${todayDistant.end_quarter}:${todayDistant.note || ''}:${input.distant.hasCompletedToday ? 1 : 0}`,
       target: { kind: 'distant', assignmentId: todayDistant.id },
     });
   }
 
-  return out.sort((a, b) => TONE_ORDER[a.tone] - TONE_ORDER[b.tone]);
+  // Tomorrow = the next program date (it starts at 05:00 Cairo).
+  const tomorrow = addDays(input.today, 1);
+  const tomorrowLabel = formatArabicDateWithDayName(tomorrow);
+  if (input.tomorrow?.restDay) {
+    out.push({
+      id: 'rest-tomorrow',
+      key: `b:${b}:rest-tomorrow:${tomorrow}`,
+      kind: 'rest-tomorrow',
+      tone: 'info',
+      urgent: false,
+      title: 'غدًا يوم راحة من التقدم المعتاد للبرنامج',
+      body: `غدًا (${tomorrowLabel}) يوم استدراك وراحة: لا ربع تسميع جديد ولا مراجعة يومية جديدة، ويمكنك استدراك ما فاتك.`,
+      note: input.tomorrow.restDay.note || undefined,
+      target: { kind: 'overview' },
+    });
+  }
+  const tDistant = input.tomorrow?.distant;
+  if (tDistant) {
+    out.push({
+      id: 'distant-tomorrow',
+      key: `b:${b}:distant-tomorrow:${tDistant.id}`,
+      kind: 'distant-tomorrow',
+      tone: 'distant',
+      urgent: false,
+      title: 'غدًا مراجعة بعيدة',
+      body: `غدًا (${tomorrowLabel}) المطلوب: ${distantRangeLabel(tDistant.start_quarter, tDistant.end_quarter)}، بدل التقدم المعتاد للبرنامج.`,
+      note: tDistant.note || undefined,
+      target: { kind: 'overview' },
+    });
+  }
+
+  return out.sort((a, c) => TONE_ORDER[a.tone] - TONE_ORDER[c.tone]);
 }
 
-/** A batch admin's alert: one member, one category, at 3 or more overdue days. */
+/** An admin's alert (batch admin: his batches; master admin: the batches he follows). */
 export interface BatchAdminAlert {
   id: string;
+  /** Stable identity: batch, member, category and the debt episode (first missed day). */
+  key: string;
+  /** Admin alerts are always the urgent elimination-risk condition. */
+  urgent: true;
   batchId: string;
   batchName: string;
   memberId: string;
@@ -206,12 +273,18 @@ export interface BatchAdminAlert {
   count: number;
   /** The existing «مؤهل للإقصاء» rule (SEVERE_DELAY_THRESHOLD) — unchanged. */
   eligibleForExclusion: boolean;
-  signature: string;
+}
+
+const CATEGORY_LABEL: Record<BatchAdminAlert['category'], string> = { tasmia: 'التسميع', revision: 'المراجعة' };
+
+/** Title/body of an admin alert (also its history snapshot). */
+export function adminAlertText(a: BatchAdminAlert): { title: string; body: string } {
+  return { title: a.memberName, body: `${a.phone} • ${a.batchName} • ${arabicLateDays(a.count)} في ${CATEGORY_LABEL[a.category]}` };
 }
 
 /**
  * Serious alerts of one batch: active members with 3 or more overdue days in Tasmi'a or in the normal
- * review (each category on its own). Fewer days never alert the admin. `delays` comes from
+ * review (each category on its own). Fewer days never alert. `delays` comes from
  * computeMemberDelayStatus (computeBatchDelays), the same status the admin dashboard shows.
  */
 export function buildBatchAdminAlerts(
@@ -223,14 +296,16 @@ export function buildBatchAdminAlerts(
   for (const m of members) {
     const d = delays.get(m.id);
     if (!d) continue;
-    const categories: [BatchAdminAlert['category'], number][] = [
-      ['tasmia', d.missedQuartersCount],
-      ['revision', d.missedRevisionDaysCount],
+    const categories: [BatchAdminAlert['category'], number, string | number | undefined][] = [
+      ['tasmia', d.missedQuartersCount, d.missedQuarters[0]],
+      ['revision', d.missedRevisionDaysCount, d.missedRevisionDates[0]],
     ];
-    for (const [category, count] of categories) {
+    for (const [category, count, first] of categories) {
       if (count < SERIOUS_DEBT_THRESHOLD) continue;
       out.push({
         id: `${batch.id}:${m.id}:${category}`,
+        key: `alert:${batch.id}:${m.id}:${category}:${first ?? ''}`,
+        urgent: true,
         batchId: batch.id,
         batchName: batch.name,
         memberId: m.id,
@@ -239,9 +314,34 @@ export function buildBatchAdminAlerts(
         category,
         count,
         eligibleForExclusion: count >= SEVERE_DELAY_THRESHOLD,
-        signature: String(count),
       });
     }
   }
   return out.sort((a, b) => b.count - a.count || a.memberName.localeCompare(b.memberName, 'ar'));
+}
+
+/** Persisted interaction state of one notification key (public.notification_states). */
+export interface NotificationState {
+  key: string;
+  kind: string;
+  tone: string;
+  urgent: boolean;
+  title: string;
+  body: string;
+  seenAt: string | null;
+  archivedAt: string | null;
+}
+
+/**
+ * Unread rule: an URGENT notification counts until it is clicked (archived); a non-urgent one until
+ * the panel was opened while it showed (seen) or it was clicked. Archived notifications leave the
+ * active list (they stay in «عرض كل التنبيهات»).
+ */
+export function isUnread(n: { key: string; urgent: boolean }, state?: Pick<NotificationState, 'seenAt' | 'archivedAt'>): boolean {
+  if (state?.archivedAt) return false;
+  return n.urgent || !state?.seenAt;
+}
+
+export function isArchived(n: { key: string }, states: Map<string, Pick<NotificationState, 'archivedAt'>>): boolean {
+  return !!states.get(n.key)?.archivedAt;
 }

@@ -12,7 +12,9 @@ import {
   type BatchAdminAlert,
   type MemberNotification,
   type MemberNotificationTarget,
+  type NotificationState,
 } from './lib/notifications';
+import type { NotificationSnapshot } from './api/client';
 import { computeBatchDelays } from '../supabase/functions/_shared/men/batchDelays.ts';
 import { api } from './api/client';
 import {
@@ -83,6 +85,10 @@ const MainApp: React.FC = () => {
   const [memberNotifications, setMemberNotifications] = useState<MemberNotification[]>([]);
   const [memberFocus, setMemberFocus] = useState<{ target: MemberNotificationTarget; nonce: number } | null>(null);
   const [otherBatchAlerts, setOtherBatchAlerts] = useState<BatchAdminAlert[]>([]);
+  // Persisted per user (public.notification_states): seen / archived by notification key.
+  const [notificationStates, setNotificationStates] = useState<Map<string, NotificationState>>(new Map());
+  // Master admin: the batches whose serious alerts he follows (admin_notification_batch_subscriptions).
+  const [followedBatchIds, setFollowedBatchIds] = useState<Set<string>>(new Set());
   const [adminFocus, setAdminFocus] = useState<{ memberId: string; action: 'manage' | 'exclude'; nonce: number } | null>(null);
 
   /*
@@ -210,22 +216,30 @@ const MainApp: React.FC = () => {
     }
   }, [currentUserId, selectedBatchId, loadAppData, programDay]);
 
-  // Batch admins: serious alerts of the selected batch from its loaded data, and of his other
-  // assigned batches from their own data (RLS-scoped). Never for members or master admins.
-  const isBatchAdmin = currentUser?.role === 'admin' && !currentUser.is_master_admin;
+  /*
+   * Admin alert scope. Batch admin: every batch he is assigned to (RLS returns only those).
+   * Master admin: the batches he chose to follow (persisted). Members have their own notifications.
+   * The selected batch is computed from its loaded data; the other batches from their own data.
+   */
+  const isAdminUser = currentUser?.role === 'admin';
+  const isMaster = isAdminUser && !!currentUser?.is_master_admin;
+  const alertBatches = useMemo(
+    () => (!isAdminUser ? [] : isMaster ? accessibleBatches.filter((b) => followedBatchIds.has(b.id)) : accessibleBatches),
+    [isAdminUser, isMaster, accessibleBatches, followedBatchIds]
+  );
   const selectedBatchAlerts = useMemo(() => {
-    const batch = accessibleBatches.find((b) => b.id === selectedBatchId);
-    if (!isBatchAdmin || !batch || !settings || !cycleInfo) return [];
+    const batch = alertBatches.find((b) => b.id === selectedBatchId);
+    if (!batch || !settings || !cycleInfo) return [];
     const { members, delayById } = computeBatchDelays(
       { users: allUsers, settings, restDays, recitationLogs: recitations, revisionLogs: revisions },
       cycleInfo.today_date
     );
     return buildBatchAdminAlerts(batch, members, delayById);
-  }, [isBatchAdmin, accessibleBatches, selectedBatchId, settings, cycleInfo, allUsers, restDays, recitations, revisions]);
+  }, [alertBatches, selectedBatchId, settings, cycleInfo, allUsers, restDays, recitations, revisions]);
 
   useEffect(() => {
-    const others = accessibleBatches.filter((b) => b.id !== selectedBatchId);
-    if (!isBatchAdmin || others.length === 0) {
+    const others = alertBatches.filter((b) => b.id !== selectedBatchId);
+    if (others.length === 0) {
       setOtherBatchAlerts([]);
       return;
     }
@@ -237,9 +251,62 @@ const MainApp: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [isBatchAdmin, accessibleBatches, selectedBatchId, programDay, dataVersion]);
+  }, [alertBatches, selectedBatchId, programDay, dataVersion]);
 
   const adminAlerts = useMemo(() => [...selectedBatchAlerts, ...otherBatchAlerts], [selectedBatchAlerts, otherBatchAlerts]);
+
+  // Notification state and (master) follows: loaded per account, refreshed with each program day.
+  useEffect(() => {
+    setNotificationStates(new Map());
+    setFollowedBatchIds(new Set());
+    if (!currentUserId) return;
+    let cancelled = false;
+    api.getNotificationStates().then(
+      (rows) => !cancelled && setNotificationStates(new Map(rows.map((r) => [r.key, r]))),
+      (err) => console.warn('notification states', err?.message)
+    );
+    if (isMaster)
+      api.getNotificationFollows().then(
+        (ids) => !cancelled && setFollowedBatchIds(new Set(ids)),
+        (err) => console.warn('notification follows', err?.message)
+      );
+    return () => {
+      cancelled = true;
+    };
+  }, [currentUserId, isMaster, programDay]);
+
+  // Seen / archived: applied locally right away, then stored (server time is the record).
+  const applyLocal = (items: NotificationSnapshot[], mode: 'seen' | 'archived') =>
+    setNotificationStates((prev) => {
+      const next = new Map<string, NotificationState>(prev);
+      const now = new Date().toISOString();
+      for (const it of items) {
+        const old = next.get(it.key);
+        next.set(it.key, {
+          ...it,
+          seenAt: old?.seenAt ?? now,
+          archivedAt: old?.archivedAt ?? (mode === 'archived' ? now : null),
+        });
+      }
+      return next;
+    });
+  const handleNotificationsSeen = (items: NotificationSnapshot[]) => {
+    applyLocal(items, 'seen');
+    api.markNotificationsSeen(items).catch((err) => console.warn('mark seen', err?.message));
+  };
+  const handleNotificationArchived = (item: NotificationSnapshot) => {
+    applyLocal([item], 'archived');
+    api.archiveNotification(item).catch((err) => console.warn('archive', err?.message));
+  };
+  const handleToggleFollow = async (batchId: string, enabled: boolean) => {
+    await api.setNotificationFollow(batchId, enabled);
+    setFollowedBatchIds((prev) => {
+      const next = new Set(prev);
+      if (enabled) next.add(batchId);
+      else next.delete(batchId);
+      return next;
+    });
+  };
 
   const handleSelectBatch = (batchId: string) => {
     if (!currentUser || batchId === selectedBatchId) return;
@@ -427,23 +494,27 @@ const MainApp: React.FC = () => {
         notifications={
           currentUser.role === 'member' ? (
             <NotificationCenter
-              userId={currentUser.id}
               mode="member"
               items={memberNotifications}
+              states={notificationStates}
+              onSeen={handleNotificationsSeen}
+              onArchive={handleNotificationArchived}
               onOpen={(n) => setMemberFocus({ target: n.target, nonce: Date.now() })}
             />
-          ) : isBatchAdmin ? (
+          ) : (
             <NotificationCenter
-              userId={currentUser.id}
               mode="admin"
               items={adminAlerts}
-              showBatchName={accessibleBatches.length > 1}
+              states={notificationStates}
+              onSeen={handleNotificationsSeen}
+              onArchive={handleNotificationArchived}
+              follow={isMaster ? { batches: accessibleBatches, followed: followedBatchIds, onToggle: handleToggleFollow } : undefined}
               onOpen={(alert, action) => {
                 if (alert.batchId !== selectedBatchId) handleSelectBatch(alert.batchId);
                 setAdminFocus({ memberId: alert.memberId, action, nonce: Date.now() });
               }}
             />
-          ) : null
+          )
         }
       />
 
@@ -527,6 +598,7 @@ const MainApp: React.FC = () => {
             <MemberDashboard
               currentUser={currentUser}
               batchName={selectedBatch.name}
+              batchId={selectedBatch.id}
               cycleInfo={cycleInfo}
               settings={settings}
               restDays={restDays}

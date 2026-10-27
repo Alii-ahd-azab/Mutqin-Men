@@ -76,7 +76,8 @@ async function counts() {
   const out: Record<string, number | null> = {};
   for (const t of ['profiles', 'batches', 'cycles', 'batch_memberships', 'batch_membership_transfers', 'tasmia_submissions',
     'review_confirmations', 'peer_tests', 'peer_test_attempts', 'peer_test_selected_members', 'personal_tests', 'daily_thoughts',
-    'group_rest_days', 'program_pauses', 'distant_review_assignments', 'distant_review_completions'])
+    'group_rest_days', 'program_pauses', 'distant_review_assignments', 'distant_review_completions',
+    'notification_states', 'admin_notification_batch_subscriptions'])
     out[t] = await c(t);
   return out;
 }
@@ -155,6 +156,20 @@ async function main() {
     const ptRead = await a.client.from('personal_tests').select('id');
     record('personal-test history stays readable by its owner', !ptRead.error, ptRead.error?.message);
     const b = await signIn(B);
+
+    // ---- Notification interaction state (own rows only; one row per key; RPC-only writes) ----
+    const nItem = { key: 'smoke:rest-tomorrow', kind: 'rest-tomorrow', tone: 'info', urgent: false, title: 'غدًا يوم راحة', body: 'x' };
+    const seen1 = await a.client.rpc('men_notifications_mark_seen', { p_items: [nItem] });
+    const seen2 = await a.client.rpc('men_notifications_mark_seen', { p_items: [nItem] });
+    const arch = await a.client.rpc('men_notification_archive', { p_item: nItem });
+    const aRows = (await a.client.from('notification_states').select('notification_key, seen_at, archived_at')).data || [];
+    record('notification state: seen then archived, one row per key', !seen1.error && !seen2.error && !arch.error && aRows.length === 1 && !!aRows[0].seen_at && !!aRows[0].archived_at, seen1.error?.message || arch.error?.message);
+    const bPeek = b.error ? null : (await b.client.from('notification_states').select('notification_key')).data;
+    record("another member cannot read a member's notification state", !!bPeek && bPeek.length === 0);
+    const directWrite = await a.client.from('notification_states').insert({ user_id: B.id, notification_key: 'x' });
+    record('notification state cannot be written directly (RPC only, own rows)', !!directWrite.error);
+    const memberFollow = await a.client.rpc('men_set_notification_batch_follow', { p_batch_id: batchId, p_enabled: true });
+    record('members cannot follow batches', !!memberFollow.error);
 
     const stored = await service.from('review_confirmations').select('id, member_name_snapshot').eq('user_id', A.id);
     record('member write is stored in Men Supabase', (stored.data || []).length === 1 && stored.data![0].member_name_snapshot === 'SMOKE A');
@@ -280,6 +295,12 @@ async function main() {
         record('batch admin cannot add members to another batch', hOther.status === 403, `${hOther.status} ${hOther.message}`);
         const hMaster = await invoke(h.client, 'admin-users', { action: 'update', user_id: H.id, is_master_admin: true });
         record('batch admin cannot promote himself to master', hMaster.status === 403);
+        const hFollow = await h.client.rpc('men_set_notification_batch_follow', { p_batch_id: S, p_enabled: true });
+        record('batch admins cannot opt into batch follows (their scope is their assignments)', !!hFollow.error && /متابعة الدفعات متاحة للمشرف العام فقط/.test(hFollow.error.message), hFollow.error?.message);
+        const eFollow = await e.client.rpc('men_set_notification_batch_follow', { p_batch_id: S, p_enabled: true });
+        const eRows = (await e.client.from('admin_notification_batch_subscriptions').select('batch_id, enabled')).data || [];
+        const hRows = (await h.client.from('admin_notification_batch_subscriptions').select('batch_id')).data || [];
+        record('master admin follows a batch (stored, readable only by himself)', !eFollow.error && eRows.length === 1 && eRows[0].batch_id === S && eRows[0].enabled && hRows.length === 0, eFollow.error?.message);
         const reassign = await invoke(e.client, 'admin-users', { action: 'set-admin-batches', user_id: H.id, batch_ids: [S] });
         record('master admin sets batch-admin assignments', reassign.status === 200, `${reassign.status} ${reassign.message ?? ''}`);
         const adminList = (await e.client.from('batch_memberships').select('batch_id').eq('user_id', H.id).eq('membership_role', 'admin')).data || [];
