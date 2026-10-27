@@ -8,7 +8,7 @@ import {
   RestDay,
   User,
 } from '../types';
-import { getQuarterInfo, getRangeBounds } from '../data/quranData';
+import { distantReviewQuarterCount, getDistantReviewBounds, getQuarterInfo } from '../data/quranData';
 import { formatArabicDateWithDayName, isDistantReviewOwed, isPausedDate, joinedOnDateFromTimestamp } from '../lib/calculations';
 import { QuarterPicker } from './QuarterPicker';
 
@@ -18,10 +18,13 @@ function addDays(date: string, n: number): string {
   return d.toISOString().slice(0, 10);
 }
 
-/** «المراجعة المطلوبة» preview: start of the FROM quarter and where the TO quarter stops. */
+/** «من بداية الربع X حتى بداية الربع Y»: the TO quarter is the stopping boundary (not reviewed). */
+export const distantRangeText = (start: number, end: number) => `من بداية الربع ${start} حتى بداية الربع ${end}`;
+
+/** «المراجعة المطلوبة» preview: beginning of the FROM quarter → beginning of the TO quarter. */
 export const DistantRangePreview: React.FC<{ start: number; end: number; id?: string }> = ({ start, end, id }) => {
-  const bounds = getRangeBounds(start, end);
-  const count = end - start + 1;
+  const bounds = getDistantReviewBounds(start, end);
+  const count = distantReviewQuarterCount(start, end);
   return (
     <div id={id} className="p-3 rounded-2xl bg-emerald-50/70 border border-emerald-200 space-y-2 text-xs">
       <div className="flex items-center justify-between gap-2 flex-wrap">
@@ -31,19 +34,19 @@ export const DistantRangePreview: React.FC<{ start: number; end: number; id?: st
         </span>
       </div>
       <p className="font-bold text-stone-900">
-        من الربع {start} إلى الربع {end}
+        {distantRangeText(start, end)}
         <span className="text-stone-500 font-normal"> ({getQuarterInfo(start).surahName} ← {getQuarterInfo(end).surahName})</span>
       </p>
       <div className="bg-white p-2.5 rounded-xl border border-stone-200/80 space-y-1.5">
         <div className="flex items-baseline gap-1.5 flex-wrap">
           <span className="font-bold text-emerald-800 shrink-0">ابدأ من:</span>
-          <span className="font-bold text-stone-900">{bounds.start.label}</span>
+          <span className="font-bold text-stone-900">بداية الربع {start} — {bounds.start.label}</span>
           <span className="font-quran text-emerald-900">﴿ {bounds.start.ayahText}... ﴾</span>
         </div>
         <div className="flex items-baseline gap-1.5 flex-wrap border-t border-stone-100 pt-1.5">
           <span className="font-bold text-rose-700 shrink-0">توقف عند:</span>
-          <span className="font-bold text-stone-900">{bounds.stop.label}</span>
-          <span className="font-quran text-rose-700">﴿ {bounds.stop.ayahText}{bounds.stop.isEndNotice ? '' : '...'} ﴾</span>
+          <span className="font-bold text-stone-900">بداية الربع {end} — {bounds.stop.label}</span>
+          <span className="font-quran text-rose-700">﴿ {bounds.stop.ayahText}... ﴾</span>
         </div>
       </div>
     </div>
@@ -93,7 +96,8 @@ export const DistantReviewAdminSection: React.FC<Props> = ({
   const [showArchived, setShowArchived] = useState(false);
 
   const minDate = addDays(today, 1);
-  const rangeValid = from !== null && to !== null && from >= 1 && to <= 240 && from <= to;
+  // «إلى الربع» is where the review stops (its beginning), so it must come after «من الربع».
+  const rangeValid = from !== null && to !== null && from >= 1 && to <= 240 && from < to;
 
   const reset = () => {
     setEditingId(null);
@@ -110,7 +114,7 @@ export const DistantReviewAdminSection: React.FC<Props> = ({
     if (!date) return setError('يرجى تحديد تاريخ المراجعة البعيدة');
     if (date < minDate) return setError('يجب أن يكون تاريخ المراجعة البعيدة في المستقبل (بعد اليوم).');
     if (from === null || to === null) return setError('يرجى اختيار «من الربع» و«إلى الربع»');
-    if (!rangeValid) return setError('نطاق الأرباع غير صالح: «من الربع» يجب ألا يتجاوز «إلى الربع».');
+    if (!rangeValid) return setError('نطاق الأرباع غير صالح: «إلى الربع» هو موضع التوقف (بداية ذلك الربع)، فيجب أن يكون بعد «من الربع» وضمن 1–240.');
     if (restDays.some((r) => r.date === date)) {
       return setError('هذا التاريخ مسجل كيوم استدراك وراحة. اختر إما يوم راحة أو يوم مراجعة بعيدة، وليس الاثنين معًا.');
     }
@@ -215,15 +219,16 @@ export const DistantReviewAdminSection: React.FC<Props> = ({
           </div>
           <QuarterPicker
             id="distant-from"
-            label="من الربع"
+            label="الربع"
             tone="from"
             value={from}
+            max={239}
             onChange={(q) => {
               setFrom(q);
-              if (to !== null && to < q) setTo(null);
+              if (to !== null && to <= q) setTo(null);
             }}
           />
-          <QuarterPicker id="distant-to" label="إلى الربع" tone="to" value={to} min={from ?? 1} onChange={setTo} />
+          <QuarterPicker id="distant-to" label="الربع" tone="to" value={to} min={(from ?? 1) + 1} onChange={setTo} />
         </div>
         <div>
           <label htmlFor="distant-review-note" className="block text-xs font-bold text-stone-700 mb-1">
@@ -292,7 +297,7 @@ export const DistantReviewAdminSection: React.FC<Props> = ({
                     </span>
                   </div>
                   <p className="text-stone-700">
-                    من الربع <strong>{a.start_quarter}</strong> إلى الربع <strong>{a.end_quarter}</strong>
+                    <strong>{distantRangeText(a.start_quarter, a.end_quarter)}</strong>
                     <span className="text-stone-500">
                       {' '}
                       ({getQuarterInfo(a.start_quarter).surahName} ← {getQuarterInfo(a.end_quarter).surahName})
@@ -367,7 +372,7 @@ export const DistantReviewAdminSection: React.FC<Props> = ({
                 <div key={a.id} className="py-2 text-xs text-stone-600 flex flex-wrap gap-x-3">
                   <span className="font-bold text-stone-800">{formatArabicDateWithDayName(a.review_date)}</span>
                   <span>
-                    من الربع {a.start_quarter} إلى الربع {a.end_quarter}
+                    {distantRangeText(a.start_quarter, a.end_quarter)}
                   </span>
                   <span className="text-emerald-800">{completions.filter((c) => c.assignment_id === a.id).length} أتموا المراجعة</span>
                   {a.note && <span className="text-stone-500">ملاحظة: {a.note}</span>}

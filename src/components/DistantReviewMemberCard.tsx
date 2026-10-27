@@ -120,12 +120,12 @@ export const DistantReviewMemberCard: React.FC<Props> = ({ status, today, isActi
 
       <div className="bg-stone-50 p-3 rounded-2xl border border-stone-200/70 flex items-center justify-between text-center">
         <div className="flex-1">
-          <div className="text-[10px] text-stone-400">من الربع</div>
+          <div className="text-[10px] text-stone-400">من بداية الربع</div>
           <div id="distant-review-from" className="text-lg font-bold text-stone-900">{item.start_quarter}</div>
         </div>
         <div className="text-stone-300 text-sm">◀ ◀</div>
         <div className="flex-1">
-          <div className="text-[10px] text-stone-400">إلى الربع</div>
+          <div className="text-[10px] text-stone-400">حتى بداية الربع</div>
           <div id="distant-review-to" className="text-lg font-bold text-stone-900">{item.end_quarter}</div>
         </div>
       </div>

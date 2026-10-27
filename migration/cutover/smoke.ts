@@ -441,6 +441,7 @@ async function main() {
         record('duplicate date refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(1), start_quarter: 1, end_quarter: 2 })).status === 409);
         record('today refused (future dates only)', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: today, start_quarter: 1, end_quarter: 2 })).status === 400);
         record('past date refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(-1), start_quarter: 1, end_quarter: 2 })).status === 400);
+        record('from = to refused (TO is the stopping boundary)', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 9, end_quarter: 9 })).status === 400);
         record('from > to refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 13, end_quarter: 12 })).status === 400);
         record('quarter 241 refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 1, end_quarter: 241 })).status === 400);
         const restOnD1 = await h.client.from('group_rest_days').insert({ cycle_id: smokeCycle.id, rest_date: plus(1), created_by: H.id });

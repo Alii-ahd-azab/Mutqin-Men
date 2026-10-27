@@ -477,10 +477,12 @@ Deno.serve(async (req) => {
                 !Number.isInteger(end) ||
                 start < 1 ||
                 end > 240 ||
-                start > end
+                // «إلى الربع» is the stopping
+                // boundary (its beginning).
+                start >= end
               ) {
                 throw new HttpError(
-                  'نطاق الأرباع غير صالح: يجب أن يكون «من الربع» بين 1 و240 وألا يتجاوز «إلى الربع».',
+                  'نطاق الأرباع غير صالح: «إلى الربع» هو موضع التوقف (بداية ذلك الربع)، فيجب أن يكون بعد «من الربع» وضمن 1–240.',
                   400
                 );
               }

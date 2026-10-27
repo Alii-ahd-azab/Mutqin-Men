@@ -368,6 +368,26 @@ async function counts() {
       await xp.locator(`#${id}-search`).fill(query);
       await xp.locator(`#${id}-search`).press("Enter");
     };
+    // Labels: the colored «من» / «إلى» chip + «الربع», no second copy of the word.
+    const labels = await xp.evaluate(() => ["distant-from", "distant-to"].map((id) => document.querySelector(`label[for="${id}-button"]`).innerText.replace(/\s+/g, " ").trim()));
+    const formText = await xp.locator("#distant-review-form").innerText();
+    record("no duplicated من/إلى: labels are «من الربع» / «إلى الربع» once each", labels[0] === "من الربع" && labels[1] === "إلى الربع" && !/من\s+من/.test(formText) && !/إلى\s+إلى/.test(formText), JSON.stringify(labels));
+    // FROM 1 / TO 9: stop at the BEGINNING of quarter 9 (2:142), never at quarter 10 (2:158).
+    await xp.locator("#distant-from-button").click();
+    await xp.locator("#distant-from-search").fill("9");
+    const meta9 = await xp.locator("#distant-from-option-9").innerText();
+    record("quarter option metadata: الجزء • الحزب • الصفحة • الآية", /الجزء 2 • الحزب 3 • الصفحة 22 • الآية 142/.test(meta9), meta9);
+    await xp.locator("#distant-from-search").fill("1");
+    await xp.locator("#distant-from-search").press("Enter");
+    await xp.locator("#distant-to-button").click();
+    record("TO cannot equal FROM (it is the stopping boundary)", (await xp.locator("#distant-to-option-1").getAttribute("aria-disabled")) === "true");
+    await xp.locator("#distant-to-search").fill("9");
+    const toMeta = await xp.locator("#distant-to-option-9").innerText();
+    await xp.locator("#distant-to-search").press("Enter");
+    const p19 = await xp.locator("#distant-review-preview").innerText();
+    record("TO selector options carry the page too", /الصفحة 22/.test(toMeta), toMeta);
+    record("FROM 1 / TO 9 preview: starts at quarter 1, stops at the BEGINNING of quarter 9 (2:142), not quarter 10", /من بداية الربع 1 حتى بداية الربع 9/.test(p19) && /توقف عند:\s*بداية الربع 9 — سورة البقرة - الآية 142/.test(p19) && /سَيَقُولُ/.test(p19) && !/الآية 158/.test(p19) && /8 أرباع/.test(p19), p19.replace(/\s+/g, " ").slice(0, 300));
+    await shot("admin-distant-preview-1-9");
     // First day: search FROM by number, TO by number; preview; note; add.
     await xp.locator("#distant-review-date").fill(riyadhDay(-3));
     await xp.locator("#distant-from-button").click();
@@ -385,7 +405,7 @@ async function counts() {
     await xp.locator("#distant-to-search").press("Enter");
     record("search by surah name works too", surahHits > 10, String(surahHits));
     const preview = await xp.locator("#distant-review-preview").textContent();
-    record("range preview «المراجعة المطلوبة» shows the chosen range and its bounds", /المراجعة المطلوبة/.test(preview) && /من الربع 23 إلى الربع 30/.test(preview) && /ابدأ من/.test(preview) && /توقف عند/.test(preview), preview.slice(0, 120));
+    record("range preview «المراجعة المطلوبة» shows the chosen range and its bounds", /المراجعة المطلوبة/.test(preview) && /من بداية الربع 23 حتى بداية الربع 30/.test(preview) && /ابدأ من/.test(preview) && /توقف عند/.test(preview), preview.slice(0, 120));
     await xp.locator("#distant-review-note").fill("SMOKE مراجعة ما سبق قبل الاختبار");
     await xp.locator("#add-distant-review-btn").click();
     await xp.locator("#distant-review-msg").waitFor({ timeout: 20000 });
@@ -444,7 +464,7 @@ async function counts() {
     await dp.getByText("SMOKE BROWSER DM").first().waitFor({ timeout: 30000 });
     await dp.locator("#distant-review-banner").waitFor({ timeout: 20000 });
     const banner = await dp.locator("#distant-review-banner").textContent();
-    record("member banner: today is a distant-review day, normal progression paused, range shown", /اليوم راحة من التقدم المعتاد للبرنامج/.test(banner) && /من الربع 5 إلى الربع 8/.test(banner), banner.slice(0, 160));
+    record("member banner: today is a distant-review day, normal progression paused, range shown", /اليوم راحة من التقدم المعتاد للبرنامج/.test(banner) && /من بداية الربع 5 حتى بداية الربع 8/.test(banner), banner.slice(0, 160));
     const dayTitle = await dp.getByText(/^اليوم رقم \d+$/).first().textContent();
     record("normal progression paused: 2 distant days do not advance the program day (5, not 7)", dayTitle.trim() === "اليوم رقم 5", dayTitle);
     record("no new normal daily-review card today", (await dp.getByRole("button", { name: /تأكيد إتمام المراجعة اليومية/ }).count()) === 0);
@@ -473,7 +493,7 @@ async function counts() {
     await dp.locator("#history-tab-distant").click();
     const lateRow = await dp.locator(`#distant-history-${riyadhDay(1)}`).textContent();
     const todayRow = await dp.locator(`#distant-history-${riyadhDay(0)}`).textContent();
-    record("history: late entry shows assigned and actual dates; today's shows done", /تم الإنجاز \(متأخرًا\)/.test(lateRow) && /موعدها/.test(lateRow) && /تمت/.test(lateRow) && /تم الإنجاز/.test(todayRow) && /من الربع 5 إلى الربع 8/.test(todayRow), `${lateRow.slice(0, 120)} | ${todayRow.slice(0, 80)}`);
+    record("history: late entry shows assigned and actual dates; today's shows done", /تم الإنجاز \(متأخرًا\)/.test(lateRow) && /موعدها/.test(lateRow) && /تمت/.test(lateRow) && /تم الإنجاز/.test(todayRow) && /من بداية الربع 5 حتى بداية الربع 8/.test(todayRow), `${lateRow.slice(0, 120)} | ${todayRow.slice(0, 80)}`);
     await shot("member-distant-history");
     await dmCtx.close();
 

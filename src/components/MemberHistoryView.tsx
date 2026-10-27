@@ -198,7 +198,7 @@ export const MemberHistoryView: React.FC<MemberHistoryViewProps> = ({
                     <div className="flex items-center gap-2 flex-wrap">
                       <span className="font-bold text-stone-900">المراجعة البعيدة</span>
                       <span className="text-stone-500">
-                        من الربع {a.start_quarter} إلى الربع {a.end_quarter} ({getQuarterInfo(a.start_quarter).surahName} - {getQuarterInfo(a.end_quarter).surahName})
+                        من بداية الربع {a.start_quarter} حتى بداية الربع {a.end_quarter} ({getQuarterInfo(a.start_quarter).surahName} - {getQuarterInfo(a.end_quarter).surahName})
                       </span>
                       {c ? (
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10px] font-bold bg-emerald-50 text-emerald-800 border border-emerald-200">

@@ -92,7 +92,7 @@ export const DistantReviewBanner: React.FC<{ start?: number; end?: number; note?
           حدد المشرف اليوم يومًا للمراجعة البعيدة: لا يُطلب ربع تسميع جديد ولا مراجعة يومية جديدة، ولا يُحتسب اليوم ضمن الـ 240 يومًا.
           {start && end ? (
             <strong className="block mt-1">
-              المراجعة المطلوبة اليوم: من الربع {start} إلى الربع {end}
+              المراجعة المطلوبة اليوم: من بداية الربع {start} حتى بداية الربع {end}
             </strong>
           ) : null}
           {note ? <span className="block mt-1 font-medium">ملاحظة المشرف: {note}</span> : null}
