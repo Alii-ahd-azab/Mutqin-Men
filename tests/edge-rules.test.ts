@@ -337,13 +337,14 @@ test('distant review: several manual days, consecutive and separated, each skipp
   assert.equal(calculateCycleInfo(p.settings, p.restDays, '2026-10-13').distant_review_days_count, 3);
 });
 
-test('distant review: a date that is also a rest day or paused is never counted twice', () => {
-  // (the database forbids rest day + distant review on one date; the calendar stays safe anyway)
+test('distant review: a date that is also a rest day or paused is never counted twice, and stays a distant-review day', () => {
   const both = withDistant(['2026-10-05'], ['2026-10-05']);
   assert.equal(dayOf(both, '2026-10-06'), 5);
+  assert.equal(calculateCycleInfo(both.settings, both.restDays, '2026-10-05').is_distant_review_day, true);
   const paused = withDistant(['2026-10-05'], [], { pause_periods: [{ from: '2026-10-04', to: '2026-10-06' }] });
   assert.equal(dayOf(paused, '2026-10-07'), 4);
-  assert.equal(calculateCycleInfo(paused.settings, paused.restDays, '2026-10-05').is_distant_review_day, false);
+  // The distant review takes priority: the paused date is still its day (normal progression stays paused).
+  assert.equal(calculateCycleInfo(paused.settings, paused.restDays, '2026-10-05').is_distant_review_day, true);
   assert.equal(calculateCycleInfo(paused.settings, paused.restDays, '2026-10-07').distant_review_days_count, 0);
 });
 
@@ -403,16 +404,20 @@ test('distant review: several missed days stay separately owed, even with overla
   assert.deepEqual(one.overdue.map((x) => x.id), [a1.id]);
 });
 
-test('distant review: not owed before joining, before the date, or on a paused date', () => {
+test('distant review: not owed before joining or before the date; a pause or rest day does NOT cancel it', () => {
   const p = withDistant(['2026-10-05', '2026-10-09'], [], { pause_periods: [{ from: '2026-10-08', to: '2026-10-10' }] });
   const a = assignment('2026-10-05');
   const pausedA = assignment('2026-10-09');
   assert.equal(calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-20', '2026-10-06').overdueCount, 0);
   assert.equal(calculateMemberDistantReviewStatus('m', [a], [], p.settings, p.restDays, '2026-10-04').outstanding.length, 0);
-  assert.equal(calculateMemberDistantReviewStatus('m', [pausedA], [], p.settings, p.restDays, '2026-10-20').overdueCount, 0);
-  // Open (global) pause covering the date: no obligation either.
+  // Inside a recorded pause period: still owed (overdue when missed).
+  assert.equal(calculateMemberDistantReviewStatus('m', [pausedA], [], p.settings, p.restDays, '2026-10-20').overdueCount, 1);
+  // Open (global) pause covering the date: today's obligation all the same.
   const open = withDistant(['2026-10-05'], [], { is_paused: true, paused_at: '2026-10-04' });
-  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], open.settings, open.restDays, '2026-10-05').todayAssignment, null);
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], open.settings, open.restDays, '2026-10-05').todayAssignment?.id, a.id);
+  // On a rest day too.
+  const rested = withDistant(['2026-10-05'], ['2026-10-05']);
+  assert.equal(calculateMemberDistantReviewStatus('m', [a], [], rested.settings, rested.restDays, '2026-10-05').todayAssignment?.id, a.id);
 });
 
 test('distant review: normal historical overdue reviews are unaffected', () => {

@@ -480,10 +480,12 @@ async function main() {
         record('from > to refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 13, end_quarter: 12 })).status === 400);
         record('quarter 241 refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 1, end_quarter: 241 })).status === 400);
         const restOnD1 = await h.client.from('group_rest_days').insert({ cycle_id: smokeCycle.id, rest_date: plus(1), created_by: H.id });
-        record('rest day refused on a distant-review date', !!restOnD1.error && /مراجعة بعيدة/.test(restOnD1.error.message), restOnD1.error?.message);
+        record('a rest day may share a distant-review date (the distant review takes priority)', !restOnD1.error, restOnD1.error?.message);
         await h.client.from('group_rest_days').insert({ cycle_id: smokeCycle.id, rest_date: plus(5), created_by: H.id });
         const onRest = await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(5), start_quarter: 1, end_quarter: 2 });
-        record('distant review refused on a rest day', onRest.status === 400 && /استدراك وراحة/.test(onRest.message || ''), `${onRest.status} ${onRest.message}`);
+        record('a distant review may be scheduled on a rest day', onRest.status === 200, `${onRest.status} ${onRest.message}`);
+        const onRestDel = await dr(h.client, { action: 'distant-review-delete', assignment_id: onRest.data?.assignment?.id });
+        record('deleting that future distant review removes it', onRestDel.status === 200 && ((await service.from('distant_review_assignments').select('id').eq('batch_id', S).eq('review_date', plus(5))).data || []).length === 0);
         const id1 = d1.data?.assignment?.id;
         const id2 = d2.data?.assignment?.id;
         const ed = await dr(h.client, { action: 'distant-review-update', assignment_id: id1, review_date: plus(2), start_quarter: 2, end_quarter: 14, note: 'SMOKE تعديل' });

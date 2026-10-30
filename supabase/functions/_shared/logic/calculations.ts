@@ -188,7 +188,9 @@ export function calculateCycleInfo(
 
   // «المراجعة البعيدة» days do not advance the normal program either.
   const distantDays = getDistantReviewDaysInPeriod(settings, restDays, startDate, targetDateStr);
-  const isDistantReviewDay = distantDays.includes(targetDateStr);
+  // A scheduled distant review is today's obligation even on a paused or rest date (the calendar
+  // still counts that date once, as a non-program day).
+  const isDistantReviewDay = (settings.distant_review_dates || []).includes(targetDateStr);
 
   const totalPausedDays = countPausedDays(settings, startDate, targetDateStr);
 
@@ -533,20 +535,20 @@ export function calculateMemberRevisionStatus(
 }
 
 /**
- * «المراجعة البعيدة»: is this assignment owed by a member? Its date has come, lies in the cycle,
- * is not paused (a global pause suspends it: no obligation) and not a rest day, and the member had
- * joined his batch by then. Same rule as public.men_complete_distant_review.
+ * «المراجعة البعيدة»: is this assignment owed by a member? Its date has come, lies in the cycle and
+ * the member had joined his batch by then. A scheduled distant review takes priority: a pause or a
+ * rest day on that date does NOT cancel it (only deleting the assignment does). Same rule as
+ * public.men_complete_distant_review.
  */
 export function isDistantReviewOwed(
   assignment: Pick<DistantReviewAssignment, 'review_date'>,
   settings: GroupSettings,
-  restDays: RestDay[],
+  _restDays: RestDay[],
   todayDateStr: string,
   joinedOnDate?: string
 ): boolean {
   const d = assignment.review_date;
   if (d > todayDateStr || d < settings.start_date) return false;
-  if (isPausedDate(settings, d) || restDays.some((r) => r.date === d)) return false;
   return !(joinedOnDate && d < joinedOnDate);
 }
 

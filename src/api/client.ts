@@ -25,6 +25,8 @@ import { buildBatchAdminAlerts, type BatchAdminAlert, type NotificationState } f
 
 // What is stored with a seen/archived notification: its key plus a display snapshot for the history.
 export type NotificationSnapshot = { key: string; kind: string; tone: string; urgent: boolean; title: string; body: string };
+// An admin's dismissed member alert (admin_alert_dismissals; private to that admin).
+export type AlertDismissal = { batchId: string; memberId: string; memberName: string; summary: string; dismissedAt: string };
 import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../../supabase/functions/_shared/men/menRows.ts';
 
 /*
@@ -730,6 +732,38 @@ export const api = {
   async setNotificationFollow(batchId: string, enabled: boolean): Promise<void> {
     const { error } = await supabase.rpc('men_set_notification_batch_follow', { p_batch_id: batchId, p_enabled: enabled });
     if (error) throw dbError(error, 'تعذر حفظ إعدادات التنبيهات');
+  },
+
+  /* Admin: his own dismissed member alerts (RLS: own rows only). */
+  async getAlertDismissals(): Promise<AlertDismissal[]> {
+    const { data, error } = await supabase
+      .from('admin_alert_dismissals')
+      .select('batch_id, member_user_id, member_name, summary, dismissed_at');
+    if (error) throw dbError(error, 'تعذر تحميل التنبيهات المستبعدة');
+    return (data || []).map((r) => ({
+      batchId: r.batch_id,
+      memberId: r.member_user_id,
+      memberName: r.member_name,
+      summary: r.summary,
+      dismissedAt: r.dismissed_at,
+    }));
+  },
+
+  /* Admin: hide one member's alert for himself only (the debt and everything else are unchanged). */
+  async dismissAlert(batchId: string, memberId: string, memberName: string, summary: string): Promise<string> {
+    const { data, error } = await supabase.rpc('men_admin_alert_dismiss', {
+      p_batch_id: batchId,
+      p_member_id: memberId,
+      p_member_name: memberName,
+      p_summary: summary,
+    });
+    if (error) throw dbError(error, 'تعذر إخفاء التنبيه');
+    return data as string;
+  },
+
+  async restoreAlert(batchId: string, memberId: string): Promise<void> {
+    const { error } = await supabase.rpc('men_admin_alert_restore', { p_batch_id: batchId, p_member_id: memberId });
+    if (error) throw dbError(error, 'تعذر استعادة التنبيه');
   },
 
   async adminPeerTestImpact(testId: string): Promise<{ blocked_count: number; blocked_members: { id: string; name: string }[] }> {
