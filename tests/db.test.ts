@@ -673,21 +673,25 @@ test('distant review: SQL program day equals the JS calendar (one, several, cons
   }
 });
 
-test('distant review: one schedule type per date — rest day XOR distant review (database guards)', async () => {
+test('distant review: a rest day and a distant review may share a date (the distant review takes priority)', async () => {
   await db.query('begin');
   try {
     const date = addDays(TODAY, 6);
     await addDistant(date);
-    await fails(db, "insert into group_rest_days(cycle_id, rest_date) values ($1, $2)", [cycle, date], /مجدول كيوم مراجعة بعيدة/);
-    const restDate = addDays(TODAY, 7);
-    await db.query("insert into group_rest_days(cycle_id, rest_date) values ($1, $2)", [cycle, restDate]);
-    await fails(db, 'select public.men_distant_review_save(null, $1, $2, 1, 5, null, $3)', [batch, restDate, id.admin], /يوم استدراك وراحة/);
-    await fails(db, "insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1,$2,$3,1,2)", [cycle, batch, restDate], /يوم استدراك وراحة/);
-    // The admin's own rest-day insert (browser, RLS) is refused with the same message.
+    // A rest day can be added on a distant-review date (the admin's own insert, browser RLS).
     await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: id.admin, role: 'authenticated' })]);
     await db.query('set local role authenticated');
-    await fails(db, "insert into group_rest_days(cycle_id, rest_date, created_by) values ($1, $2, $3)", [cycle, date, id.admin], /مجدول كيوم مراجعة بعيدة/);
+    await db.query("insert into group_rest_days(cycle_id, rest_date, created_by) values ($1, $2, $3)", [cycle, date, id.admin]);
     await db.query('reset role');
+    // A distant review can be scheduled on a rest-day date.
+    const restDate = addDays(TODAY, 7);
+    await db.query("insert into group_rest_days(cycle_id, rest_date) values ($1, $2)", [cycle, restDate]);
+    const saved = (await one('select public.men_distant_review_save(null, $1, $2, 1, 5, null, $3) r', [batch, restDate, id.admin])).r;
+    assert.equal(saved.review_date, restDate);
+    // The calendar counts such a date once (no double subtraction).
+    const dayAfter = (await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, addDays(TODAY, 8)])).n;
+    await db.query('delete from distant_review_assignments where cycle_id=$1 and review_date in ($2, $3)', [cycle, date, restDate]);
+    assert.equal((await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, addDays(TODAY, 8)])).n, dayAfter);
   } finally {
     await db.query('rollback');
   }
@@ -792,13 +796,13 @@ test('distant review completion: owed today or late, idempotent, never future/pa
     await asUser(id.inactive);
     await fails(db, 'select public.men_complete_distant_review($1)', [today], '42501');
     await db.query('reset role');
-    // Paused date: no obligation, no confirmation.
+    // Paused date: the distant review is still owed (a pause does not cancel it).
     const pausedDate = (await one(`select min(d)::date::text d from generate_series($1::date - 20, $1::date - 12, interval '1 day') d
       where not exists (select 1 from group_rest_days r where r.cycle_id=$2 and r.rest_date=d::date)`, [TODAY, cycle])).d as string;
     await db.query("insert into program_pauses(cycle_id,paused_on,resumed_on) values($1,$2,$3)", [cycle, pausedDate, addDays(pausedDate, 1)]);
     const paused = await addDistant(pausedDate, 1, 2);
     await asUser(id.member);
-    await fails(db, 'select public.men_complete_distant_review($1)', [paused], /غير مطلوبة/);
+    assert.equal((await one('select public.men_complete_distant_review($1) r', [paused])).r.already_recorded, false);
     await db.query('reset role');
     // Another batch's day: not his.
     const other = (await one("select public.create_batch_with_cycle('دفعة اختبار بعيدة', $1::date, null) b", [addDays(TODAY, -10)])).b;
@@ -1008,6 +1012,100 @@ test('migration 20261101 (notification state) changes no existing row', async ()
     await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261101000100_men_notification_state.sql', import.meta.url), 'utf8'));
     assert.deepEqual(await snapshot(), before);
     assert.equal((await fresh.query('select count(*)::int n from notification_states')).rows[0].n, 0);
+  } finally {
+    await fresh.close();
+  }
+});
+
+const switchTo = async (uid: string | null) => {
+  await db.query('reset role');
+  if (!uid) return;
+  await db.query("select set_config('request.jwt.claims', $1, true)", [JSON.stringify({ sub: uid, role: 'authenticated' })]);
+  await db.query('set local role authenticated');
+};
+
+test('distant review during an OPEN global pause: owed and completable today; normal progression paused', async () => {
+  await db.query('begin');
+  try {
+    await db.query("update program_pauses set resumed_on=$2::date where cycle_id=$1 and resumed_on is null", [cycle, addDays(TODAY, -3)]);
+    await db.query("insert into program_pauses(cycle_id, paused_on) values ($1, $2::date)", [cycle, addDays(TODAY, -1)]);
+    const dayBefore = (await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, addDays(TODAY, -2)])).n;
+    const a = await addDistant(TODAY, 1, 4);
+    assert.equal((await one('select app_private.men_cycle_day($1, $2::date) n', [cycle, TODAY])).n, dayBefore, 'no new program day while paused');
+    await switchTo(id.member);
+    const r = (await one('select public.men_complete_distant_review($1) r', [a])).r;
+    assert.equal(r.already_recorded, false);
+    assert.equal((await one('select public.men_complete_distant_review($1) r', [a])).r.already_recorded, true, 'idempotent: one completion');
+    await switchTo(null);
+    assert.equal(await n(db, 'select 1 from distant_review_completions where assignment_id=$1', [a]), 1);
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('admin alert dismissals: per admin, own rows only, restorable; members and anon cannot', async () => {
+  await db.query('begin');
+  try {
+    const masters = (await db.query("select id from profiles where role='admin' and is_master_admin and active order by firestore_id")).rows.map((r: any) => r.id);
+    const m1 = masters[0];
+    const admin2 = (await one("select id from profiles where role='admin' and id<>$1 order by firestore_id limit 1", [m1]))?.id;
+    assert.ok(admin2);
+    await db.query('update profiles set is_master_admin=false, active=true where id=$1', [admin2]);
+    await db.query('select public.set_admin_batches($1, $2::uuid[], $3)', [admin2, [batch], m1]);
+    await switchTo(m1);
+    await db.query("select public.men_admin_alert_dismiss($1, $2, 'عضو', 'ملخص')", [batch, id.member]);
+    await db.query("select public.men_admin_alert_dismiss($1, $2, 'عضو', 'ملخص 2')", [batch, id.member]);
+    assert.equal(await n(db, 'select 1 from admin_alert_dismissals'), 1, 'one row per admin + member');
+    await fails(db, "insert into admin_alert_dismissals(admin_user_id, batch_id, member_user_id) values ($1,$2,$3)", [m1, batch, id.peer], '42501');
+    await fails(db, "select public.men_admin_alert_dismiss($1, $2, '', '')", [batch, m1], 'P0002');
+    // Another admin does not see it and cannot restore it (his own state is independent).
+    await switchTo(admin2);
+    assert.equal(await n(db, 'select 1 from admin_alert_dismissals'), 0);
+    assert.equal((await one('select public.men_admin_alert_restore($1, $2) r', [batch, id.member])).r, false);
+    await switchTo(null);
+    assert.equal(await n(db, 'select 1 from admin_alert_dismissals where admin_user_id=$1', [m1]), 1, 'the other admin did not touch it');
+    // Restore clears the dismissal and this admin's "opened" marks of that member's alert.
+    await switchTo(m1);
+    await db.query('select public.men_notification_archive($1::jsonb)', [JSON.stringify({ key: `alert:${batch}:${id.member}:t5`, kind: 'admin-member', tone: 'serious', urgent: true, title: 'x', body: 'y' })]);
+    assert.equal((await one('select public.men_admin_alert_restore($1, $2) r', [batch, id.member])).r, true);
+    assert.equal(await n(db, 'select 1 from admin_alert_dismissals'), 0);
+    assert.equal(await n(db, "select 1 from notification_states where notification_key like 'alert:%'"), 0);
+    await switchTo(null);
+    // A batch admin may dismiss only in his batches; members and anon never.
+    const b2 = (await db.query("select public.create_batch_with_cycle('دفعة بلا مشرف', $1::date, $2) r", [TODAY, m1])).rows[0].r.id;
+    await db.query('select public.move_member_batch($1,$2,null,$3)', [id.peer, b2, m1]);
+    await switchTo(admin2);
+    await fails(db, "select public.men_admin_alert_dismiss($1, $2, '', '')", [b2, id.peer], '42501');
+    await switchTo(id.member);
+    await fails(db, "select public.men_admin_alert_dismiss($1, $2, '', '')", [batch, id.inactive], '42501');
+    assert.equal(await n(db, 'select 1 from admin_alert_dismissals'), 0);
+    await switchTo(null);
+    await db.query("select set_config('request.jwt.claims', '', true)");
+    await db.query('set local role anon');
+    await fails(db, 'select 1 from admin_alert_dismissals', [], '42501');
+    await db.query('reset role');
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('migration 20261102 (distant priority, alert dismissals) changes no existing row and no program day', async () => {
+  const { createCutoverDb: build } = await import('../migration/cutover/harness.mjs');
+  const fs = await import('node:fs');
+  const { db: fresh }: { db: any } = await (build as any)(BACKUP, { stopBefore: '20261102000100' });
+  try {
+    const tables = ['profiles', 'batches', 'batch_memberships', 'cycles', 'group_rest_days', 'program_pauses', 'tasmia_submissions', 'review_confirmations',
+      'peer_tests', 'peer_test_attempts', 'daily_thoughts', 'distant_review_assignments', 'distant_review_completions', 'notification_states', 'admin_notification_batch_subscriptions'];
+    const snapshot = async () => {
+      const out: Record<string, string> = {};
+      for (const t of tables) out[t] = (await fresh.query(`select count(*)::text || ':' || coalesce(md5(string_agg(x::text, '|' order by x::text)), '') h from public.${t} x`)).rows[0].h;
+      const c = (await fresh.query("select id from cycles where status='active'")).rows[0].id;
+      out.days = (await fresh.query("select string_agg(app_private.men_cycle_day($1, d::date)::text, ',' order by d) h from generate_series('2026-09-10'::date, '2027-06-30'::date, interval '1 day') d", [c])).rows[0].h;
+      return out;
+    };
+    const before = await snapshot();
+    await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261102000100_men_distant_review_priority_and_alert_dismissals.sql', import.meta.url), 'utf8'));
+    assert.deepEqual(await snapshot(), before);
   } finally {
     await fresh.close();
   }

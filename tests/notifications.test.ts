@@ -23,9 +23,11 @@ import {
 import { computeMemberDelayStatus } from '../supabase/functions/_shared/logic/memberDelayStatus.ts';
 import {
   buildBatchAdminAlerts,
+  adminAlertText,
   buildMemberNotifications,
   debtLevel,
   isUnread,
+  panelSeenKeys,
   SERIOUS_DEBT_THRESHOLD,
 } from '../supabase/functions/_shared/logic/notifications.ts';
 import { computeBatchDelays } from '../supabase/functions/_shared/men/batchDelays.ts';
@@ -173,9 +175,9 @@ function memberAt(instant: Date, w: World) {
   const distant = calculateMemberDistantReviewStatus('m', cycleInfo.has_started ? w.distant ?? [] : [], w.completions ?? [], settings, restDays, today, joined);
   // Tomorrow's schedule, as MemberDashboard reads it.
   const tomorrow = addDays(today, 1);
-  const tomorrowApplies = tomorrow >= cycleInfo.start_date && !isPausedDate(settings, tomorrow) && !(joined && tomorrow < joined);
-  const tRest = tomorrowApplies ? restDays.find((r) => r.date === tomorrow) : undefined;
-  const tDistant = tomorrowApplies && !tRest && (w.isActive ?? true) ? (w.distant ?? []).find((a) => a.review_date === tomorrow) : undefined;
+  const tomorrowInCycle = tomorrow >= cycleInfo.start_date && !(joined && tomorrow < joined);
+  const tDistant = tomorrowInCycle && (w.isActive ?? true) ? (w.distant ?? []).find((a) => a.review_date === tomorrow) : undefined;
+  const tRest = tomorrowInCycle && !tDistant && !isPausedDate(settings, tomorrow) ? restDays.find((r) => r.date === tomorrow) : undefined;
   const notifications = buildMemberNotifications({
     batchId: 'b',
     today,
@@ -441,15 +443,17 @@ test('batch admin: no alert at 1 or 2 missed days; one alert per category at 3+ 
     ...reviews('both', without(allDates, '2026-10-21', '2026-10-22', '2026-10-23')),
   ];
   const alerts = batchAlertsAt(NOON, users, recitations, revisions);
+  // ONE card per member; each serious category is its own line.
   assert.deepEqual(
-    alerts.map((a) => `${a.memberName}|${a.phone}|${a.category}|${a.count}|${a.eligibleForExclusion}`).sort(),
+    alerts.map((a) => `${a.memberName}|${a.phone}|${a.issues.map((i) => i.category + ':' + i.count).join('+')}|${a.eligibleForExclusion}`).sort(),
     [
-      'خالد محمود|01087654321|revision|3|false',
-      'عمر علي|01011112222|revision|3|false',
-      'عمر علي|01011112222|tasmia|4|true',
-      'محمد أحمد|01012345678|tasmia|3|false',
+      'خالد محمود|01087654321|revision:3|false',
+      'عمر علي|01011112222|tasmia:4+revision:3|true',
+      'محمد أحمد|01012345678|tasmia:3|false',
     ]
   );
+  const both = alerts.find((a) => a.memberId === 'both')!;
+  assert.deepEqual(adminAlertText(both).body.split(' • ').slice(2), ['4 أيام متأخرة في التسميع', '3 أيام متأخرة في المراجعة الذاتية']);
   assert.ok(alerts.every((a) => a.batchId === 'A' && a.batchName === 'الدفعة أ'));
   // The same rule as the dashboards' «مؤهل للإقصاء» (unchanged, 4+).
   const d = computeMemberDelayStatus({ memberId: 'both', quarterOfDay: 9, activeCycleDates: allDates, recitations, revisions, todayDate: '2026-10-28', joinedOnDate: '2026-10-19' });
@@ -462,7 +466,7 @@ test('batch admin: the alert appears at 05:00 Cairo and disappears when the memb
   // Quarters 6 and 7 missed; quarter 8 (27 Oct) still open at 04:59:59 on 28 Oct.
   const recs = tasmia('m3', [1, 2, 3, 4, 5]);
   assert.deepEqual(batchAlertsAt(BEFORE, users, recs, revisions), []);
-  assert.deepEqual(batchAlertsAt(AT, users, recs, revisions).map((a) => `${a.category}:${a.count}`), ['tasmia:3']);
+  assert.deepEqual(batchAlertsAt(AT, users, recs, revisions).map((a) => a.issues.map((i) => `${i.category}:${i.count}`).join()), ['tasmia:3']);
   assert.deepEqual(batchAlertsAt(AT, users, tasmia('m3', [1, 2, 3, 4, 5, 6]), revisions), [], 'below 3 again → no alert');
 });
 
@@ -500,10 +504,11 @@ test('keys: one key per condition (no duplicates across refreshes), a new key fo
   assert.equal(at([4, 5, 6]), 'b:b:tasmia:serious:q4');
   assert.equal(at([4, 5, 6, 7]), at([4, 5, 6]), 'still serious, same episode: same key (3 → 4 days)');
   assert.notEqual(at([5, 6]), at([4, 5, 6]), 'caught up below 3: a different notification');
-  // Admin alert keys: batch + member + category + episode (first missed quarter).
-  const k = (recs: number[]) => batchAlertsAt(NOON, [member('x', 'عضو', '010')], tasmia('x', recs), reviews('x', allDates))[0]?.key;
-  assert.equal(k([1, 2, 3, 4, 5]), 'alert:A:x:tasmia:6');
-  assert.equal(k([1, 2, 3, 4]), 'alert:A:x:tasmia:5');
+  // Admin alert keys: batch + member + each serious category's episode (first missed day).
+  const k = (recs: number[], revs = allDates) => batchAlertsAt(NOON, [member('x', 'عضو', '010')], tasmia('x', recs), reviews('x', revs))[0]?.key;
+  assert.equal(k([1, 2, 3, 4, 5]), 'alert:A:x:t6');
+  assert.equal(k([1, 2, 3, 4]), 'alert:A:x:t5');
+  assert.equal(k([1, 2, 3, 4, 5], without(allDates, '2026-10-21', '2026-10-22', '2026-10-23')), 'alert:A:x:t6|r2026-10-21');
   // Today's/tomorrow's schedule notices are keyed by date.
   const r = memberAt(AT, { restDays: [rest('2026-10-28')], recitations: tasmia('m', [1, 2, 3, 4, 5, 6, 7, 8]), revisions: reviews('m', datesUpTo('2026-10-27')) });
   assert.equal(r.notifications[0].key, 'b:b:rest:2026-10-28');
@@ -511,21 +516,21 @@ test('keys: one key per condition (no duplicates across refreshes), a new key fo
   assert.equal(t.notifications[0].key, 'b:b:rest-tomorrow:2026-10-28');
 });
 
-test('unread rule: opening the panel (seen) reads non-urgent ones only; clicking (archived) reads everything', () => {
+test('unread rule: opening the panel marks only non-urgent ones seen; clicking reads the urgent one', () => {
   const urgent = { key: 'u', urgent: true };
   const normal = { key: 'n', urgent: false };
-  assert.equal(isUnread(urgent, undefined), true);
-  assert.equal(isUnread(normal, undefined), true);
-  const seen = { seenAt: '2026-10-28T03:00:00Z', archivedAt: null };
-  assert.equal(isUnread(urgent, seen), true, 'urgent stays unread when the panel is merely opened');
-  assert.equal(isUnread(normal, seen), false);
-  const archived = { seenAt: '2026-10-28T03:00:00Z', archivedAt: '2026-10-28T03:01:00Z' };
-  assert.equal(isUnread(urgent, archived), false);
-  assert.equal(isUnread(normal, archived), false);
-  // Badge example: urgent 3-day review + tomorrow's rest day → 2; after opening the panel → 1.
-  const items = [urgent, normal];
-  assert.equal(items.filter((i) => isUnread(i, undefined)).length, 2);
-  assert.equal(items.filter((i) => isUnread(i, seen)).length, 1);
+  const states = new Map<string, { seenAt: string | null; archivedAt: string | null }>();
+  const unread = () => [urgent, normal].filter((i) => isUnread(i, states.get(i.key))).length;
+  assert.equal(unread(), 2, 'badge example: urgent 3-day review + tomorrow rest day → 2');
+  // Opening the panel.
+  assert.deepEqual(panelSeenKeys([urgent, normal], states), ['n']);
+  for (const k of panelSeenKeys([urgent, normal], states)) states.set(k, { seenAt: 'now', archivedAt: null });
+  assert.equal(unread(), 1, 'after opening the panel → 1 (the urgent one)');
+  assert.deepEqual(panelSeenKeys([urgent, normal], states), [], 'opening again changes nothing');
+  // Clicking the urgent one (member: seen and kept active; admin: archived).
+  states.set('u', { seenAt: 'now', archivedAt: null });
+  assert.equal(unread(), 0);
+  assert.equal(isUnread(urgent, { seenAt: 'now', archivedAt: 'now' }), false);
 });
 
 test('05:00 Cairo: "tomorrow" is the next program date (at 00:30 Cairo the 28th is still tomorrow)', () => {
@@ -534,4 +539,81 @@ test('05:00 Cairo: "tomorrow" is the next program date (at 00:30 Cairo the 28th 
   assert.deepEqual(kinds(memberAt(cairo('2026-10-27', '04:59:59', 3), w)), [], 'on program date 26 the 28th is not tomorrow');
   const paused = memberAt(cairo('2026-10-27', '12:00:00', 3), { ...w, settings: settingsOf({ is_paused: true, paused_at: '2026-10-27' }) });
   assert.ok(!paused.notifications.some((n) => n.kind === 'rest-tomorrow'), 'no tomorrow notice while the program is paused');
+});
+
+// ---------------------------------------------------------------------------------------------
+// Member 3+ warnings stay active; admin cards are grouped per member
+// ---------------------------------------------------------------------------------------------
+
+test('member: a 3+ warning is persistent (stays active after a click) until that category falls below 3', () => {
+  const at = (tasMissing: number[], revMissing: string[]) =>
+    memberAt(NOON, { recitations: tasmia('m', without(allQuarters, ...tasMissing)), revisions: reviews('m', without(allDates, ...revMissing)) }).notifications;
+  // 3 Tasmi'a + 4 review: two separate persistent warnings (never merged).
+  const both = at([4, 5, 6], ['2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24']);
+  assert.deepEqual(both.map((n) => `${n.kind}:${n.persistent}`).sort(), ['revision-overdue:true', 'tasmia-overdue:true']);
+  // Tasmi'a back to 2: only the review one stays serious; the Tasmi'a one is a normal (non-persistent) warning.
+  const after = at([5, 6], ['2026-10-21', '2026-10-22', '2026-10-23', '2026-10-24']);
+  assert.deepEqual(after.map((n) => `${n.kind}:${n.tone}:${n.persistent}`).sort(), ['revision-overdue:serious:true', 'tasmia-overdue:strong:false']);
+  // Informational notices never persist.
+  const info = memberAt(AT, { restDays: [rest('2026-10-28')], recitations: tasmia('m', [1, 2, 3, 4, 5, 6, 7, 8]), revisions: reviews('m', datesUpTo('2026-10-27')) });
+  assert.ok(info.notifications.every((n) => !n.persistent));
+});
+
+test('admin: one card per member — both categories in the same card, counted once', () => {
+  const users = [member('a', 'أحمد عادل', '01011111111'), member('b', 'بلال', '01022222222')];
+  const recs = [...tasmia('a', [1, 2, 3, 4, 5]), ...tasmia('b', allQuarters)];
+  const revs = [...reviews('a', without(allDates, '2026-10-21', '2026-10-22', '2026-10-23')), ...reviews('b', without(allDates, '2026-10-24', '2026-10-25', '2026-10-26'))];
+  const alerts = batchAlertsAt(NOON, users, recs, revs);
+  assert.equal(alerts.length, 2, 'Ahmed (2 categories) + Bilal (1) = 2 cards, not 3');
+  const ahmed = alerts.find((x) => x.memberId === 'a')!;
+  assert.deepEqual(ahmed.issues, [{ category: 'tasmia', count: 3 }, { category: 'revision', count: 3 }]);
+  assert.equal(new Set(alerts.map((x) => x.key)).size, 2);
+});
+
+// ---------------------------------------------------------------------------------------------
+// «المراجعة البعيدة» takes priority over pauses and rest days
+// ---------------------------------------------------------------------------------------------
+
+test('distant review on a globally paused day: still today\'s obligation; normal progression stays paused', () => {
+  const a = assignment('2026-10-28', 1, 9, 'رغم الإيقاف');
+  const settings = settingsOf({ is_paused: true, paused_at: '2026-10-26', distant_review_dates: ['2026-10-28'] });
+  const w: World = { settings, distant: [a], recitations: tasmia('m', [1, 2, 3, 4, 5, 6]), revisions: reviews('m', datesUpTo('2026-10-25')) };
+  const r = memberAt(NOON, w);
+  assert.equal(r.cycleInfo.is_distant_review_day, true);
+  assert.equal(r.cycleInfo.quarter_of_day, 6, 'paused since the 26th: no new quarter');
+  assert.equal(r.revision.isTodayProgramDay, false, 'no new normal review');
+  assert.equal(r.distant.todayAssignment?.id, a.id, 'the distant review is owed');
+  assert.deepEqual(kinds(r), ['distant-day:distant']);
+  // Not done by the next 05:00 → its own overdue debt, even though the program is still paused.
+  const next = memberAt(cairo('2026-10-29', '12:00:00', 3), w);
+  assert.deepEqual(next.distant.overdue.map((x) => x.id), [a.id]);
+  // A recorded (closed) pause period on that date does not cancel it either.
+  const closed = memberAt(NOON, { ...w, settings: settingsOf({ pause_periods: [{ from: '2026-10-28', to: '2026-10-28' }], distant_review_dates: ['2026-10-28'] }) });
+  assert.equal(closed.distant.todayAssignment?.id, a.id);
+});
+
+test('distant review on a rest day: still required; the rest day keeps normal progression paused', () => {
+  const a = assignment('2026-10-28', 5, 12);
+  const w: World = {
+    restDays: [rest('2026-10-28', 'راحة')],
+    distant: [a],
+    recitations: tasmia('m', [1, 2, 3, 4, 5, 6, 7, 8]),
+    revisions: reviews('m', datesUpTo('2026-10-27')),
+  };
+  const r = memberAt(NOON, w);
+  assert.equal(r.cycleInfo.is_rest_day, true);
+  assert.equal(r.cycleInfo.is_distant_review_day, true);
+  assert.equal(r.cycleInfo.quarter_of_day, 8, 'counted once: no new quarter, no double subtraction');
+  assert.equal(r.distant.todayAssignment?.id, a.id);
+  assert.deepEqual(kinds(r), ['distant-day:distant'], 'the distant review takes priority over the rest-day notice');
+  // Tomorrow: the distant-review notice, not the rest-day one.
+  assert.deepEqual(kinds(memberAt(cairo('2026-10-27', '12:00:00', 3), { ...w, recitations: tasmia('m', [1, 2, 3, 4, 5, 6, 7]), revisions: reviews('m', datesUpTo('2026-10-26')) })), ['distant-tomorrow:distant']);
+});
+
+test('deleting the (future) assignment removes the distant-review obligation', () => {
+  const w: World = { distant: [], recitations: tasmia('m', [1, 2, 3, 4, 5, 6, 7, 8, 9]), revisions: reviews('m', allDates) };
+  const r = memberAt(NOON, w);
+  assert.equal(r.cycleInfo.is_distant_review_day, false);
+  assert.equal(r.distant.todayAssignment, null);
+  assert.deepEqual(kinds(r), []);
 });
