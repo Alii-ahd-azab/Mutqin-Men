@@ -5,7 +5,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   evaluateCandidate,
-  eliminationReason,
+  tasmiaDelayReason,
   isInAudience,
   isPeerTestLive,
   nextTasmiaQuarter,
@@ -15,7 +15,7 @@ import { computeMemberDelayStatus, SEVERE_DELAY_THRESHOLD, type MemberDelayStatu
 import { buildSettings, mapUser } from '../supabase/functions/_shared/men/menRows.ts';
 
 const cycle = { id: 'c', batch_id: 'b', cycle_number: 1, starts_on: '2026-09-17', status: 'active', total_quarters: 240, review_window: 8, legacy_paused_days: 6, created_at: '2026-09-01T00:00:00Z' };
-const test8 = { range_start: 1, range_end: 8, require_all_quarters_completed: false, require_revision_completed: false };
+const test8 = { range_start: 1, range_end: 8, require_all_quarters_completed: false };
 const okDelay: MemberDelayStatus = {
   requiredQuarter: 9,
   isBehind: false,
@@ -108,18 +108,17 @@ test('candidate: Men partial range, full range requirement, passes and audience'
   assert.equal(fullPass.is_eligible, false);
 });
 
-test('candidate: «مؤهل للإقصاء» blocks the candidate (Sisters rule) with a masculine reason; revision prerequisite', () => {
+test('candidate: severe Tasmi\'a delay blocks with a masculine reason; severe review delay does not (tests/eligibility.test.ts)', () => {
   const eliminable = { ...okDelay, missedQuartersCount: 4, isSeverelyBehindRecitation: true, isSeverelyBehind: true, severeReasons: ['recitation' as const] };
-  assert.equal(eliminationReason(eliminable), 'مؤهل للإقصاء بسبب تأخر التسميع (4 أرباع فائتة)');
+  assert.equal(tasmiaDelayReason(eliminable), 'مؤهل للإقصاء بسبب تأخر التسميع (4 أرباع فائتة)');
   const r = evaluateCandidate({ test: test8, completedQuarters: quarters(1, 2), passedAttempts: [], delay: eliminable, inAudience: true });
   assert.equal(r.is_eligible, false);
   assert.equal(r.is_eliminable, true);
 
-  const rev = { ...test8, require_revision_completed: true };
-  const base = { test: rev, completedQuarters: quarters(1), passedAttempts: [], delay: okDelay, inAudience: true };
-  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true } }).is_eligible, true);
-  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 1, hasReviewedToday: true } }).is_eligible, false);
-  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: false } }).is_eligible, false);
+  const behindInReviews = { ...okDelay, missedRevisionDaysCount: 6, isSeverelyBehindRevision: true, isSeverelyBehind: true, severeReasons: ['revision' as const] };
+  const e = evaluateCandidate({ test: test8, completedQuarters: quarters(1, 2), passedAttempts: [], delay: behindInReviews, inAudience: true });
+  assert.equal(e.is_eligible, true);
+  assert.equal(e.is_eliminable, true);
 });
 
 test('question generation stays inside the (effective) range with Mushaf geometry', () => {
@@ -425,19 +424,6 @@ test('distant review: normal historical overdue reviews are unaffected', () => {
   const logs = ['2026-10-01', '2026-10-02', '2026-10-04', '2026-10-06'].map((d) => review(p, d)); // Oct 3 missed
   const s = status(p, logs, '2026-10-07');
   assert.deepEqual(s.pastMissedDates, ['2026-10-03']);
-});
-
-test("peer test with require_revision_completed: distant-review debt blocks, today's distant review replaces the daily one", () => {
-  const t = { ...test8, require_revision_completed: true };
-  const base = { test: t, completedQuarters: quarters(1, 2, 3, 4, 5, 6, 7, 8), passedAttempts: [], delay: okDelay, inAudience: true };
-  assert.equal(evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true } }).is_eligible, true);
-  const overdue = evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true, distantOverdueCount: 2 } });
-  assert.equal(overdue.is_eligible, false);
-  assert.match(overdue.reasons.join(' '), /مراجعات بعيدة متأخرة \(2\)/);
-  const todayPending = evaluateCandidate({ ...base, revision: { missedRevisionDaysCount: 0, hasReviewedToday: true, distantTodayPending: true } });
-  assert.match(todayPending.reasons.join(' '), /المراجعة البعيدة لليوم/);
-  // Without the prerequisite, distant debt does not matter.
-  assert.equal(evaluateCandidate({ ...base, test: test8, revision: undefined }).is_eligible, true);
 });
 
 test("settings mapping carries this cycle's distant-review dates (sorted), absent when none", () => {

@@ -8,6 +8,7 @@ import type {
   CycleInfo,
   DistantReviewAssignment,
   DistantReviewCompletion,
+  VoidedDailyRecord,
 } from '../supabase/functions/_shared/logic/programTypes.ts';
 
 // Core program types live in the shared folder so the Edge Functions use the same definitions.
@@ -21,6 +22,7 @@ export type {
   CycleInfo,
   DistantReviewAssignment,
   DistantReviewCompletion,
+  VoidedDailyRecord,
 };
 
 // Admin form for one «المراجعة البعيدة» day
@@ -114,6 +116,8 @@ export interface BatchBootstrap {
   // «المراجعة البعيدة»: the batch's scheduled days (all cycles) and the completions the user may see
   distantReviews: DistantReviewAssignment[];
   distantCompletions: DistantReviewCompletion[];
+  // Normal submissions of a cancelled program day (see VoidedDailyRecord), visible through RLS
+  voidedRecords: VoidedDailyRecord[];
   // Peer tests of the cycle (members only receive live ones via RLS)
   peerTests: PeerTest[];
   // Attempts the user may see (members: their own as candidate/examiner)
@@ -151,7 +155,6 @@ export interface PeerTest {
   audience: PeerTestAudience;
   selected_member_ids: string[];
   require_all_quarters_completed: boolean;
-  require_revision_completed: boolean;
 }
 
 export type PeerTestAttemptStatus = 'in_progress' | 'passed' | 'failed' | 'cancelled';
@@ -245,6 +248,5 @@ export interface PeerTestSaveInput {
   audience: PeerTestAudience;
   selected_member_ids: string[];
   require_all_quarters_completed: boolean;
-  require_revision_completed: boolean;
 }
 

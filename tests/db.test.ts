@@ -1110,3 +1110,575 @@ test('migration 20261102 (distant priority, alert dismissals) changes no existin
     await fresh.close();
   }
 });
+
+// ---------------------------------------------------------------------------------------------
+// Turning TODAY into a «المراجعة البعيدة» day (men_distant_review_create_today, voided_daily_records)
+// ---------------------------------------------------------------------------------------------
+type SameDay = { b: string; c: string; a: string; bb: string; l: string; day: number };
+let phoneSeq = 910;
+
+// A member of a temporary batch (rolled back with the test), joined since the batch started.
+async function sdMember(b: string, joinedOn: string): Promise<string> {
+  const phone = '000000000' + phoneSeq++;
+  const uid = (await one("insert into auth.users(id, email) values (gen_random_uuid(), $1 || '@members.mutqin.local') returning id", [phone])).id;
+  await db.query("select public.create_profile_with_membership($1, $2, $3, 'member', false, $4, '{}'::uuid[], null)", [uid, 'SD ' + phone, phone, b]);
+  await db.query('update batch_memberships set joined_at=$2::timestamptz where user_id=$1', [uid, joinedOn + 'T12:00:00+03:00']);
+  return uid;
+}
+
+// A temporary batch whose today is program day startDaysAgo + 1 (no day off), with three members.
+// Every statement runs in one transaction that is rolled back.
+async function sameDay(fn: (w: SameDay) => Promise<void>, startDaysAgo = 9) {
+  await db.query('begin');
+  try {
+    const start = addDays(TODAY, -startDaysAgo);
+    const created = (await one("select public.create_batch_with_cycle('دفعة اليوم', $1::date, null) b", [start])).b;
+    const c = (await one("select id from cycles where batch_id=$1 and status='active'", [created.id])).id;
+    const a = await sdMember(created.id, start);
+    const bb = await sdMember(created.id, start);
+    const l = await sdMember(created.id, start);
+    await fn({ b: created.id, c, a, bb, l, day: startDaysAgo + 1 });
+  } finally {
+    await db.query('rollback');
+  }
+}
+const createToday = (w: SameDay, s = 1, e = 9) =>
+  one('select public.men_distant_review_create_today($1, $2, $3, $4, $5, $6) r', [w.b, TODAY, s, e, null, id.admin]).then((x) => x.r);
+// Quarters from..to recited in order; all but today's quarter are moved back to their own date.
+async function recite(w: SameDay, user: string, from: number, to: number, listener = w.l) {
+  for (let q = from; q <= to; q++) {
+    await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number, notes) values ($1,$2,$3,$4,$5)', [w.c, user, listener, q, 'ملاحظة ' + q]);
+    if (q < w.day) {
+      const date = addDays(TODAY, q - w.day);
+      await db.query("update tasmia_submissions set legacy_date=$3::date, submitted_at=$4::timestamptz where cycle_id=$1 and user_id=$2 and quarter_number=$5", [w.c, user, date, date + 'T12:00:00+03:00', q]);
+    }
+  }
+}
+// Reviews of days from..to, each on its own date.
+async function review(w: SameDay, user: string, from: number, to: number) {
+  for (let d = from; d <= to; d++) await db.query('insert into review_confirmations(cycle_id, user_id, legacy_date, notes) values ($1,$2,$3,$4)', [w.c, user, addDays(TODAY, d - w.day), 'ن ' + d]);
+}
+const liveQuarters = async (w: SameDay, user: string) =>
+  ((await db.query('select quarter_number q from tasmia_submissions where cycle_id=$1 and user_id=$2 order by 1', [w.c, user])).rows as any[]).map((r) => r.q);
+const liveReviewDays = async (w: SameDay, user: string) =>
+  ((await db.query('select end_quarter q from review_confirmations where cycle_id=$1 and user_id=$2 order by 1', [w.c, user])).rows as any[]).map((r) => r.q);
+const cycleDay = (c: string, date: string) => one('select app_private.men_cycle_day($1, $2::date) n', [c, date]).then((x) => x.n as number);
+// The clock moves on: men_today() is replaced inside the rolled-back transaction.
+const setProgramDate = (date: string) =>
+  db.query(`create or replace function app_private.men_today() returns date language sql stable set search_path to '' as $f$ select '${date}'::date $f$`);
+
+// The real rows and the real shared code: what the dashboards compute for this member on this date.
+async function statusFromDb(c: string, user: string, date: string, joinedOn?: string, startQuarter?: number) {
+  const { computeMemberDelayStatus } = await import('../src/lib/calculations');
+  const { buildSettings, mapRestDays } = await import('../supabase/functions/_shared/men/menRows.ts');
+  const cy = await one('select id, batch_id, cycle_number, starts_on::text starts_on, status, total_quarters, review_window, legacy_paused_days, created_at::text from cycles where id=$1', [c]);
+  const pauses = (await db.query('select paused_on::text paused_on, resumed_on::text resumed_on from program_pauses where cycle_id=$1', [c])).rows as any[];
+  const rest = (await db.query('select id, firestore_id, rest_date::text rest_date, reason, created_by, created_by_name_snapshot, created_at::text from group_rest_days where cycle_id=$1', [c])).rows as any[];
+  const distant = ((await db.query('select review_date::text d from distant_review_assignments where cycle_id=$1', [c])).rows as any[]).map((r) => r.d as string);
+  const settings = buildSettings(cy, pauses, null, distant);
+  const restDays = mapRestDays(rest);
+  const info = calculateCycleInfo(settings, restDays, date);
+  const { getActiveCycleDates } = await import('../src/lib/calculations');
+  const activeCycleDates = getActiveCycleDates(settings.start_date, date, restDays, settings);
+  const recitations = (await db.query('select user_id member_id, quarter_number from tasmia_submissions where cycle_id=$1 and user_id=$2', [c, user])).rows as any[];
+  const revisions = (await db.query('select user_id member_id, legacy_date::text date, end_quarter review_end_quarter from review_confirmations where cycle_id=$1 and user_id=$2', [c, user])).rows as any[];
+  return { info, settings, restDays, delay: computeMemberDelayStatus({ memberId: user, quarterOfDay: info.quarter_of_day, activeCycleDates, recitations, revisions, todayDate: date, joinedOnDate: joinedOn, startQuarter, calendar: settings }) };
+}
+
+test('same-day A/B: service role only; the future path still refuses today; validations hold', async () => {
+  for (const uid of [id.admin, id.member, null])
+    await as(uid, (tx) => fails(tx, 'select public.men_distant_review_create_today($1, $2, 1, 9, null, $3)', [batch, TODAY, id.admin], '42501'));
+  await sameDay(async (w) => {
+    await fails(db, 'select public.men_distant_review_save(null, $1, $2, 1, 9, null, $3)', [w.b, TODAY, id.admin], /في المستقبل/);
+    // A future day still works as before and cancels nothing.
+    const future = (await one('select public.men_distant_review_save(null, $1, $2, 1, 9, null, $3) r', [w.b, addDays(TODAY, 3), id.admin])).r;
+    assert.equal(future.cancelled_program_day, null);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 0);
+    // An existing future day cannot be edited onto today.
+    await fails(db, 'select public.men_distant_review_save($1, $2, $3, 1, 9, null, $4)', [future.id, w.b, TODAY, id.admin], /في المستقبل/);
+    // Only today, a valid range, once.
+    await fails(db, 'select public.men_distant_review_create_today($1, $2, 1, 9, null, $3)', [w.b, addDays(TODAY, -1), id.admin], /تغيّر يوم البرنامج/);
+    await fails(db, 'select public.men_distant_review_create_today($1, $2, 1, 9, null, $3)', [w.b, addDays(TODAY, 1), id.admin], /تغيّر يوم البرنامج/);
+    await fails(db, 'select public.men_distant_review_create_today($1, $2, 9, 9, null, $3)', [w.b, TODAY, id.admin], /نطاق الأرباع/);
+    const r = await createToday(w);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [0, 0]);
+    assert.equal(r.assignment.review_date, TODAY);
+    assert.equal(r.assignment.cancelled_program_day, w.day);
+    assert.ok(r.assignment.created_by_name_snapshot);
+    await fails(db, 'select public.men_distant_review_create_today($1, $2, 1, 9, null, $3)', [w.b, TODAY, id.admin], '23505');
+  });
+});
+
+test('same-day C/D: today returns to N, the next active day is exactly N+1, earlier days do not move', async () => {
+  await sameDay(async (w) => {
+    const before = await Promise.all([-3, -2, -1].map((d) => cycleDay(w.c, addDays(TODAY, d))));
+    assert.equal(await cycleDay(w.c, TODAY), 10);
+    await createToday(w);
+    assert.equal(await cycleDay(w.c, TODAY), 9);
+    assert.equal(await cycleDay(w.c, addDays(TODAY, 1)), 10);
+    assert.equal(await cycleDay(w.c, addDays(TODAY, 2)), 11);
+    assert.deepEqual(await Promise.all([-3, -2, -1].map((d) => cycleDay(w.c, addDays(TODAY, d)))), before);
+  });
+});
+
+test('same-day E/F/H/I: only today\'s normal rows move, with every detail; catch-up and other batches stay', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 10);
+    await review(w, w.a, 1, 10);
+    // Catch-up done today: quarter 6 and the review of day 4 carry today's timestamps; they stay.
+    await recite(w, w.bb, 1, 5);
+    await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,6)', [w.c, w.bb, w.l]);
+    await db.query('insert into review_confirmations(cycle_id, user_id, legacy_date) values ($1,$2,$3)', [w.c, w.bb, addDays(TODAY, -6)]);
+    // Another batch's rows with the same numbers stay.
+    const other = (await one("select public.create_batch_with_cycle('دفعة أخرى', $1::date, null) b", [addDays(TODAY, -9)])).b;
+    const otherCycle = (await one("select id from cycles where batch_id=$1 and status='active'", [other.id])).id;
+    const ow: SameDay = { b: other.id, c: otherCycle, a: await sdMember(other.id, addDays(TODAY, -9)), bb: '', l: await sdMember(other.id, addDays(TODAY, -9)), day: 10 };
+    await recite(ow, ow.a, 1, 10);
+    await review(ow, ow.a, 10, 10);
+
+    const original = await one('select id, listener_id, listener_name_snapshot, member_name_snapshot, submitted_at, notes from tasmia_submissions where cycle_id=$1 and user_id=$2 and quarter_number=10', [w.c, w.a]);
+    const originalReview = await one('select id, start_quarter, end_quarter, confirmed_at, notes, member_name_snapshot, legacy_date::text legacy_date from review_confirmations where cycle_id=$1 and user_id=$2 and legacy_date=$3', [w.c, w.a, TODAY]);
+    assert.equal(originalReview.end_quarter, 10);
+
+    const r = await createToday(w);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [1, 1]);
+
+    assert.deepEqual(await liveQuarters(w, w.a), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.deepEqual(await liveReviewDays(w, w.a), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    assert.deepEqual(await liveQuarters(w, w.bb), [1, 2, 3, 4, 5, 6], 'catch-up quarter stays');
+    assert.equal((await liveReviewDays(w, w.bb)).length, 1, 'catch-up review stays');
+    assert.equal(await n(db, 'select 1 from tasmia_submissions where cycle_id=$1 and quarter_number=10', [otherCycle]), 1);
+    assert.equal(await n(db, 'select 1 from review_confirmations where cycle_id=$1 and legacy_date=$2', [otherCycle, TODAY]), 1);
+
+    const t = await one("select * from voided_daily_records where kind='tasmia' and user_id=$1", [w.a]);
+    assert.equal(t.original_id, original.id);
+    assert.equal(t.program_day, 10);
+    assert.equal(t.cycle_id, w.c);
+    assert.equal(t.assignment_id, r.assignment.id);
+    assert.equal(t.listener_id, w.l);
+    assert.equal(t.listener_name_snapshot, original.listener_name_snapshot);
+    assert.equal(t.member_name_snapshot, original.member_name_snapshot);
+    assert.equal(t.notes, 'ملاحظة 10');
+    assert.deepEqual(t.recorded_at, original.submitted_at);
+    assert.equal(t.voided_by, id.admin);
+    assert.ok(t.voided_at);
+    assert.equal((await one("select program_date::text d, legacy_date::text l from voided_daily_records where kind='tasmia' and user_id=$1", [w.a])).d, TODAY);
+    const v = await one("select *, legacy_date::text ld from voided_daily_records where kind='review' and user_id=$1", [w.a]);
+    assert.equal(v.original_id, originalReview.id);
+    assert.deepEqual([v.program_day, v.start_quarter, v.end_quarter], [10, originalReview.start_quarter, 10]);
+    assert.equal(v.notes, 'ن 10');
+    assert.equal(v.ld, TODAY);
+    assert.equal(v.member_name_snapshot, originalReview.member_name_snapshot);
+    assert.deepEqual(v.recorded_at, originalReview.confirmed_at);
+  });
+});
+
+test('same-day: a quarter recited on an earlier date is not voided; one recorded today is, whatever date the device sent', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 10);
+    // Q10 recited earlier (a later calendar edit moved the program back): legitimate, it stays.
+    await db.query('update tasmia_submissions set legacy_date=$3, submitted_at=$4 where cycle_id=$1 and user_id=$2 and quarter_number=10', [w.c, w.a, addDays(TODAY, -2), addDays(TODAY, -2) + 'T12:00:00+03:00']);
+    await recite(w, w.bb, 1, 10);
+    // A device clock one day ahead: recorded today although it carries tomorrow's date.
+    await db.query('update tasmia_submissions set legacy_date=$3 where cycle_id=$1 and user_id=$2 and quarter_number=10', [w.c, w.bb, addDays(TODAY, 1)]);
+    const r = await createToday(w);
+    assert.equal(r.voided_tasmia, 1);
+    assert.equal(await n(db, 'select 1 from tasmia_submissions where user_id=$1 and quarter_number=10', [w.a]), 1, 'earlier recitation protected');
+    assert.equal(await n(db, 'select 1 from tasmia_submissions where user_id=$1 and quarter_number=10', [w.bb]), 0);
+  });
+});
+
+test('same-day G/J/K: the shared code sees no fake debt; both members match; counts do not grow', async () => {
+  await sameDay(async (w) => {
+    const start = addDays(TODAY, -9);
+    await recite(w, w.a, 1, 10);
+    await review(w, w.a, 1, 10);
+    await recite(w, w.bb, 1, 9);
+    await review(w, w.bb, 1, 9);
+    await createToday(w);
+    const today = await Promise.all([statusFromDb(w.c, w.a, TODAY, start), statusFromDb(w.c, w.bb, TODAY, start)]);
+    assert.equal(today[0].info.quarter_of_day, 9);
+    assert.equal(today[0].info.is_distant_review_day, true);
+    for (const s of today) assert.deepEqual([s.delay.missedQuartersCount, s.delay.missedRevisionDaysCount, s.delay.isSeverelyBehind], [0, 0, false]);
+    assert.deepEqual(today[0].delay, today[1].delay);
+    const tomorrow = addDays(TODAY, 1);
+    const next = await Promise.all([statusFromDb(w.c, w.a, tomorrow, start), statusFromDb(w.c, w.bb, tomorrow, start)]);
+    assert.equal(next[0].info.quarter_of_day, 10);
+    for (const s of next) {
+      assert.equal(s.delay.requiredQuarter, 10);
+      assert.deepEqual([s.delay.missedQuartersCount, s.delay.missedRevisionDaysCount, s.delay.isSeverelyBehind], [0, 0, false]);
+    }
+    assert.deepEqual(next[0].delay, next[1].delay);
+  });
+  // A member already behind: quarter 9 becomes today's quarter (not past), and nothing is added.
+  await sameDay(async (w) => {
+    const start = addDays(TODAY, -9);
+    await recite(w, w.a, 1, 6);
+    await review(w, w.a, 1, 6);
+    const before = await statusFromDb(w.c, w.a, TODAY, start);
+    assert.deepEqual([before.delay.missedQuartersCount, before.delay.missedRevisionDaysCount], [3, 3]);
+    await createToday(w);
+    const after = await statusFromDb(w.c, w.a, TODAY, start);
+    assert.deepEqual([after.delay.missedQuartersCount, after.delay.missedRevisionDaysCount, after.delay.isSeverelyBehind], [2, 3, false]);
+  });
+});
+
+test('same-day L: the day stays a normal distant review: completion works; it cannot be edited or deleted', async () => {
+  await sameDay(async (w) => {
+    const r = await createToday(w);
+    await fails(db, 'select public.men_distant_review_save($1, $2, $3, 1, 9, null, $4)', [r.assignment.id, w.b, addDays(TODAY, 2), id.admin], /حلّ موعده/);
+    await fails(db, 'select public.men_distant_review_delete($1, $2)', [r.assignment.id, w.b], /حلّ موعده/);
+    await switchTo(w.a);
+    const done = (await one('select public.men_complete_distant_review($1) r', [r.assignment.id])).r;
+    assert.deepEqual([done.completed_on, done.already_recorded], [TODAY, false]);
+    await switchTo(null);
+  });
+});
+
+test('same-day M: today already a rest or paused day: no cancelled day, nothing voided, no guard, no extra day lost', async () => {
+  const off: ((w: SameDay) => Promise<unknown>)[] = [
+    (w) => db.query('insert into group_rest_days(cycle_id, rest_date) values ($1, $2)', [w.c, TODAY]),
+    (w) => db.query('insert into program_pauses(cycle_id, paused_on) values ($1, $2)', [w.c, addDays(TODAY, -1)]),
+    (w) => db.query('insert into program_pauses(cycle_id, paused_on, resumed_on) values ($1, $2, $3)', [w.c, TODAY, addDays(TODAY, 1)]),
+  ];
+  for (const setOff of off) {
+    await sameDay(async (w) => {
+      await setOff(w);
+      const day = await cycleDay(w.c, TODAY);
+      const next = await cycleDay(w.c, addDays(TODAY, 1));
+      await recite(w, w.a, 1, day - 1);
+      await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,$4)', [w.c, w.a, w.l, day]);
+      await db.query('insert into review_confirmations(cycle_id, user_id, legacy_date) values ($1,$2,$3)', [w.c, w.a, TODAY]);
+      const r = await createToday(w);
+      assert.equal(r.assignment.cancelled_program_day, null);
+      assert.deepEqual([r.voided_tasmia, r.voided_reviews], [0, 0]);
+      assert.equal(await cycleDay(w.c, TODAY), day, 'no extra day cancelled');
+      assert.equal(await cycleDay(w.c, addDays(TODAY, 1)), next);
+      assert.equal(await n(db, 'select 1 from review_confirmations where user_id=$1 and legacy_date=$2', [w.a, TODAY]), 1);
+      // The rule for a non-converted date is unchanged: a review on it is still accepted.
+      await db.query('insert into review_confirmations(cycle_id, user_id, legacy_date) values ($1,$2,$3)', [w.c, w.bb, TODAY]);
+    });
+  }
+});
+
+test('same-day Q: an app opened before the conversion cannot submit the cancelled work; catch-up still works', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 5);
+    await review(w, w.a, 1, 5);
+    await recite(w, w.bb, 1, 9);
+    await createToday(w);
+    const insTasmia = 'insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number, legacy_date) values ($1,$2,$3,$4,$5)';
+    const insReview = 'insert into review_confirmations(cycle_id, user_id, legacy_date) values ($1,$2,$3)';
+    await switchTo(w.bb);
+    await fails(db, insTasmia, [w.c, w.bb, w.l, 10, TODAY], /تحوّل اليوم إلى يوم مراجعة بعيدة/);
+    // A device clock one day ahead would pass the ordered guard (tomorrow's day is 10): refused too.
+    await fails(db, insTasmia, [w.c, w.bb, w.l, 10, addDays(TODAY, 1)], /تحوّل اليوم إلى يوم مراجعة بعيدة/);
+    await fails(db, insReview, [w.c, w.bb, TODAY], /تحوّل اليوم إلى يوم مراجعة بعيدة/);
+    await fails(db, 'insert into review_confirmations(cycle_id, user_id) values ($1,$2)', [w.c, w.bb], /تحوّل اليوم إلى يوم مراجعة بعيدة/);
+    // Catch-up of earlier days is still accepted on the distant-review day.
+    await switchTo(w.a);
+    await db.query(insTasmia, [w.c, w.a, w.l, 6, TODAY]);
+    await db.query(insReview, [w.c, w.a, addDays(TODAY, -3)]);
+    await switchTo(null);
+    assert.deepEqual(await liveQuarters(w, w.a), [1, 2, 3, 4, 5, 6]);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 0);
+  });
+});
+
+test('same-day Q: the guard fires first and holds the cycle lock shared; the conversion takes it exclusively', async () => {
+  for (const t of ['tasmia_submissions', 'review_confirmations']) {
+    const names = ((await db.query('select tgname from pg_trigger where tgrelid=$1::regclass and not tgisinternal order by tgname', ['public.' + t])).rows as any[]).map((r) => r.tgname);
+    assert.equal(names[0], 'men_same_day_distant_review_guard', 'before the guards that read the calendar');
+  }
+  // This cycle's lock, by its key (a bigint advisory key is stored as two 32-bit parts).
+  const modes = async (c: string) =>
+    ((await db.query(
+      `select l.mode from pg_locks l, (select app_private.men_same_day_distant_review_lock_key($1) k) x
+       where l.locktype='advisory' and l.classid::bigint = ((x.k >> 32) & 4294967295) and l.objid::bigint = (x.k & 4294967295)`, [c]
+    )).rows as any[]).map((r) => r.mode);
+  await sameDay(async (w) => {
+    assert.deepEqual(await modes(w.c), []);
+    await db.query('insert into review_confirmations(cycle_id, user_id, legacy_date) values ($1,$2,$3)', [w.c, w.a, TODAY]);
+    assert.deepEqual(await modes(w.c), ['ShareLock'], 'a review holds the lock shared until it commits');
+  });
+  await sameDay(async (w) => {
+    await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,1)', [w.c, w.a, w.l]);
+    assert.deepEqual(await modes(w.c), ['ShareLock'], 'a recitation holds the lock shared until it commits');
+  });
+  await sameDay(async (w) => {
+    await createToday(w);
+    assert.deepEqual(await modes(w.c), ['ExclusiveLock'], 'a conversion holds it exclusively until it commits');
+  });
+});
+
+test('same-day R: on the next active day the same quarter and the review are submitted normally', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 10);
+    await review(w, w.a, 1, 10);
+    await createToday(w);
+    assert.deepEqual(await liveQuarters(w, w.a), [1, 2, 3, 4, 5, 6, 7, 8, 9]);
+    await setProgramDate(addDays(TODAY, 1));
+    await switchTo(w.a);
+    // Quarters are never ahead of the calendar: 11 is refused, 10 is the required one.
+    await fails(db, 'insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,11)', [w.c, w.a, w.l], /الربع رقم \(10\)/);
+    await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,10)', [w.c, w.a, w.l]);
+    await db.query('insert into review_confirmations(cycle_id, user_id) values ($1,$2)', [w.c, w.a]);
+    await switchTo(null);
+    assert.deepEqual((await liveQuarters(w, w.a)).slice(-1), [10]);
+    const rev = await one('select start_quarter, end_quarter from review_confirmations where user_id=$1 and legacy_date=$2', [w.a, addDays(TODAY, 1)]);
+    assert.deepEqual([rev.start_quarter, rev.end_quarter], [3, 10]);
+    assert.equal(await n(db, 'select 1 from voided_daily_records where user_id=$1', [w.a]), 2, 'the archive keeps the voided rows');
+  });
+});
+
+test('same-day: the first program day converted: quarter 1 is voided and refused today, due on the next day', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 1);
+    await review(w, w.a, 1, 1);
+    const r = await createToday(w, 1, 2);
+    assert.equal(r.assignment.cancelled_program_day, 1);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [1, 1]);
+    assert.equal(await cycleDay(w.c, TODAY), 1, 'the calendar clamps at 1');
+    await switchTo(w.a);
+    await fails(db, 'insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,1)', [w.c, w.a, w.l], /تحوّل اليوم/);
+    await switchTo(null);
+    await setProgramDate(addDays(TODAY, 1));
+    await switchTo(w.a);
+    await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,1)', [w.c, w.a, w.l]);
+    await switchTo(null);
+    assert.equal(await cycleDay(w.c, addDays(TODAY, 1)), 1);
+  }, 0);
+});
+
+test('same-day: the last quarter is cancellable; days past it cancel nothing', async () => {
+  await sameDay(async (w) => {
+    assert.equal((await createToday(w)).assignment.cancelled_program_day, 240);
+  }, 239);
+  await sameDay(async (w) => {
+    assert.equal((await createToday(w)).assignment.cancelled_program_day, null);
+  }, 250);
+});
+
+test('same-day: undated paused days: the cancelled day is the calendar\'s; JS agrees with SQL on every date', async () => {
+  const { programDayOfDate, buildSettingsForTest } = await (async () => ({
+    programDayOfDate: (await import('../src/lib/calculations')).programDayOfDate,
+    buildSettingsForTest: (await import('../supabase/functions/_shared/men/menRows.ts')).buildSettings,
+  }))();
+  await sameDay(async (w) => {
+    await db.query('update cycles set legacy_paused_days=3 where id=$1', [w.c]);
+    assert.equal(await cycleDay(w.c, TODAY), 10, 'the 13th active date is program day 10');
+    const shifted = { ...w, day: 10 };
+    await recite(shifted, w.a, 1, 10);
+    await review(shifted, w.a, 10, 10);
+    const r = await createToday(w);
+    assert.equal(r.assignment.cancelled_program_day, 10);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [1, 1], 'the index (13) would have voided nothing');
+    assert.equal(await cycleDay(w.c, TODAY), 9);
+    assert.equal(await cycleDay(w.c, addDays(TODAY, 1)), 10);
+  }, 12);
+
+  // The real migrated cycle, with synthetic days off, on every date.
+  await db.query('begin');
+  try {
+    await closeOpenPause();
+    await addDistant(addDays(TODAY, 4));
+    await db.query("insert into program_pauses(cycle_id,paused_on,resumed_on) values($1,$2,$3)", [cycle, addDays(TODAY, 10), addDays(TODAY, 13)]);
+    await db.query('insert into group_rest_days(cycle_id,rest_date) values($1,$2),($1,$3)', [cycle, addDays(TODAY, 6), addDays(TODAY, 11)]);
+    const cy = await one('select id, batch_id, cycle_number, starts_on::text starts_on, status, total_quarters, review_window, legacy_paused_days, created_at::text from cycles where id=$1', [cycle]);
+    assert.ok(cy.legacy_paused_days > 0, 'the real cycle has undated paused days');
+    const pauses = (await db.query('select paused_on::text paused_on, resumed_on::text resumed_on from program_pauses where cycle_id=$1', [cycle])).rows as any[];
+    const dates = ((await db.query('select review_date::text d from distant_review_assignments where cycle_id=$1', [cycle])).rows as any[]).map((r) => r.d);
+    const rest = ((await db.query('select rest_date::text d from group_rest_days where cycle_id=$1', [cycle])).rows as any[]).map((r, i) => ({ id: String(i), date: r.d, note: '', added_by_admin_id: '', created_at: '' }));
+    const settings = buildSettingsForTest(cy, pauses, null, dates);
+    const rows = (await db.query(
+      `select d::date::text d, case when app_private.men_cycle_day($1, d::date) > app_private.men_cycle_day($1, d::date - 1) then app_private.men_cycle_day($1, d::date) end n
+       from generate_series('2026-09-10'::date, '2027-06-30'::date, interval '1 day') d`, [cycle]
+    )).rows as any[];
+    for (const r of rows) assert.equal(programDayOfDate(settings, rest, r.d), r.n, r.d);
+    assert.ok(rows.some((r) => r.n !== null) && rows.some((r) => r.n === null));
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('same-day: on the real migrated batch only today\'s rows could move: all history stays', async () => {
+  await db.query('begin');
+  try {
+    await closeOpenPause();
+    const before = [(await one('select count(*)::int n from tasmia_submissions')).n, (await one('select count(*)::int n from review_confirmations')).n];
+    const day = await cycleDay(cycle, TODAY);
+    const r = (await one('select public.men_distant_review_create_today($1, $2, 1, 9, null, $3) r', [batch, TODAY, id.admin])).r;
+    assert.equal(r.assignment.cancelled_program_day, day);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [0, 0]);
+    assert.deepEqual([(await one('select count(*)::int n from tasmia_submissions')).n, (await one('select count(*)::int n from review_confirmations')).n], before);
+    assert.equal(await cycleDay(cycle, TODAY), day - 1);
+    assert.equal(await cycleDay(cycle, addDays(TODAY, 1)), day);
+  } finally {
+    await db.query('rollback');
+  }
+});
+
+test('same-day: men_backfill_revisions skips the converted date (no failure, no voided review comes back)', async () => {
+  await sameDay(async (w) => {
+    await review(w, w.a, 10, 10);
+    await createToday(w);
+    await switchTo(id.admin);
+    const created = (await one('select public.men_backfill_revisions($1, $2::date) n', [w.c, TODAY])).n;
+    assert.ok(created > 0, 'earlier dates are still filled');
+    await switchTo(null);
+    assert.equal(await n(db, 'select 1 from review_confirmations where cycle_id=$1 and legacy_date=$2', [w.c, TODAY]), 0);
+    assert.equal(await n(db, 'select 1 from review_confirmations where cycle_id=$1 and legacy_date=$2', [w.c, addDays(TODAY, -1)]), 3);
+    // A day scheduled beforehand behaves as before.
+    await db.query('delete from distant_review_assignments where cycle_id=$1', [w.c]);
+    await db.query('insert into distant_review_assignments(cycle_id, batch_id, review_date, start_quarter, end_quarter) values ($1,$2,$3,1,2)', [w.c, w.b, TODAY]);
+    await switchTo(id.admin);
+    await one('select public.men_backfill_revisions($1, $2::date) n', [w.c, TODAY]);
+    await switchTo(null);
+    assert.equal(await n(db, 'select 1 from review_confirmations where cycle_id=$1 and legacy_date=$2', [w.c, TODAY]), 3);
+  });
+});
+
+test('same-day: a fresh-start member created today at N+1 has no debt and owes exactly N+1 next', async () => {
+  await sameDay(async (w) => {
+    const fresh = await sdMember(w.b, TODAY);
+    await db.query('update batch_memberships set joined_at=now() where user_id=$1', [fresh]);
+    const set = (await one('select public.men_set_fresh_start($1, $2) r', [fresh, w.b])).r;
+    assert.equal(set.start_quarter, 10);
+    await recite(w, fresh, 10, 10);
+    await db.query('insert into review_confirmations(cycle_id, user_id, legacy_date) values ($1,$2,$3)', [w.c, fresh, TODAY]);
+    const r = await createToday(w);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [1, 1]);
+    const today = await statusFromDb(w.c, fresh, TODAY, TODAY, 10);
+    assert.deepEqual([today.delay.missedQuartersCount, today.delay.missedRevisionDaysCount, today.delay.allCompletedUpToToday], [0, 0, true]);
+    await switchTo(fresh);
+    await fails(db, 'insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,10)', [w.c, fresh, w.l], /تحوّل اليوم/);
+    await switchTo(null);
+    const next = await statusFromDb(w.c, fresh, addDays(TODAY, 1), TODAY, 10);
+    assert.deepEqual([next.delay.requiredQuarter, next.delay.missedQuartersCount, next.delay.missedRevisionDaysCount], [10, 0, 0]);
+    await setProgramDate(addDays(TODAY, 1));
+    await switchTo(fresh);
+    await db.query('insert into tasmia_submissions(cycle_id, user_id, listener_id, quarter_number) values ($1,$2,$3,10)', [w.c, fresh, w.l]);
+    await switchTo(null);
+    assert.deepEqual(await liveQuarters(w, fresh), [10]);
+  });
+});
+
+test('same-day S: voided records RLS: own rows, managed batches, nobody writes, anon nothing', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 10);
+    await review(w, w.a, 10, 10);
+    await review(w, w.bb, 10, 10);
+    const r = await createToday(w);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [1, 2]);
+    await switchTo(w.a);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 2, 'his own only');
+    assert.equal(await n(db, 'select 1 from voided_daily_records where user_id<>$1', [w.a]), 0);
+    await fails(db, "insert into voided_daily_records(cycle_id, user_id, kind, original_id, program_day, program_date, recorded_at) values ($1,$2,'review',gen_random_uuid(),1,$3,now())", [w.c, w.a, TODAY], '42501');
+    await fails(db, 'update voided_daily_records set program_day=1', [], '42501');
+    await fails(db, 'delete from voided_daily_records', [], '42501');
+    await switchTo(w.l);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 0, 'the listener does not read it');
+    await switchTo(id.member);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 0, 'a member of another batch');
+    await switchTo(id.admin);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 3, 'master admin');
+    await fails(db, 'delete from voided_daily_records', [], '42501');
+    await switchTo(null);
+    // A batch admin: his managed batch only.
+    await db.query('update profiles set is_master_admin=false where id=$1', [id.admin]);
+    await db.query('select public.set_admin_batches($1, $2::uuid[], $1)', [id.admin, [batch]]);
+    await switchTo(id.admin);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 0, 'another batch');
+    await switchTo(null);
+    await db.query('select public.set_admin_batches($1, $2::uuid[], $1)', [id.admin, [w.b]]);
+    await switchTo(id.admin);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 3, 'his batch');
+    await switchTo(null);
+  });
+  await as(null, (tx) => fails(tx, 'select 1 from public.voided_daily_records', [], '42501'));
+  await as(null, (tx) => fails(tx, 'select public.men_distant_review_create_today($1, $2, 1, 9, null, $3)', [batch, TODAY, id.admin], '42501'));
+});
+
+test('same-day N/O/P: transfer and permanent delete work with the archive; the listener snapshot survives', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 10);
+    await recite(w, w.bb, 1, 10, w.a);
+    await review(w, w.bb, 10, 10);
+    const r = await createToday(w);
+    assert.deepEqual([r.voided_tasmia, r.voided_reviews], [2, 1]);
+
+    // Transfer: the member moves; his archived rows stay with the old cycle, his own history stays his.
+    const other = (await one("select public.create_batch_with_cycle('دفعة النقل', $1::date, null) b", [addDays(TODAY, -3)])).b;
+    await db.query('select public.move_member_batch($1, $2, $3, $4)', [w.bb, other.id, w.b, id.admin]);
+    assert.equal(await n(db, 'select 1 from batch_memberships where user_id=$1 and batch_id=$2', [w.bb, other.id]), 1);
+    assert.equal(await n(db, 'select 1 from voided_daily_records where user_id=$1 and cycle_id=$2', [w.bb, w.c]), 2);
+    await switchTo(w.bb);
+    assert.equal(await n(db, 'select 1 from voided_daily_records'), 2);
+    await switchTo(null);
+
+    // Permanent delete: the deleted member's rows go with him...
+    const delBb = (await one('select public.men_delete_member_completely($1) r', [w.bb])).r;
+    assert.ok(delBb.recitations >= 9);
+    assert.equal(await n(db, 'select 1 from voided_daily_records where user_id=$1', [w.bb]), 0);
+    // ...a listener's deletion only clears the link: the name snapshot stays in the archive.
+    const snapshot = (await one("select listener_name_snapshot s from voided_daily_records where kind='tasmia' and user_id=$1", [w.a])).s;
+    assert.ok(snapshot);
+    await one('select public.men_delete_member_completely($1) r', [w.l]);
+    const left = await one("select listener_id, listener_name_snapshot from voided_daily_records where kind='tasmia' and user_id=$1", [w.a]);
+    assert.deepEqual([left.listener_id, left.listener_name_snapshot], [null, snapshot]);
+    // The archive also outlives its assignment link and the admin who converted.
+    await db.query('delete from distant_review_assignments where id=$1', [r.assignment.id]);
+    assert.equal((await one("select assignment_id a from voided_daily_records where kind='tasmia' and user_id=$1", [w.a])).a, null);
+  });
+});
+
+test('same-day: a peer test sees the voided quarter as not recited (the SQL re-check reads the live table)', async () => {
+  await sameDay(async (w) => {
+    await recite(w, w.a, 1, 10);
+    await recite(w, w.bb, 1, 9);
+    const test = (await one(
+      "select public.peer_test_save(null,$1,'اختبار اليوم',10,10,1,5,3,'recommended','any','published',null,null,$2,'all','{}'::uuid[],true,false) r",
+      [w.c, id.admin]
+    )).r.test;
+    const start = 'select public.peer_test_start_attempt($1, $2, $3, $4::jsonb, 10)';
+    // Before the conversion the range is recited: only the (deliberately empty) question list is refused.
+    await fails(db, start, [test.id, w.a, w.bb, '[]'], /عدد الأسئلة/);
+    await createToday(w);
+    await fails(db, start, [test.id, w.a, w.bb, '[]'], /لم يُتمّ العضو تسميع/);
+    assert.equal(await n(db, 'select 1 from tasmia_submissions where cycle_id=$1 and listener_id=$2 and quarter_number=10', [w.c, w.l]), 0, 'no longer a listening session');
+  });
+});
+
+test('peer tests: an old test stored with the review flag keeps its stored value; new saves store false', async () => {
+  await sameDay(async (w) => {
+    const save = "select public.peer_test_save(null,$1,'قديم',1,8,1,5,3,'recommended','any','hidden',null,null,$2,'all','{}'::uuid[],true,$3) r";
+    const old = (await one(save, [w.c, id.admin, true])).r.test;
+    assert.equal((await one('select require_revision_completed f from peer_tests where id=$1', [old.id])).f, true);
+    assert.ok((await one("select col_description('public.peer_tests'::regclass, a.attnum) d from pg_attribute a where a.attrelid='public.peer_tests'::regclass and a.attname='require_revision_completed'")).d.includes('Deprecated'));
+  });
+});
+
+test('migration 20261106 (same-day distant review) changes no existing row and no program day', async () => {
+  const { createCutoverDb: build } = await import('../migration/cutover/harness.mjs');
+  const fs = await import('node:fs');
+  const { db: fresh }: { db: any } = await (build as any)(BACKUP, { stopBefore: '20261106000100' });
+  try {
+    const tables = ['profiles', 'batches', 'batch_memberships', 'cycles', 'group_rest_days', 'program_pauses', 'tasmia_submissions', 'review_confirmations',
+      'peer_tests', 'peer_test_attempts', 'peer_test_selected_members', 'daily_thoughts', 'distant_review_completions', 'notification_states', 'admin_notification_batch_subscriptions', 'admin_alert_dismissals'];
+    const snapshot = async () => {
+      const out: Record<string, string> = {};
+      for (const t of tables) out[t] = (await fresh.query(`select count(*)::text || ':' || coalesce(md5(string_agg(x::text, '|' order by x::text)), '') h from public.${t} x`)).rows[0].h;
+      const c = (await fresh.query("select id from cycles where status='active'")).rows[0].id;
+      out.days = (await fresh.query("select string_agg(app_private.men_cycle_day($1, d::date)::text, ',' order by d) h from generate_series('2026-09-10'::date, '2027-06-30'::date, interval '1 day') d", [c])).rows[0].h;
+      out.assignments = (await fresh.query('select count(*)::text h from public.distant_review_assignments')).rows[0].h;
+      return out;
+    };
+    const before = await snapshot();
+    await fresh.exec(fs.readFileSync(new URL('../supabase/migrations/20261106000100_men_same_day_distant_review.sql', import.meta.url), 'utf8'));
+    assert.deepEqual(await snapshot(), before);
+    assert.equal((await fresh.query('select count(*)::int n from public.voided_daily_records')).rows[0].n, 0);
+    assert.equal((await fresh.query('select count(*)::int n from public.distant_review_assignments where cancelled_program_day is not null')).rows[0].n, 0);
+  } finally {
+    await fresh.close();
+  }
+});

@@ -10,6 +10,7 @@ import {
   PeerTestAttempt,
   DistantReviewAssignment,
   DistantReviewCompletion,
+  VoidedDailyRecord,
 } from '../types';
 import { isPeerTestLive } from '../lib/peerTests';
 import { PeerTestCard } from './PeerTestCard';
@@ -91,6 +92,8 @@ interface MemberDashboardProps {
   cycleId?: string;
   distantReviews?: DistantReviewAssignment[];
   distantCompletions?: DistantReviewCompletion[];
+  // His normal submissions of a cancelled program day (shown in his history, never counted)
+  voidedRecords?: VoidedDailyRecord[];
   onCompleteDistantReview?: (assignmentId: string) => Promise<string>;
   onRecordRecitation: (payload: {
     quarter_number: number;
@@ -122,6 +125,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
   cycleId,
   distantReviews = [],
   distantCompletions = [],
+  voidedRecords = [],
   onCompleteDistantReview,
   onRecordRecitation,
   onCorrectListener,
@@ -1150,6 +1154,7 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
               peerMembers={peerMembers}
               onCorrectListener={onCorrectListener}
               distantHistory={distantHistory}
+              voidedRecords={voidedRecords}
             />
           </div>
         )}
