@@ -288,11 +288,13 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
 }) => {
   const [notes, setNotes] = useState<string>('');
   const [confirmed, setConfirmed] = useState<boolean>(true);
+  const [errorMsg, setErrorMsg] = useState<string>('');
 
   useEffect(() => {
     if (isOpen) {
       setNotes('');
       setConfirmed(true);
+      setErrorMsg('');
     }
   }, [isOpen]);
 
@@ -313,8 +315,13 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
       ...(notes.trim() ? { notes: notes.trim() } : {}),
       ...(targetDate ? { date: targetDate } : {}),
     };
-    await onSubmit(payload);
-    onClose();
+    setErrorMsg('');
+    try {
+      await onSubmit(payload);
+      onClose();
+    } catch (err: any) {
+      setErrorMsg(err?.message || 'حدث خطأ أثناء تسجيل المراجعة');
+    }
   };
 
   return (
@@ -339,6 +346,13 @@ export const RevisionModal: React.FC<RevisionModalProps> = ({
         </div>
 
         <form onSubmit={handleSubmit} className="p-6 space-y-4 text-sm">
+          {errorMsg && (
+            <div id="revision-modal-error" className="p-3 bg-rose-50 border border-rose-200 rounded-xl text-xs text-rose-700 flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 shrink-0" />
+              <span>{errorMsg}</span>
+            </div>
+          )}
+
           <div className="p-4 bg-emerald-50/70 border border-emerald-200 rounded-xl space-y-2">
             <div className="flex items-center justify-between text-xs text-emerald-900">
               <span>{isMissedDay ? 'الكمية المطلوبة لمراجعة هذا اليوم:' : 'الكمية المطلوبة لمراجعة اليوم:'}</span>

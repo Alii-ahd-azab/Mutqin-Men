@@ -360,8 +360,12 @@ Deno.serve(async (req) => {
      * delete the batch is read from the
      * stored assignment, never from the
      * request. The database function
-     * enforces future-only dates, the 1..240
-     * range and the rest-day conflict.
+     * enforces the 1..240 range and, for
+     * edits and for any other date, future-only
+     * dates. Creating a day for TODAY takes the
+     * same-day function: the day leaves the
+     * calendar and the cancelled program day's
+     * normal submissions stop counting.
      */
     if (
       action ===
@@ -428,6 +432,12 @@ Deno.serve(async (req) => {
           batchId
         );
 
+      const isSameDay =
+        action ===
+          'distant-review-create' &&
+        body.review_date ===
+          programDate();
+
       const rpc =
         action ===
         'distant-review-delete'
@@ -488,6 +498,26 @@ Deno.serve(async (req) => {
                 );
               }
 
+              if (isSameDay) {
+                return admin.rpc(
+                  'men_distant_review_create_today',
+                  {
+                    p_batch_id:
+                      batch.id,
+                    p_review_date:
+                      body.review_date,
+                    p_start_quarter:
+                      start,
+                    p_end_quarter:
+                      end,
+                    p_note:
+                      note || null,
+                    p_actor:
+                      caller.id,
+                  }
+                );
+              }
+
               return admin.rpc(
                 'men_distant_review_save',
                 {
@@ -541,6 +571,23 @@ Deno.serve(async (req) => {
             ? 404
             : 400
         );
+      }
+
+      if (isSameDay) {
+        const voided =
+          (data.voided_tasmia || 0) +
+          (data.voided_reviews || 0);
+
+        return json({
+          success: true,
+          assignment: data.assignment,
+          voided_tasmia: data.voided_tasmia,
+          voided_reviews: data.voided_reviews,
+          message:
+            voided > 0
+              ? `تم تحويل اليوم إلى يوم مراجعة بعيدة، وأُلغي احتساب ${voided} من تسجيلات اليوم ضمن الورد اليومي`
+              : 'تم تحويل اليوم إلى يوم مراجعة بعيدة',
+        });
       }
 
       return json({

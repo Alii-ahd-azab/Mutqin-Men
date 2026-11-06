@@ -77,7 +77,7 @@ async function counts() {
   for (const t of ['profiles', 'batches', 'cycles', 'batch_memberships', 'batch_membership_transfers', 'tasmia_submissions',
     'review_confirmations', 'peer_tests', 'peer_test_attempts', 'peer_test_selected_members', 'personal_tests', 'daily_thoughts',
     'group_rest_days', 'program_pauses', 'distant_review_assignments', 'distant_review_completions',
-    'notification_states', 'admin_notification_batch_subscriptions'])
+    'notification_states', 'admin_notification_batch_subscriptions', 'admin_alert_dismissals', 'voided_daily_records'])
     out[t] = await c(t);
   return out;
 }
@@ -474,7 +474,6 @@ async function main() {
         const sDays = (await service.from('distant_review_assignments').select('review_date').eq('batch_id', S)).data || [];
         record('no recurrence: exactly the two chosen dates exist', sDays.length === 2);
         record('duplicate date refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(1), start_quarter: 1, end_quarter: 2 })).status === 409);
-        record('today refused (future dates only)', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: today, start_quarter: 1, end_quarter: 2 })).status === 400);
         record('past date refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(-1), start_quarter: 1, end_quarter: 2 })).status === 400);
         record('from = to refused (TO is the stopping boundary)', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 9, end_quarter: 9 })).status === 400);
         record('from > to refused', (await dr(h.client, { action: 'distant-review-create', batch_id: S, review_date: plus(3), start_quarter: 13, end_quarter: 12 })).status === 400);
@@ -529,7 +528,7 @@ async function main() {
         const aDistant = mds(A.id, aState.distantReviews.filter((x) => x.cycle_id === smokeCycle.id), aState.distantCompletions, aState.settings, aState.restDays, today, jd(aMe?.batch_joined_at));
         record('member sees today\'s distant review and the missed one as overdue', aDistant.todayAssignment?.id === dt && aDistant.overdue.map((x) => x.id).join() === dy, JSON.stringify({ t: aDistant.todayAssignment?.id, o: aDistant.overdue.map((x) => x.id) }));
 
-        // Peer-test prerequisite: distant-review debt blocks a test that requires completed reviews.
+        // Overdue reviews (normal or distant) never block a candidate, even when a caller still sends the old flag.
         const rt = await invoke(h.client, 'peer-tests', {
           action: 'admin-save', batch_id: S, title: 'SMOKE REVIEW REQ', range_start: 1, range_end: 1, questions_count: 1, lines_per_question: 3,
           test_type: 'recommended', visibility: 'now', audience: 'all', selected_member_ids: [], require_all_quarters_completed: false, require_revision_completed: true,
@@ -537,7 +536,7 @@ async function main() {
         const rtId = rt.data?.test?.id as string | undefined;
         const rc = rtId ? await invoke(a2.client, 'peer-tests', { action: 'candidates', test_id: rtId }) : null;
         const bReasons: string[] = rc?.data?.candidates?.find((c: { id: string }) => c.id === B.id)?.reasons || [];
-        record('peer test requiring reviews: distant-review debt blocks', bReasons.some((r) => /مراجعات بعيدة متأخرة \(1\)/.test(r)) && bReasons.some((r) => /المراجعة البعيدة لليوم/.test(r)) && !bReasons.some((r) => /لم يؤكد مراجعة اليوم بعد/.test(r)), JSON.stringify(bReasons));
+        record('peer test: review debt is not a reason, and the old flag is not stored', !!rc && rc.status === 200 && !bReasons.some((r) => /مراجع/.test(r)) && rt.data?.test?.require_revision_completed === false, JSON.stringify(bReasons));
 
         const ct = await a2.client.rpc('men_complete_distant_review', { p_assignment_id: dt });
         record('member confirms today\'s distant review', !ct.error && ct.data?.completed_on === today && ct.data.already_recorded === false, ct.error?.message);
@@ -558,6 +557,44 @@ async function main() {
         const pastDel = await dr(e.client, { action: 'distant-review-delete', assignment_id: dy });
         record('today\'s and past days are view-only (no edit, no delete)', pastEdit.status === 400 && pastDel.status === 400, `${pastEdit.status} ${pastDel.status}`);
         if (rtId) await invoke(h.client, 'peer-tests', { action: 'admin-status', test_id: rtId, status_action: 'finish' });
+
+        // ---- Today converted into a «المراجعة البعيدة» day (its own temporary batch; program day 10 today) ----
+        const sd = await invoke(e.client, 'admin-actions', { action: 'create-batch', name: SMOKE_BATCH_NAME + ' SD', start_date: plus(-9) });
+        extraBatchIds.push(sd.data?.batch?.id);
+        const SD = sd.data?.batch?.id as string;
+        const sdCycle = (await service.from('cycles').select('id').eq('batch_id', SD).single()).data?.id as string;
+        const V1 = await createSmokeAccount('V1', '000000000051', 'member', SD);
+        const V2 = await createSmokeAccount('V2', '000000000052', 'member', SD);
+        await service.from('batch_memberships').update({ joined_at: plus(-9) + 'T12:00:00+03:00' }).in('user_id', [V1.id, V2.id]);
+        const seed = async (user: string, listener: string, upTo: number) => {
+          for (let q = 1; q <= upTo; q++) {
+            const t = await service.from('tasmia_submissions').insert({ cycle_id: sdCycle, user_id: user, listener_id: listener, quarter_number: q });
+            if (t.error) throw new Error('seed tasmia: ' + t.error.message);
+            if (q < 10) await service.from('tasmia_submissions').update({ legacy_date: plus(q - 10), submitted_at: plus(q - 10) + 'T12:00:00+03:00' }).eq('cycle_id', sdCycle).eq('user_id', user).eq('quarter_number', q);
+            const r = await service.from('review_confirmations').insert({ cycle_id: sdCycle, user_id: user, legacy_date: plus(q - 10) });
+            if (r.error) throw new Error('seed review: ' + r.error.message);
+          }
+        };
+        await seed(V1.id, V2.id, 10); // already submitted today's quarter and review
+        await seed(V2.id, V1.id, 9); // did nothing today
+        const conv = await dr(e.client, { action: 'distant-review-create', batch_id: SD, review_date: today, start_quarter: 1, end_quarter: 9 });
+        record('admin-actions converts today; today\'s normal rows are voided', conv.status === 200 && conv.data?.voided_tasmia === 1 && conv.data?.voided_reviews === 1 && conv.data?.assignment?.cancelled_program_day === 10, JSON.stringify(conv.data).slice(0, 200));
+        const sdState = await loadProgram(service, SD);
+        const sdNow = computeBatchDelays(sdState, today);
+        record('today returns to program day 9; both members are in the same state', sdNow.cycleInfo.quarter_of_day === 9 && !sdNow.activeDates.includes(today) && JSON.stringify(sdNow.delayById.get(V1.id)) === JSON.stringify(sdNow.delayById.get(V2.id)));
+        const sdNext = computeBatchDelays(sdState, plus(1));
+        record('the next day is exactly day 10 and nobody has debt', sdNext.cycleInfo.quarter_of_day === 10 && sdNext.delayById.get(V1.id)?.requiredQuarter === 10 && sdNext.delayById.get(V1.id)?.missedQuartersCount === 0 && sdNext.delayById.get(V2.id)?.missedRevisionDaysCount === 0);
+        const v1 = await signIn(V1);
+        const v2 = await signIn(V2);
+        record('he reads his voided records', ((await v1.client.from('voided_daily_records').select('kind')).data || []).length === 2);
+        record('another member does not', ((await v2.client.from('voided_daily_records').select('kind')).data || []).length === 0);
+        record('anon denied: voided_daily_records', !!(await createClient(url, publishable, { auth: { persistSession: false } }).from('voided_daily_records').select('*')).error);
+        record('an app opened earlier cannot submit the cancelled quarter', !!(await v1.client.from('tasmia_submissions').insert({ cycle_id: sdCycle, user_id: V1.id, listener_id: V2.id, quarter_number: 10, legacy_date: today })).error);
+        record('an app opened earlier cannot submit the cancelled review', !!(await v1.client.from('review_confirmations').insert({ cycle_id: sdCycle, user_id: V1.id, legacy_date: today })).error);
+        const sdDel = await dr(e.client, { action: 'distant-review-delete', assignment_id: conv.data?.assignment?.id });
+        record('the converted day cannot be deleted', sdDel.status === 400, `${sdDel.status}`);
+        const sdDone = await v1.client.rpc('men_complete_distant_review', { p_assignment_id: conv.data?.assignment?.id });
+        record('the distant review of the converted day completes normally', !sdDone.error && sdDone.data?.already_recorded === false, sdDone.error?.message);
       }
     }
 

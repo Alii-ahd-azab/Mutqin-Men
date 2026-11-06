@@ -60,7 +60,6 @@ type FormState = {
   audience: PeerTestAudience;
   selected_member_ids: string[];
   require_all_quarters_completed: boolean;
-  require_revision_completed: boolean;
 };
 
 const EMPTY_FORM: FormState = {
@@ -79,7 +78,6 @@ const EMPTY_FORM: FormState = {
   audience: 'all',
   selected_member_ids: [],
   require_all_quarters_completed: true,
-  require_revision_completed: false,
 };
 
 function toLocalInput(iso: string | null): string {
@@ -138,7 +136,6 @@ function formFromTest(test: PeerTest): FormState {
     audience: test.audience,
     selected_member_ids: test.selected_member_ids,
     require_all_quarters_completed: test.require_all_quarters_completed,
-    require_revision_completed: test.require_revision_completed,
   };
 }
 
@@ -245,7 +242,6 @@ export const AdminPeerTestsTab: React.FC<AdminPeerTestsTabProps> = ({ batch, cyc
         audience: form.audience,
         selected_member_ids: form.audience === 'selected' ? form.selected_member_ids : [],
         require_all_quarters_completed: form.require_all_quarters_completed,
-        require_revision_completed: form.require_revision_completed,
       });
       setForm(null);
       await afterChange(res.message);
@@ -397,7 +393,6 @@ export const AdminPeerTestsTab: React.FC<AdminPeerTestsTabProps> = ({ batch, cyc
                     {PEER_DIFFICULTY_LABELS[test.difficulty]?.label} • اجتازه {passedCount} •{' '}
                     {test.audience === 'selected' ? `أعضاء مختارون (${test.selected_member_ids.length})` : 'كل الأعضاء'}
                     {test.require_all_quarters_completed ? ' • يشترط إتمام النطاق' : ' • يسمح بنطاق جزئي'}
-                    {test.require_revision_completed && ' • يشترط إتمام المراجعة'}
                     {test.visible_until && !finished && ` • ينتهي العرض ${formatDateTime(test.visible_until)}`}
                   </p>
                 </div>
@@ -673,18 +668,9 @@ export const AdminPeerTestsTab: React.FC<AdminPeerTestsTabProps> = ({ batch, cyc
                     </span>
                   </span>
                 </label>
-                <label className="flex items-start gap-2 text-stone-700 cursor-pointer">
-                  <input
-                    type="checkbox"
-                    className="mt-0.5"
-                    checked={form.require_revision_completed}
-                    onChange={(e) => setForm({ ...form, require_revision_completed: e.target.checked })}
-                  />
-                  <span>
-                    <span className="font-bold">إتمام المراجعة</span>
-                    <span className="block text-[11px] text-stone-500">لا أيام مراجعة فائتة، ومراجعة اليوم مؤكَّدة.</span>
-                  </span>
-                </label>
+                <p id="peer-test-revision-note" className="text-[11px] text-stone-500">
+                  لا يمنع تأخر المراجعة الذاتية من دخول الاختبار؛ وقد يمنعه التأخر الشديد في التسميع.
+                </p>
               </div>
 
               <div className="p-3 rounded-xl bg-stone-50 border border-stone-200 space-y-2">

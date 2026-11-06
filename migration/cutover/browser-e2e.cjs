@@ -54,7 +54,7 @@ async function counts() {
     batches: await c("batches"), cycles: await c("cycles"), rest_days: await c("group_rest_days"),
     distant_reviews: await c("distant_review_assignments"), distant_completions: await c("distant_review_completions"),
     notification_states: await c("notification_states"), notification_follows: await c("admin_notification_batch_subscriptions"),
-    alert_dismissals: await c("admin_alert_dismissals"),
+    alert_dismissals: await c("admin_alert_dismissals"), voided_records: await c("voided_daily_records"),
   };
 }
 
@@ -910,6 +910,43 @@ async function counts() {
     await openBell(m2.p);
     record("review debt 3 → 2: the serious warning and the red state are gone; the 2-day warning appears", !(await isRed(m2.p)) && (await m2.p.locator("#notification-revision-overdue").getAttribute("data-tone")) === "strong");
     await m2.c.close();
+
+    // ---- Today turned into a «المراجعة البعيدة» day (S11, program day 10 today) ----
+    // V recited today's quarter and reviewed today; V2 did nothing today.
+    const S11 = await mkBatch("S11", 9);
+    const V = await account("BROWSER V", "000000000035", "member", S11.id);
+    const V2 = await account("BROWSER V2", "000000000036", "member", S11.id);
+    for (const a of [V, V2]) await joinOn(a, 9);
+    await recite(S11, V, V2, range(1, 10));
+    await recite(S11, V2, V, range(1, 9));
+    for (let q = 1; q < 10; q++) await service.from("tasmia_submissions").update({ legacy_date: programDay(10 - q), submitted_at: programDay(10 - q) + "T12:00:00+03:00" }).eq("cycle_id", S11.cycle).eq("quarter_number", q);
+    await reviewOn(S11, V, range(0, 9));
+    await reviewOn(S11, V2, range(1, 9));
+    const xs = await openAs(X);
+    await xs.p.getByText("لوحة تحكم المشرف").first().waitFor({ timeout: 30000 });
+    await xs.p.locator("#batch-selector").selectOption(S11.id);
+    await xs.p.getByText(/الإعدادات والإيقاف/).first().click();
+    await xs.p.locator("#distant-review-section").waitFor({ timeout: 20000 });
+    await xs.p.waitForTimeout(1500);
+    await xs.p.locator("#distant-review-date").fill(programDay(0));
+    await xs.p.locator("#distant-from-button").click();
+    await xs.p.locator("#distant-from-option-1").click();
+    await xs.p.locator("#distant-to-button").click();
+    await xs.p.locator("#distant-to-search").fill("9");
+    await xs.p.locator("#distant-to-option-9").click();
+    await xs.p.locator("#add-distant-review-btn").click();
+    await xs.p.locator("#distant-today-dialog").waitFor({ timeout: 10000 });
+    record("same-day: the dialog warns and counts today's submissions", /يوجد 2 من تسجيلات اليوم/.test(await xs.p.locator("#distant-today-dialog").textContent()) && /لا يمكن تعديل هذا اليوم أو حذفه بعد الحفظ/.test(await xs.p.locator("#distant-today-dialog").textContent()));
+    await xs.p.locator("#distant-today-yes").click();
+    await xs.p.locator(`#distant-review-item-${programDay(0)}`).waitFor({ timeout: 30000 });
+    const sVoided = (await service.from("voided_daily_records").select("kind, program_day, user_id").eq("cycle_id", S11.cycle)).data || [];
+    record("same-day: today's quarter and review moved to the archive", sVoided.length === 2 && sVoided.every((v) => v.user_id === V.id && v.program_day === 10), JSON.stringify(sVoided));
+    await xs.c.close();
+    const vm = await openAs(V);
+    await vm.p.locator("#day-overview").waitFor({ timeout: 30000 });
+    await vm.p.locator("#voided-tasmia-10").waitFor({ timeout: 30000 });
+    record("same-day: the member is back on day 9; the history keeps quarter 10 with the label", /اليوم رقم 9/.test(await vm.p.locator("#day-overview").textContent()) && /أُلغي احتسابه: تحوّل اليوم إلى مراجعة بعيدة/.test(await vm.p.locator("#voided-tasmia-10").textContent()));
+    await vm.c.close();
 
     // ---- «المراجعة البعيدة» during a global pause (S9) and on a rest day (S10) ----
     // S9 started on d6 and is paused since d2 (open pause): program day stays 4. A distant review is

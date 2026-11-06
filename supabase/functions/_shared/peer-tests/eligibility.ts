@@ -1,11 +1,12 @@
 // Peer-testing rules (pure functions, unit-tested; used by the Edge Function).
 // Same model as Mutqin for Sisters. Two rules are deliberately SEPARATE:
 //   * a CANDIDATE must have recited the range, must not have passed already,
-//     and must not be «مؤهل للإقصاء»;
+//     and must not be severely behind in Tasmi'a. Overdue self-revision never
+//     prevents him from taking a test;
 //   * an EXAMINER only needs to be an active member of the test's batch (and,
 //     Men rule, of its audience) — being «مؤهل للإقصاء» does NOT prevent him
 //     from examining others.
-// Men additions: selected-audience tests, the two prerequisite flags, and a
+// Men additions: selected-audience tests, the full-range prerequisite, and a
 // partially recited range (effective_range_end / covers_full_range) when the
 // test does not require the whole range.
 
@@ -28,7 +29,6 @@ export interface PeerTestRow {
   // Men
   audience: 'all' | 'selected';
   require_all_quarters_completed: boolean;
-  require_revision_completed: boolean;
 }
 
 /** A passed attempt of the candidate (only what the range rule needs). */
@@ -58,18 +58,14 @@ export function isInAudience(
   return test.audience !== 'selected' || selectedMemberIds.has(memberId);
 }
 
-/** Arabic reason when a member is «مؤهل للإقصاء», otherwise null. */
-export function eliminationReason(delay: MemberDelayStatus): string | null {
-  if (delay.isSeverelyBehindRecitation && delay.isSeverelyBehindRevision) {
-    return `مؤهل للإقصاء بسبب تأخر التسميع (${delay.missedQuartersCount} أرباع فائتة) والمراجعة (${delay.missedRevisionDaysCount} أيام فائتة)`;
-  }
-  if (delay.isSeverelyBehindRecitation) {
-    return `مؤهل للإقصاء بسبب تأخر التسميع (${delay.missedQuartersCount} أرباع فائتة)`;
-  }
-  if (delay.isSeverelyBehindRevision) {
-    return `مؤهل للإقصاء بسبب تأخر المراجعة (${delay.missedRevisionDaysCount} أيام فائتة)`;
-  }
-  return null;
+/**
+ * Arabic reason when overdue Tasmi'a blocks a candidate, otherwise null.
+ * Overdue self-revision is deliberately not a reason.
+ */
+export function tasmiaDelayReason(delay: MemberDelayStatus): string | null {
+  return delay.isSeverelyBehindRecitation
+    ? `مؤهل للإقصاء بسبب تأخر التسميع (${delay.missedQuartersCount} أرباع فائتة)`
+    : null;
 }
 
 /** Quarters of the range [start..end] the member has not recited yet. */
@@ -97,19 +93,11 @@ export interface CandidateEvaluation {
 }
 
 export function evaluateCandidate(input: {
-  test: Pick<PeerTestRow, 'range_start' | 'range_end' | 'require_all_quarters_completed' | 'require_revision_completed'>;
+  test: Pick<PeerTestRow, 'range_start' | 'range_end' | 'require_all_quarters_completed'>;
   completedQuarters: Set<number>;
   passedAttempts: PassedAttempt[];
   delay: MemberDelayStatus;
   inAudience: boolean;
-  /** Needed only when the test requires the revision to be complete. */
-  revision?: {
-    missedRevisionDaysCount: number;
-    hasReviewedToday: boolean;
-    // «المراجعة البعيدة»: missed scheduled days, and today's one when not yet confirmed
-    distantOverdueCount?: number;
-    distantTodayPending?: boolean;
-  };
 }): CandidateEvaluation {
   const { test } = input;
   const reasons: string[] = [];
@@ -158,24 +146,9 @@ export function evaluateCandidate(input: {
     }
   }
 
-  if (test.require_revision_completed && input.revision) {
-    if (input.revision.missedRevisionDaysCount > 0) {
-      reasons.push(`توجد أيام مراجعة فائتة (${input.revision.missedRevisionDaysCount} يوم)`);
-    }
-    if (!input.revision.hasReviewedToday) {
-      reasons.push('لم يؤكد مراجعة اليوم بعد');
-    }
-    if (input.revision.distantOverdueCount) {
-      reasons.push(`توجد مراجعات بعيدة متأخرة (${input.revision.distantOverdueCount})`);
-    }
-    if (input.revision.distantTodayPending) {
-      reasons.push('لم يؤكد المراجعة البعيدة لليوم بعد');
-    }
-  }
-
-  const elimination = eliminationReason(input.delay);
-  if (elimination) {
-    reasons.push(elimination);
+  const tasmiaDelay = tasmiaDelayReason(input.delay);
+  if (tasmiaDelay) {
+    reasons.push(tasmiaDelay);
   }
 
   return {

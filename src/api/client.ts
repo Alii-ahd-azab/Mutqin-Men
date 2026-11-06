@@ -15,6 +15,7 @@ import {
   PeerTestSaveInput,
   DistantReviewAssignment,
   DistantReviewInput,
+  VoidedDailyRecord,
 } from '../types';
 import { supabase } from '../lib/supabase';
 import { programDate, calculateCycleInfo } from '../lib/calculations';
@@ -27,7 +28,7 @@ import { buildBatchAdminAlerts, type BatchAdminAlert, type NotificationState } f
 export type NotificationSnapshot = { key: string; kind: string; tone: string; urgent: boolean; title: string; body: string };
 // An admin's dismissed member alert (admin_alert_dismissals; private to that admin).
 export type AlertDismissal = { batchId: string; memberId: string; memberName: string; summary: string; dismissedAt: string };
-import { mapUser, PROFILE_COLUMNS, type ProfileRow } from '../../supabase/functions/_shared/men/menRows.ts';
+import { mapUser, mapVoidedRecords, PROFILE_COLUMNS, VOIDED_COLUMNS, type ProfileRow, type VoidedRow } from '../../supabase/functions/_shared/men/menRows.ts';
 
 /*
  * Mutqin for Men data layer — same architecture and API as Mutqin for Sisters:
@@ -178,10 +179,32 @@ async function getPeerTestAttemptsForTests(testIds: string[]): Promise<PeerTestA
   );
 }
 
+/*
+ * Normal submissions of a program day cancelled the same day by a «المراجعة البعيدة» day. Only shown
+ * in the member's history, so a failure here never fails the dashboard.
+ */
+async function getVoidedRecords(cycleId: string): Promise<VoidedDailyRecord[]> {
+  try {
+    const rows = await fetchAllRows<VoidedRow>((from, to) =>
+      supabase
+        .from('voided_daily_records')
+        .select(VOIDED_COLUMNS)
+        .eq('cycle_id', cycleId)
+        .order('voided_at', { ascending: false })
+        .order('id', { ascending: true })
+        .range(from, to)
+    );
+    return mapVoidedRecords(rows);
+  } catch (error) {
+    console.warn('voided records', error);
+    return [];
+  }
+}
+
 /* Loads everything one batch's dashboard needs, in a single pass. */
 async function buildBootstrap(batchId: string): Promise<BatchBootstrap> {
   const [batch, program] = await Promise.all([getBatch(batchId), loadProgram(supabase, batchId)]);
-  const peerTests = await getPeerTestsForCycle(program.cycle.id);
+  const [peerTests, voidedRecords] = await Promise.all([getPeerTestsForCycle(program.cycle.id), getVoidedRecords(program.cycle.id)]);
   const peerTestAttempts = await getPeerTestAttemptsForTests(peerTests.map((t) => t.id));
   const todayStr = today();
   // Newest first, as the dashboards list them.
@@ -202,6 +225,7 @@ async function buildBootstrap(batchId: string): Promise<BatchBootstrap> {
     todayRevisions: revisions.filter((r) => r.date === todayStr),
     distantReviews: program.distantReviews,
     distantCompletions: program.distantCompletions,
+    voidedRecords,
     peerTests,
     peerTestAttempts,
   };

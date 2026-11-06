@@ -11,15 +11,10 @@ import {
   errorResponse,
   type ActiveCaller,
 } from '../_shared/auth.ts';
-import {
-  calculateMemberDistantReviewStatus,
-  calculateMemberRevisionStatus,
-  joinedOnDateFromTimestamp,
-} from '../_shared/logic/calculations.ts';
 import type { MemberDelayStatus } from '../_shared/logic/memberDelayStatus.ts';
 import { computeBatchDelays } from '../_shared/men/batchDelays.ts';
 import { programDate } from '../_shared/logic/programDate.ts';
-import { loadProgram, type ProgramState } from '../_shared/men/menData.ts';
+import { loadProgram } from '../_shared/men/menData.ts';
 import { estimateRangeLines, generateTestQuestions, type TestQuestion } from '../_shared/peer-tests/testGenerator.ts';
 import {
   evaluateCandidate,
@@ -37,7 +32,7 @@ import {
  * Same flow as Mutqin for Sisters: members (examiners) and admins call this function; it re-checks
  * every rule server-side and writes only through service-role-only database functions; pass/fail
  * is computed in SQL from the stored questions. Men rules on top: selected-audience tests, the
- * two prerequisite flags, partial ranges, and the Men program calendar (date-based reviews,
+ * full-range prerequisite, partial ranges, and the Men program calendar (date-based reviews,
  * undated paused days) through the shared Men program loader.
  */
 
@@ -56,15 +51,10 @@ type BatchMember = {
 };
 
 type BatchProgress = {
-  today: string;
   quarterOfDay: number;
-  // Today is a «المراجعة البعيدة» day: no normal review is due today.
-  isDistantReviewDay: boolean;
   members: BatchMember[];
   delayById: Map<string, MemberDelayStatus>;
   completedById: Map<string, Set<number>>;
-  program: ProgramState;
-  activeDates: string[];
 };
 
 function toInt(value: unknown): number | null {
@@ -115,7 +105,7 @@ async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promis
   if (program.cycle.id !== cycle.id) throw new HttpError('دورة هذا الاختبار غير نشطة', 400);
 
   const today = programDate();
-  const { cycleInfo, activeDates, members: active, delayById } = computeBatchDelays(program, today);
+  const { cycleInfo, members: active, delayById } = computeBatchDelays(program, today);
 
   const members: BatchMember[] = active.map((u) => ({ id: u.id, name: u.name, startQuarter: u.batch_start_quarter ?? 1 }));
   const completedById = new Map<string, Set<number>>(members.map((m) => [m.id, new Set<number>()]));
@@ -124,14 +114,10 @@ async function loadBatchProgress(admin: SupabaseClient, cycle: CycleRow): Promis
   }
 
   return {
-    today,
     quarterOfDay: cycleInfo.quarter_of_day,
-    isDistantReviewDay: cycleInfo.is_distant_review_day,
     members,
     delayById,
     completedById,
-    program,
-    activeDates,
   };
 }
 
@@ -158,44 +144,12 @@ function evaluate(
   passed: Map<string, PassedAttempt[]>,
   memberId: string
 ): CandidateEvaluation {
-  /*
-   * Revision prerequisite: normal reviews AND «المراجعة البعيدة» (a required review obligation).
-   * On a distant-review day there is no normal review today; that day's distant review replaces it.
-   */
-  let revision: Parameters<typeof evaluateCandidate>[0]['revision'];
-  if (test.require_revision_completed) {
-    const joinedOn = joinedOnDateFromTimestamp(progress.program.users.find((u) => u.id === memberId)?.batch_joined_at);
-    const normal = calculateMemberRevisionStatus(
-      memberId,
-      progress.activeDates,
-      progress.program.revisionLogs,
-      progress.today,
-      joinedOn,
-      progress.program.settings
-    );
-    const distant = calculateMemberDistantReviewStatus(
-      memberId,
-      progress.program.distantReviews.filter((a) => a.cycle_id === progress.program.cycle.id),
-      progress.program.distantCompletions,
-      progress.program.settings,
-      progress.program.restDays,
-      progress.today,
-      joinedOn
-    );
-    revision = {
-      missedRevisionDaysCount: normal.missedRevisionDaysCount,
-      hasReviewedToday: progress.isDistantReviewDay || normal.hasReviewedToday,
-      distantOverdueCount: distant.overdueCount,
-      distantTodayPending: !!distant.todayAssignment && !distant.hasCompletedToday,
-    };
-  }
   return evaluateCandidate({
     test,
     completedQuarters: progress.completedById.get(memberId) || new Set(),
     passedAttempts: passed.get(memberId) || [],
     delay: progress.delayById.get(memberId)!,
     inAudience: isInAudience(test, selected, memberId),
-    revision,
   });
 }
 
@@ -354,7 +308,7 @@ Deno.serve(async (req) => {
       const { test, cycle, selected } = await loadTest(admin, attempt.test_id);
       requireExaminer(caller, cycle, test, selected);
 
-      // The candidate's elimination status is re-checked at submission time.
+      // The candidate's Tasmi'a delay is re-checked at submission time.
       const progress = await loadBatchProgress(admin, cycle);
       if (!progress.delayById.has(attempt.candidate_id)) {
         throw new HttpError('العضو المُختبَر لم يعد عضوًا نشطًا في هذه الدفعة', 400);
@@ -498,7 +452,8 @@ Deno.serve(async (req) => {
         p_audience: audience,
         p_selected_member_ids: audience === 'selected' ? selectedIds : [],
         p_require_all_quarters_completed: body.require_all_quarters_completed === true,
-        p_require_revision_completed: body.require_revision_completed === true,
+        // «إتمام المراجعة» is no longer a condition. Finished tests cannot be saved, so they keep their stored value.
+        p_require_revision_completed: false,
       });
       if (error || !data) rpcError(error || { message: 'no result' }, 'admin-save');
 

@@ -356,6 +356,16 @@ export function getActiveCycleDates(
   return activeDates;
 }
 
+/**
+ * The program day a date adds to the calendar, or null when it adds none: a rest day, a paused date,
+ * a «المراجعة البعيدة» day, before the start, the clamped first days (undated paused days) or past
+ * the last quarter. Same rule as public.men_distant_review_create_today.
+ */
+export function programDayOfDate(settings: GroupSettings, restDays: RestDay[], dateStr: string): number | null {
+  const day = calculateCycleInfo(settings, restDays, dateStr).cycle_day;
+  return day > calculateCycleInfo(settings, restDays, addDays(dateStr, -1)).cycle_day ? day : null;
+}
+
 export interface MemberRevisionStatus {
   isTodayProgramDay: boolean;
   missedRevisionDaysCount: number; // Only past days that actually elapsed before today

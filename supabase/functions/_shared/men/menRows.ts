@@ -6,6 +6,7 @@ import type {
   RevisionLog,
   DistantReviewAssignment,
   DistantReviewCompletion,
+  VoidedDailyRecord,
 } from '../logic/programTypes.ts';
 
 /**
@@ -23,6 +24,7 @@ export const REST_DAY_COLUMNS = 'id, firestore_id, cycle_id, rest_date, reason, 
 export const DISTANT_REVIEW_COLUMNS =
   'id, batch_id, cycle_id, review_date, start_quarter, end_quarter, note, created_by_name_snapshot, created_at, updated_at';
 export const DISTANT_COMPLETION_COLUMNS = 'id, assignment_id, user_id, completed_at, completed_on, member_name_snapshot';
+export const VOIDED_COLUMNS = 'id, kind, user_id, program_day, program_date, start_quarter, end_quarter, listener_name_snapshot, notes, voided_at';
 export type ProfileRow = {
   id: string;
   full_name: string;
@@ -98,6 +100,18 @@ export type DistantCompletionRow = {
   completed_at: string;
   completed_on: string;
   member_name_snapshot: string | null;
+};
+export type VoidedRow = {
+  id: string;
+  kind: 'tasmia' | 'review';
+  user_id: string;
+  program_day: number;
+  program_date: string;
+  start_quarter: number | null;
+  end_quarter: number | null;
+  listener_name_snapshot: string | null;
+  notes: string | null;
+  voided_at: string;
 };
 /** Timestamps exactly like JavaScript toISOString() (what the legacy data stored). */
 export function iso(value: string | null | undefined): string | undefined {
@@ -252,6 +266,24 @@ export function mapDistantReviews(rows: DistantReviewRow[]): DistantReviewAssign
           updated_at: iso(r.updated_at),
         }) as DistantReviewAssignment
     );
+}
+
+export function mapVoidedRecords(rows: VoidedRow[]): VoidedDailyRecord[] {
+  return rows.map(
+    (r) =>
+      compact({
+        id: r.id,
+        kind: r.kind,
+        member_id: r.user_id,
+        program_day: r.program_day,
+        date: r.program_date,
+        review_start_quarter: r.start_quarter,
+        review_end_quarter: r.end_quarter,
+        listener_name: r.listener_name_snapshot,
+        notes: r.notes,
+        voided_at: iso(r.voided_at),
+      }) as VoidedDailyRecord
+  );
 }
 
 export function mapDistantCompletions(rows: DistantCompletionRow[], names: Map<string, string>): DistantReviewCompletion[] {
