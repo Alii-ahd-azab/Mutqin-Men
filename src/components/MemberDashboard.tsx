@@ -12,7 +12,7 @@ import {
   DistantReviewCompletion,
   VoidedDailyRecord,
 } from '../types';
-import { isPeerTestLive } from '../lib/peerTests';
+import { isBlockedByMandatoryTest, isPeerTestLive } from '../lib/peerTests';
 import { PeerTestCard } from './PeerTestCard';
 import { PeerTestingModal } from './PeerTestingModal';
 import { getQuarterInfo, getQuarterBounds, getRangeBounds } from '../data/quranData';
@@ -247,14 +247,21 @@ export const MemberDashboard: React.FC<MemberDashboardProps> = ({
       )
   );
   const nextQuarterToRecite = isAllCaughtUp ? cycleInfo.quarter_of_day + 1 : userQuarterStatus.requiredQuarter;
+  // The member only reads tests of his audience (RLS). Same shared rule as the database guard and
+  // the peer-tests Edge Function (a partial-range pass does not lift the checkpoint).
   const isBlockedByPeerTest = Boolean(
     liveTest &&
-      liveTest.test_type === 'mandatory' &&
-      !hasPassedLiveTest &&
       cycleInfo.has_started &&
-      nextQuarterToRecite > liveTest.range_end &&
-      // tests of quarters before a fresh start never apply (same as the database rule)
-      liveTest.range_start >= startQuarter
+      isBlockedByMandatoryTest({
+        test: liveTest,
+        inAudience: true,
+        hasPassedFull: peerTestAttempts.some(
+          (a) =>
+            a.test_id === liveTest.id && a.candidate_id === currentUser.id && a.status === 'passed' && a.covers_full_range !== false
+        ),
+        nextQuarter: nextQuarterToRecite,
+        startQuarter,
+      })
   );
   const currentRecitationQuarterNum = isAllCaughtUp
     ? cycleInfo.quarter_of_day

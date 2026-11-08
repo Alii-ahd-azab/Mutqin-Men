@@ -44,6 +44,7 @@ const PHONES = {
   A: '000000000001', B: '000000000002', D: '000000000003', E: '000000000004', F: '000000000005', F2: '000000000006',
   C: '000000000007', H: '000000000008', memberCreate: '000000000009', memberAdminCreate: '000000000010',
   hOther: '000000000011', G: '000000000014', hFreshOther: '000000000015', V1: '000000000051', V2: '000000000052',
+  P1: '000000000061', P2: '000000000062', P3: '000000000063',
 } as const;
 const SMOKE_PHONES: string[] = Object.values(PHONES);
 const SMOKE_EMAILS = new Set(SMOKE_PHONES.map((p) => phoneToAuthEmail(p).toLowerCase()));
@@ -708,6 +709,63 @@ async function main() {
           const sdDone = await v1.client.rpc('men_complete_distant_review', safe({ p_assignment_id: conv.data?.assignment?.id }));
           record('the distant review of the converted day completes normally', !sdDone.error && sdDone.data?.already_recorded === false, sdDone.error?.message);
         }
+      }
+    }
+
+    // ---- Mandatory checkpoint vs candidate rule (temporary batch PT, program day 10) ----
+    // P1 finished the test range (1..4) long ago and the checkpoint stops him at quarter 5, so quarters
+    // 5..9 are «owed» only because he may not recite them: he must still be able to take the test.
+    // P3 genuinely has not finished the range. P2 examines.
+    const ptb = await createTempBatch(' PT', plus(-9));
+    const ptCycle = ptb.cycle?.id as string | undefined;
+    record('master admin creates the temporary checkpoint batch', !!ptb.id && !!ptCycle, `${ptb.r.status} ${ptb.r.message ?? ''}`);
+    if (ptb.id && ptCycle) {
+      const P1 = await createSmokeAccount('P1', PHONES.P1, 'member', ptb.id);
+      const P2 = await createSmokeAccount('P2', PHONES.P2, 'member', ptb.id);
+      const P3 = await createSmokeAccount('P3', PHONES.P3, 'member', ptb.id);
+      await service.from('batch_memberships').update({ joined_at: plus(-9) + 'T12:00:00+03:00' }).in('user_id', safe([P1.id, P2.id, P3.id]));
+      const seedQ = async (user: string, listener: string, upTo: number) => {
+        for (let q = 1; q <= upTo; q++) {
+          const t = await service.from('tasmia_submissions').insert(safe({ cycle_id: ptCycle, user_id: user, listener_id: listener, quarter_number: q }));
+          if (t.error) throw new Error('seed checkpoint tasmia: ' + t.error.message);
+          await service.from('tasmia_submissions').update({ legacy_date: plus(q - 10), submitted_at: plus(q - 10) + 'T12:00:00+03:00' }).eq('cycle_id', ptCycle).eq('user_id', user).eq('quarter_number', q);
+        }
+      };
+      await seedQ(P1.id, P2.id, 4);
+      await seedQ(P3.id, P2.id, 2);
+      const ptSave = await invoke(e.client, 'peer-tests', {
+        action: 'admin-save', batch_id: ptb.id, title: 'SMOKE CHECKPOINT', range_start: 1, range_end: 4, questions_count: 1, lines_per_question: 3,
+        max_errors: 2, test_type: 'mandatory', difficulty: 'any', visibility: 'now', visible_from: null, visible_until: null,
+        audience: 'all', selected_member_ids: [], require_all_quarters_completed: true, require_revision_completed: false,
+      });
+      const ptTest = ptSave.data?.test?.id as string | undefined;
+      record('master admin publishes a mandatory test of quarters 1..4 (whole range required)', ptSave.status === 200 && !!ptTest && ptSave.data.test.status === 'published', `${ptSave.status} ${ptSave.message ?? ''}`);
+      const ptNow = computeBatchDelays(await loadProgram(service, ptb.id), today);
+      const p1Delay = ptNow.delayById.get(P1.id);
+      record('P1 reproduces the production state: range done, next quarter 5, 4+ quarters after the range counted as owed',
+        ptNow.cycleInfo.quarter_of_day === 10 && p1Delay?.requiredQuarter === 5 && (p1Delay?.missedQuartersCount ?? 0) >= 4 && p1Delay?.isSeverelyBehindRecitation === true,
+        JSON.stringify({ day: ptNow.cycleInfo.quarter_of_day, next: p1Delay?.requiredQuarter, owed: p1Delay?.missedQuartersCount }));
+      const p1s = await signIn(P1);
+      const p2s = await signIn(P2);
+      const stopped = await p1s.client.from('tasmia_submissions').insert(safe({ cycle_id: ptCycle, user_id: P1.id, listener_id: P2.id, quarter_number: 5 }));
+      record('the checkpoint stops him at quarter 5 until he passes', !!stopped.error && /الاختبار الإلزامي/.test(stopped.error.message), stopped.error?.message);
+      if (ptTest) {
+        const list = await invoke(p2s.client, 'peer-tests', { action: 'candidates', test_id: ptTest });
+        const c1 = list.data?.candidates?.find((x: { id: string }) => x.id === P1.id);
+        const c3 = list.data?.candidates?.find((x: { id: string }) => x.id === P3.id);
+        record('deployed peer-tests: the member stopped by the checkpoint is eligible (no range or exclusion reason)', list.status === 200 && c1?.is_eligible === true && c1.reasons.length === 0 && c1.missing_quarters === 0, JSON.stringify(c1?.reasons ?? list.message));
+        record('a member who has not finished the range stays ineligible with the exact range reason', c3?.is_eligible === false && c3.reasons.includes('لم يُتمّ تسميع جميع أرباع النطاق بعد (متبقٍ 2 من الأرباع 1 إلى 4)'), JSON.stringify(c3?.reasons));
+        const st3 = await invoke(p2s.client, 'peer-tests', { action: 'start', test_id: ptTest, candidate_id: P3.id });
+        record('starting the test with the incomplete member is refused', st3.status === 400, `${st3.status} ${st3.message ?? ''}`);
+        const st1 = await invoke(p2s.client, 'peer-tests', { action: 'start', test_id: ptTest, candidate_id: P1.id });
+        record('the examiner starts the test with the checkpoint-stopped member', st1.status === 200 && !!st1.data?.attempt_id && st1.data.covers_full_range === true, `${st1.status} ${st1.message ?? ''}`);
+        if (st1.data?.attempt_id) {
+          const sb = await invoke(p2s.client, 'peer-tests', { action: 'submit', attempt_id: st1.data.attempt_id, errors: [0], question_notes: [''] });
+          record('he passes', sb.status === 200 && sb.data?.attempt?.status === 'passed', `${sb.status} ${sb.message ?? ''}`);
+          const q5 = await p1s.client.from('tasmia_submissions').insert(safe({ cycle_id: ptCycle, user_id: P1.id, listener_id: P2.id, quarter_number: 5 }));
+          record("after passing, his Tasmi'a resumes at quarter 5", !q5.error, q5.error?.message);
+        }
+        await invoke(e.client, 'peer-tests', { action: 'admin-status', test_id: ptTest, status_action: 'finish' });
       }
     }
 

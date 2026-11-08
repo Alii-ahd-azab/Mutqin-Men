@@ -10,7 +10,7 @@
 // partially recited range (effective_range_end / covers_full_range) when the
 // test does not require the whole range.
 
-import type { MemberDelayStatus } from '../logic/memberDelayStatus.ts';
+import { SEVERE_DELAY_THRESHOLD, type MemberDelayStatus } from '../logic/memberDelayStatus.ts';
 
 export interface PeerTestRow {
   id: string;
@@ -92,12 +92,48 @@ export interface CandidateEvaluation {
   covers_full_range: boolean;
 }
 
+/** A pass that lifts the mandatory checkpoint (legacy passes without range data count as full). */
+export const passesFullRange = (attempts: PassedAttempt[]): boolean => attempts.some((a) => a.covers_full_range !== false);
+
+/**
+ * THE mandatory-test checkpoint, same rule as the Tasmi'a guard in the database: a live mandatory
+ * test of his audience that he has not passed (full range) stops him from reciting the quarters
+ * after its range. Tests of quarters before a fresh start never apply. Used by the candidate rule,
+ * the admin impact count and the member dashboard.
+ */
+export function isBlockedByMandatoryTest(input: {
+  test: Pick<PeerTestRow, 'test_type' | 'status' | 'visible_from' | 'visible_until' | 'range_start' | 'range_end'>;
+  inAudience: boolean;
+  hasPassedFull: boolean;
+  /** The quarter he would recite next (nextTasmiaQuarter). */
+  nextQuarter: number;
+  /** Fresh start: first quarter owed (default 1). */
+  startQuarter?: number;
+  now?: Date;
+}): boolean {
+  return (
+    input.test.test_type === 'mandatory' &&
+    isPeerTestLive(input.test, input.now) &&
+    input.inAudience &&
+    !input.hasPassedFull &&
+    input.nextQuarter > input.test.range_end &&
+    input.test.range_start >= (input.startQuarter ?? 1)
+  );
+}
+
 export function evaluateCandidate(input: {
-  test: Pick<PeerTestRow, 'range_start' | 'range_end' | 'require_all_quarters_completed'>;
+  test: Pick<PeerTestRow, 'range_start' | 'range_end' | 'require_all_quarters_completed'> &
+    Partial<Pick<PeerTestRow, 'test_type' | 'status' | 'visible_from' | 'visible_until'>>;
   completedQuarters: Set<number>;
   passedAttempts: PassedAttempt[];
   delay: MemberDelayStatus;
   inAudience: boolean;
+  /**
+   * The batch's quarter of the day and his starting quarter. With them, quarters that THIS test's
+   * checkpoint forbids him to recite are not counted against him: finishing the range must lead to
+   * the test, never to an exclusion that keeps him out of it. (The Edge Function always passes it.)
+   */
+  gate?: { quarterOfDay: number; startQuarter?: number; now?: Date };
 }): CandidateEvaluation {
   const { test } = input;
   const reasons: string[] = [];
@@ -107,7 +143,7 @@ export function evaluateCandidate(input: {
   }
 
   // Legacy attempts without range data count as covering the full range.
-  const hasPassedFull = input.passedAttempts.some((a) => a.covers_full_range !== false);
+  const hasPassedFull = passesFullRange(input.passedAttempts);
   if (hasPassedFull) {
     reasons.push('سبق له اجتياز هذا الاختبار');
   }
@@ -146,7 +182,29 @@ export function evaluateCandidate(input: {
     }
   }
 
-  const tasmiaDelay = tasmiaDelayReason(input.delay);
+  // While this test's checkpoint blocks him, every quarter he still owes lies after the range
+  // (that is what triggers the checkpoint), so none of them is his delay: only overdue quarters he
+  // was allowed to recite (up to the range end) count.
+  const gated =
+    !!input.gate &&
+    !!input.test.test_type &&
+    !!input.test.status &&
+    isBlockedByMandatoryTest({
+      test: input.test as Pick<PeerTestRow, 'test_type' | 'status' | 'visible_from' | 'visible_until' | 'range_start' | 'range_end'>,
+      inAudience: input.inAudience,
+      hasPassedFull,
+      nextQuarter: nextTasmiaQuarter(input.delay, input.gate.quarterOfDay),
+      startQuarter: input.gate.startQuarter,
+      now: input.gate.now,
+    });
+  const ownOverdue = gated
+    ? input.delay.missedQuarters.filter((q) => q <= test.range_end && q < input.gate!.quarterOfDay).length
+    : input.delay.missedQuartersCount;
+  const tasmiaDelay = gated
+    ? ownOverdue >= SEVERE_DELAY_THRESHOLD
+      ? `مؤهل للإقصاء بسبب تأخر التسميع (${ownOverdue} أرباع فائتة)`
+      : null
+    : tasmiaDelayReason(input.delay);
   if (tasmiaDelay) {
     reasons.push(tasmiaDelay);
   }

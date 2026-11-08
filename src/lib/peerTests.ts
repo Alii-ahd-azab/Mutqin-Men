@@ -1,6 +1,7 @@
 // Peer-testing rules shared with the peer-tests Edge Function, so the UI
 // shows exactly what the server enforces.
 export {
+  isBlockedByMandatoryTest,
   isPeerTestLive,
   nextTasmiaQuarter,
   isInAudience,

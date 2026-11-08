@@ -18,9 +18,11 @@ import { loadProgram } from '../_shared/men/menData.ts';
 import { estimateRangeLines, generateTestQuestions, type TestQuestion } from '../_shared/peer-tests/testGenerator.ts';
 import {
   evaluateCandidate,
+  isBlockedByMandatoryTest,
   isInAudience,
   isPeerTestLive,
   nextTasmiaQuarter,
+  passesFullRange,
   type CandidateEvaluation,
   type PassedAttempt,
   type PeerTestRow,
@@ -150,6 +152,10 @@ function evaluate(
     passedAttempts: passed.get(memberId) || [],
     delay: progress.delayById.get(memberId)!,
     inAudience: isInAudience(test, selected, memberId),
+    gate: {
+      quarterOfDay: progress.quarterOfDay,
+      startQuarter: progress.members.find((m) => m.id === memberId)?.startQuarter ?? 1,
+    },
   });
 }
 
@@ -497,13 +503,16 @@ Deno.serve(async (req) => {
       const { test, cycle, selected } = await loadTest(admin, body.test_id);
       requireManager(caller, cycle.batch_id);
       const [progress, passed] = await Promise.all([loadBatchProgress(admin, cycle), passedAttemptsByCandidate(admin, test.id)]);
-      const blocked = progress.members.filter(
-        (m) =>
-          isInAudience(test, selected, m.id) &&
-          !(passed.get(m.id) || []).some((a) => a.covers_full_range !== false) &&
-          // tests of quarters before a fresh start never apply (same as the database rule)
-          test.range_start >= m.startQuarter &&
-          nextTasmiaQuarter(progress.delayById.get(m.id)!, progress.quarterOfDay) > test.range_end
+      // Same checkpoint rule as the database guard; "live" is judged as if the test were shown now.
+      const asLive = { ...test, status: 'published' as const, visible_from: null, visible_until: null };
+      const blocked = progress.members.filter((m) =>
+        isBlockedByMandatoryTest({
+          test: { ...asLive, test_type: 'mandatory' },
+          inAudience: isInAudience(test, selected, m.id),
+          hasPassedFull: passesFullRange(passed.get(m.id) || []),
+          nextQuarter: nextTasmiaQuarter(progress.delayById.get(m.id)!, progress.quarterOfDay),
+          startQuarter: m.startQuarter,
+        })
       );
       return json({
         blocked_count: test.test_type === 'mandatory' ? blocked.length : 0,
